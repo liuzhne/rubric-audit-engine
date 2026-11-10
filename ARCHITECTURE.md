@@ -593,6 +593,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
 | 2026-11-09 | AI 起草互斥组规整（分期 A） | 新增 `deduction_caps.effective_mutex_groups`（编译写细则时规整互斥组，投影不变）、`atomic_recompile._sync_ai_mutex_groups` 与 `scripts/inspect_ai_draft_rules.py`；发布校验与执行器不变，见 2026-11-09 一节 |
+| 2026-11-10 | AI 起草互斥组规整（#94 复审） | 编译与追加同步共用 `deduction_caps.ai_mutex_identity` 识别 AI 行；追加同步按行的位置编号取编译结果；核对脚本加 `invalid_mutex_groups` |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 只改工作流与仓库安全设置；应用模块、调用链与数据流不变 |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 只改仓库规则集与发布规则；流水线、模块与调用链不变 |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | §6 改为“部署成功后线上是 main 的最新提交，实际版本以 `/opt/pgs/RELEASE` 为准”；分片收集规则与 pytest 默认一致；调用链不变 |
@@ -1912,12 +1913,13 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
       同一次起草的同一组只剩 1 行会编译 → 空
       同名已被投影里更早的组或人工行占用 → 原名-指纹前 8 位
 追加（导入的评分标准）atomic_recompile.prepare_atomic_ai_append
-  _sync_ai_mutex_groups：已有 AI 细则改取本次规整结果，只改机器能产生的值（原名、空、原名加后缀）
+  _sync_ai_mutex_groups：已有 AI 细则改取这一行本次编译出的值，只改机器能产生的值（原名、空、原名加后缀）
+      行上写的 rule_code 只用来找已有细则，编译结果按行的位置编号找
 发布 executable_validator：不变，人工写错的单条互斥组照旧报 mutex_definition_invalid
 ```
 
-- 识别 AI 行的口径与 `normalize_ai_group_caps` 相同（来源 `ai_*`、生成指纹、草稿行键）。`normalize_ai_group_caps` 读的是投影，不用改。
-- 只读核对脚本 `scripts/inspect_ai_draft_rules.py`：单档互斥组、撞名互斥组、引用区间原文却只有一档的 AI 组；只输出编号和数字。
+- 识别 AI 行用 `deduction_caps.ai_mutex_identity`（来源 `ai_*`、互斥组、生成指纹、草稿行键），编译与追加同步共用；它是 `normalize_ai_group_caps` 口径里的归属部分，后者另外核验组上限的条件。`normalize_ai_group_caps` 读的是投影，不用改。
+- 只读核对脚本 `scripts/inspect_ai_draft_rules.py`：单档互斥组、跨评分项或含分档的互斥组、撞名互斥组、引用区间原文却只有一档的 AI 组；只输出编号和数字。
 - `compiler.point_range`（区间后必须紧跟“分”）先只供核对脚本使用；`analyze_rule_input` 仍用旧的 `_POINT_RANGE_RE`，分期 B 再切换。
 - 前端 `RubricsView.structuralMessages` 加上 `mutex_definition_invalid` 的中文说明。
 

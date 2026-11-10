@@ -8,7 +8,9 @@
 看评分标准当前的执行草稿（已发布的看发布版本），列出三类情况：
 
 - ``lone_mutex_groups``：互斥组里参与评分的细则只有 1 条。``blocks_publish`` 与发布校验
-  （``mutex_definition_invalid``）的判断一致：只因排除剩 1 条的不挡。
+  （``mutex_definition_invalid``）对单条组的判断一致：只因排除剩 1 条的不挡。
+- ``invalid_mutex_groups``：2 条以上、却跨评分项或含分档细则的组，发布校验同样报
+  ``mutex_definition_invalid``。和上一类合起来覆盖这个错误码的全部情况。
 - ``collided_mutex_groups``：同一个互斥组里的细则来自不止一次起草，不同问题被并成一组。
 - ``single_tier_ranges``：AI 起草的一组细则引用了写成分值区间的原文，却只有一档。只核对
   引用评分项“扣分规则”段落的来源，原文单元（``docx:…``）记在 ``unchecked_refs``。
@@ -44,6 +46,8 @@ def _projection_rows(criteria):
 
 
 def inspect_rubric(db, rubric_id: str) -> dict:
+    """核对一份评分标准当前执行草稿的 AI 细则，返回只含编号和数字的报告。"""
+
     from backend.app.services.rubric_import.compiler import point_range
     from backend.app.services.rubrics.draft_graph import read_execution_draft
     from backend.app.services.rubrics.rule_status import participates
@@ -75,15 +79,26 @@ def inspect_rubric(db, rubric_id: str) -> dict:
         if rule.mutex_group:
             by_mutex[rule.mutex_group].append(rule)
 
-    lone, collided = [], []
+    lone, invalid, collided = [], [], []
     for name, members in sorted(by_mutex.items()):
         codes = [rule.rule_code for rule in members]
+        criterion_ids = {rule.criterion_id for rule in members}
+        has_band = any(rule.direction == "band" for rule in members)
         if len(members) < 2:
             lone.append({
                 "criterion_code": criterion_code.get(members[0].criterion_id),
                 "mutex_group": name,
                 "rule_codes": codes,
                 "blocks_publish": name not in excluded_groups,
+            })
+        elif len(criterion_ids) != 1 or has_band:
+            # 发布校验另外两种 mutex_definition_invalid：同组跨评分项、组里有分档细则。
+            invalid.append({
+                "criterion_codes": sorted(str(criterion_code.get(item)) for item in criterion_ids),
+                "mutex_group": name,
+                "rule_codes": codes,
+                "cross_criterion": len(criterion_ids) != 1,
+                "has_band": has_band,
             })
         fingerprints = {
             rows[rule.rule_code][1].get("generation_fingerprint")
@@ -140,16 +155,20 @@ def inspect_rubric(db, rubric_id: str) -> dict:
             "ai_rules": sum(1 for rule in active if rule.ai_origin),
             "lone_mutex_groups": len(lone),
             "lone_blocking_publish": sum(1 for item in lone if item["blocks_publish"]),
+            "invalid_mutex_groups": len(invalid),
             "collided_mutex_groups": len(collided),
             "single_tier_ranges": len(single_tier),
         },
         "lone_mutex_groups": lone,
+        "invalid_mutex_groups": invalid,
         "collided_mutex_groups": collided,
         "single_tier_ranges": single_tier,
     }
 
 
 def inspect_all(db) -> dict:
+    """逐份核对全部评分标准，只列出有问题的那些，并给出各类问题的总数。"""
+
     ids = db.scalars(select(models.Rubric.id).order_by(models.Rubric.created_at, models.Rubric.id)).all()
     reports = [inspect_rubric(db, rubric_id) for rubric_id in ids]
     totals = defaultdict(int)
@@ -159,11 +178,13 @@ def inspect_all(db) -> dict:
     # 只列出有问题的评分标准，避免把整库的编号都打出来。
     flagged = [report for report in reports if any(
         (report.get("counts") or {}).get(key)
-        for key in ("lone_mutex_groups", "collided_mutex_groups", "single_tier_ranges"))]
+        for key in ("lone_mutex_groups", "invalid_mutex_groups", "collided_mutex_groups", "single_tier_ranges"))]
     return {"rubrics": len(reports), "totals": dict(totals), "flagged": flagged}
 
 
 def main(argv=None) -> int:
+    """命令行入口：打印 JSON 报告；找不到评分标准时返回 1，用法不对返回 2。"""
+
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 1:
         print("用法：python -m backend.app.scripts.inspect_ai_draft_rules <rubric_id>|--all", file=sys.stderr)

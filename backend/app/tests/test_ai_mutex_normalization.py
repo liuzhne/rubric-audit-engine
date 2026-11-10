@@ -233,3 +233,59 @@ def test_inspect_script_reports_lone_collided_and_single_tier_ranges(client):
 def test_inspect_script_unknown_rubric(client):
     with client.session_factory() as session:
         assert script.inspect_rubric(session, "missing")["found"] is False
+
+
+# --- 复审补充：追加同步的口径 ----------------------------------------------
+
+def test_append_path_leaves_non_ai_row_with_fingerprint_alone(client):
+    # 带指纹和行键、来源却不是 ai_ 的行，编译时不规整，追加同步也不能把老师清空的互斥组改回去。
+    rubric = _import_rubric(client, name="合成追加非 AI 行")["rubric"]
+    typed = {**_method_rows(1)[0], "source": "user_text"}
+    _recompile(client, rubric["id"], [typed], "v2")
+
+    def clear(view):
+        return [{"id": rule["id"], "content_token": rule["content_token"],
+                 "changes": {"mutex_group": None} if rule["rule_code"] == "manual.method.deduct.1.v1" else {}}
+                for rule in view["rules"]]
+
+    cleared = _recompile(client, rubric["id"], [typed], "v3", atomic_rules=clear)
+    assert _mutex_by_code(cleared)["manual.method.deduct.1.v1"] is None
+    extra = ai_row(1, mutex="METHOD-B02-G01-SEVERITY", group="METHOD-B02-G01", criterion="METHOD",
+                   fingerprint=FP_B)
+    after = _recompile(client, rubric["id"], [typed, extra], "v4")
+    assert _mutex_by_code(after)["manual.method.deduct.1.v1"] is None
+
+
+def test_append_path_matches_reordered_rows_by_their_own_compiled_rule(client):
+    # 行上写了已有细则的编号、位置却变了：同步要取这一行自己编译出的互斥组，不能取同位置别的行的。
+    rubric = _import_rubric(client, name="合成追加重排")["rubric"]
+    first = ai_row(0, mutex="METHOD-A", group="A", criterion="METHOD")
+    second = ai_row(0, mutex="METHOD-B", group="B", criterion="METHOD", fingerprint=FP_B)
+    before = _recompile(client, rubric["id"], [first, second], "v2")
+    assert _mutex_by_code(before)["manual.method.deduct.1.v1"] is None
+    assert _mutex_by_code(before)["manual.method.deduct.2.v1"] is None
+    reordered = [{**second, "rule_code": "manual.method.deduct.2.v1"},
+                 {**first, "rule_code": "manual.method.deduct.1.v1"},
+                 ai_row(1, mutex="METHOD-B", group="B", criterion="METHOD", fingerprint=FP_B)]
+    after = _mutex_by_code(_recompile(client, rubric["id"], reordered, "v3"))
+    assert after["manual.method.deduct.1.v1"] is None
+    assert after["manual.method.deduct.2.v1"] == after["manual.method.deduct.3.v1"] == "METHOD-B"
+
+
+def test_inspect_script_reports_band_and_cross_criterion_groups(client):
+    from backend.app.db import models
+
+    rubric = _create(client, [manual_row("G3", points=1), manual_row("G3", points=2)], name="合成核对分档组")
+    with client.session_factory() as session:
+        rule = session.query(models.AtomicRule).filter(
+            models.AtomicRule.rule_code == "manual.t04.deduct.1.v1",
+            models.AtomicRule.criterion_id == session.get(models.Rubric, rubric["id"]).criteria[0].id).one()
+        rule.direction = "band"
+        session.commit()
+        report = script.inspect_rubric(session, rubric["id"])
+        session.rollback()
+    assert report["counts"]["invalid_mutex_groups"] == 1
+    assert report["invalid_mutex_groups"] == [{
+        "criterion_codes": ["T04"], "mutex_group": "G3", "cross_criterion": False, "has_band": True,
+        "rule_codes": ["manual.t04.deduct.1.v1", "manual.t04.deduct.2.v1"]}]
+    assert report["lone_mutex_groups"] == []

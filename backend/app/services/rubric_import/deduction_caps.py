@@ -4,11 +4,13 @@ from decimal import Decimal, InvalidOperation
 from collections.abc import Mapping
 
 
-def _ai_mutex_identity(row):
+def ai_mutex_identity(row):
     """(互斥组, 生成指纹)；不是可归属的 AI 起草行时返回 None。
 
-    识别口径与 ``normalize_ai_group_caps`` 相同：来源以 ``ai_`` 开头，并带生成指纹和
-    草稿行键。人工、Excel 行和缺少归属信息的旧行都不规整。
+    只认归属：来源以 ``ai_`` 开头，并带互斥组、生成指纹和草稿行键。这是
+    ``normalize_ai_group_caps`` 识别口径里的归属部分；它另外要求的单次命中、无分档、
+    指纹与 ``generation_metadata`` 一致等条件是为了核验组上限，规整互斥组用不上。
+    人工、Excel 行和缺少归属信息的旧行都不规整。编译与追加路径的同步共用这一个判断。
     """
     if not isinstance(row, Mapping):
         return None
@@ -37,13 +39,13 @@ def effective_mutex_groups(rows, *, compiled):
     result = [row.get("mutex_group") if isinstance(row, Mapping) else None for row in rows]
     groups = {}
     for index, row in enumerate(rows):
-        identity = _ai_mutex_identity(row)
+        identity = ai_mutex_identity(row)
         if identity is not None and index in compiled:
             groups.setdefault(identity, []).append(index)
     # 人工行的名字不管出现在前还是在后都先占住：它们不规整，AI 组只能让开。
     taken = {
         result[index] for index, row in enumerate(rows)
-        if index in compiled and result[index] and _ai_mutex_identity(row) is None
+        if index in compiled and result[index] and ai_mutex_identity(row) is None
     }
     for (mutex, fingerprint), members in groups.items():  # 按首次出现的顺序
         if len(members) < 2:

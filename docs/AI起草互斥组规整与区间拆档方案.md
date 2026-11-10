@@ -90,11 +90,11 @@ A 解决发布阻断，B 才真正提高准确性。两部分各开一个 PR，A
 
 ### 4.1 A：编译时规整互斥组
 
-**(1) 规整函数。** 在 `rubric_import/deduction_caps.py` 新增 `effective_mutex_groups(rows, *, maximum)`，返回与 `rows` 等长的列表，表示每行真正写进 AtomicRule 的互斥组。规则如下：
+**(1) 规整函数。** 在 `rubric_import/deduction_caps.py` 新增 `effective_mutex_groups(rows, *, compiled)`（`compiled` 是会编译成细则的行下标），返回与 `rows` 等长的列表，表示每行真正写进 AtomicRule 的互斥组。规则如下：
 
-- 只处理 AI 行：`source` 以 `ai_` 开头，并带 `generation_fingerprint` 和 `draft_row_key`。识别口径与 `normalize_ai_group_caps` 相同。
+- 只处理 AI 行：`source` 以 `ai_` 开头，并带互斥组、`generation_fingerprint` 和 `draft_row_key`（`deduction_caps.ai_mutex_identity`）。这是 `normalize_ai_group_caps` 识别口径里的归属部分；它另外要求的单次命中、无分档等条件只为核验组上限，规整互斥组用不上。
 - 分组键是“互斥组 + 生成指纹”。
-- 只数真正会编译的行：`confirmed is True`，且分值在 (0, 满分] 内。跳过条件与 `pipeline.py:1322-1339` 相同。
+- 只数真正会编译的行：AI 行须 `confirmed is True`，且分值在 (0, 满分] 内。编译循环与规整共用 `pipeline._compiled_deduction_points` 这一个判断。
 
 | 情况 | 写进 AtomicRule 的互斥组 |
 |---|---|
@@ -109,7 +109,7 @@ A 解决发布阻断，B 才真正提高准确性。两部分各开一个 PR，A
 
 这样分次应用也能恢复互斥：先“仅应用此条”写入 1 档，这条细则的互斥组为空；之后再应用同组其余各档，三行同组同指纹，会重新编成一个互斥组。
 
-**(2) 追加路径。** 从 Excel 导入的评分标准走 `prepare_atomic_ai_append`（`atomic_recompile.py:106`）：已有细则从库里原样取出，只追加新编号的细则。这里补一步：已有细则的编号如果属于本次投影里的 AI 行，它的互斥组改取本次编译结果里同编号细则的值。
+**(2) 追加路径。** 从 Excel 导入的评分标准走 `prepare_atomic_ai_append`（`atomic_recompile.py:106`）：已有细则从库里原样取出，只追加新编号的细则。这里补一步：已有细则的编号如果属于本次投影里的 AI 行（口径同上，来源不是 `ai_` 的行不同步），它的互斥组改取这一行本次编译出的细则的值。行上写了 `rule_code` 时，用它找库里的已有细则，用行的位置编号找本次编译结果，行被重排也不会取到别的行的互斥组。
 
 - 效果：这份标准下次应用任意一条 AI 建议时，存量的单档阻断和撞组会一起修好。
 - 代价：互斥组变了的细则，内容签名也会变（`review_carry.signature` 经 `rule_content` 包含 `mutex_group`），于是回到“待确认”，需要老师重新确认。这是有意的，因为判分语义确实变了。
@@ -121,7 +121,7 @@ A 解决发布阻断，B 才真正提高准确性。两部分各开一个 PR，A
 
 > 互斥组里参与评分的细则不足 2 条（或跨评分项、含分档细则）。请在原子规则编辑里清空这条细则的互斥组，或补齐同组的其他档。
 
-**(4) 只读核对脚本。** 新增 `backend/app/scripts/inspect_ai_draft_rules.py`，写法照 `inspect_score_item.py`。按评分标准和评分项输出三类情况：单档互斥组、撞名互斥组（同名多指纹）、引用区间原文却只有一档的 AI 组。只输出编号和数字，不输出规则正文。
+**(4) 只读核对脚本。** 新增 `backend/app/scripts/inspect_ai_draft_rules.py`，写法照 `inspect_score_item.py`。按评分标准和评分项输出四类情况：单档互斥组、跨评分项或含分档细则的互斥组（这两类合起来覆盖 `mutex_definition_invalid` 的全部情况）、撞名互斥组（同名多指纹）、引用区间原文却只有一档的 AI 组。只输出编号和数字，不输出规则正文。
 
 ### 4.2 B：分值来自原文
 

@@ -1314,6 +1314,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
 | 2026-11-09 | AI 起草互斥组规整（分期 A） | 新增排错“发布被 `mutex_definition_invalid` 挡住”（报错指向发布校验，真正原因在起草或采用时少了档）与 `inspect_ai_draft_rules` 只读核对命令 |
+| 2026-11-10 | AI 起草互斥组规整（#94 复审） | 核对脚本加 `invalid_mutex_groups`（跨评分项或含分档的组），与单档组合起来覆盖 `mutex_definition_invalid` 的全部情况 |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 3.0 新增“供应链与安全扫描”；新增 `.github/dependabot.yml`；排错补“action 没固定 SHA 的测试失败”与“Dependabot 升级 PR 让任务失败”（不要直接关 PR，改动推到它的分支上） |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 3.0 第 5 条改为 `release-gates-passed` 绿即可合并，说明为何不开 strict 与热修后手动重跑门禁；排错补“发布 PR 显示落后于 main、不要点 Update branch” |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 3.0 补：线上版本看 `/opt/pgs/RELEASE`、从预演起冻结 develop 并核对提交、守卫不是安全边界；部署文档标明 Vercel 链路已停用，上线清单改核对 Lightsail 部署与 `RELEASE`；部署文档标题与开头、§2A、上线清单的线上验证项改为 Lightsail 现状（Vercel 项只在恢复 Vercel 时适用），9.4 标题去掉“迁移中”，开头补现状说明（数据在实例上，见 9.4.1），原 Supabase 段标为历史 |
@@ -3196,7 +3197,7 @@ cd frontend/workbench && npx vitest run src/stores/assistant.test.js
   ssh pgs-prod 'docker exec pgs-app-1 python -m backend.app.scripts.inspect_ai_draft_rules --all'
   ```
 
-  `lone_mutex_groups` 是单档互斥组（`blocks_publish` 与发布校验的判断一致：只因排除剩 1 条的不挡）；`collided_mutex_groups` 是同名多次起草，不挡发布，但会把不同问题并成一组判分；`single_tier_ranges` 是引用了区间原文却只有一档的 AI 组，由分期 B 处理。`--all` 只列出有问题的评分标准。
+  `lone_mutex_groups` 是单档互斥组（`blocks_publish` 与发布校验对单条组的判断一致：只因排除剩 1 条的不挡）；`invalid_mutex_groups` 是 2 条以上、却跨评分项或含分档细则的组，发布校验同样报这个错（两类合起来覆盖 `mutex_definition_invalid` 的全部情况，这一类多半是人工写的，不归 AI 规整管）；`collided_mutex_groups` 是同名多次起草，不挡发布，但会把不同问题并成一组判分；`single_tier_ranges` 是引用了区间原文却只有一档的 AI 组，由分期 B 处理。`--all` 只列出有问题的评分标准。
 
 测试：`.venv/bin/python -m pytest -q backend/app/tests/test_ai_mutex_normalization.py`
 

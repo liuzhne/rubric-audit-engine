@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy import select
 
 from backend.app.db import models
-from backend.app.services.rubric_import.deduction_caps import normalize_ai_group_caps
+from backend.app.services.rubric_import.deduction_caps import ai_mutex_identity, normalize_ai_group_caps
 from backend.app.services.rubric_import import pipeline
 from backend.app.services.rubrics import lifecycle
 from backend.app.services.rubrics.review_workspace import content_token, number_text
@@ -116,18 +116,20 @@ def _sync_ai_mutex_groups(existing, generated, command):
     drafted = {}
     for criterion in command["rubric"]["criteria"]:
         for index, row in enumerate(criterion.get("deduction_rules_structured") or [], 1):
-            if isinstance(row, dict) and row.get("generation_fingerprint") and row.get("draft_row_key"):
-                code = row.get("rule_code") or f"manual.{criterion['code'].lower()}.deduct.{index}.v1"
-                drafted[code] = row
+            # 只认编译时会规整的行：带指纹和行键、来源却不是 ai_ 的行编译时原样保留，
+            # 这里也不能把老师清空的互斥组改回去。
+            if ai_mutex_identity(row) is None:
+                continue
+            # 编译总按位置编号；行上写了编号时，它指的是库里已有的那条细则。
+            compiled_code = f"manual.{criterion['code'].lower()}.deduct.{index}.v1"
+            drafted[row.get("rule_code") or compiled_code] = (row, compiled_code)
     for value in existing:
-        code = value["rule_code"]
-        row = drafted.get(code)
-        original = row.get("mutex_group") if row is not None else None
-        if not original or code not in generated_by_code:
+        row, compiled_code = drafted.get(value["rule_code"], (None, None))
+        if row is None or compiled_code not in generated_by_code:
             continue
-        fingerprint = str(row.get("generation_fingerprint"))
+        original, fingerprint = ai_mutex_identity(row)
         if value.get("mutex_group") in {None, "", original, f"{original}-{fingerprint[:8]}"}:
-            value["mutex_group"] = generated_by_code[code].get("mutex_group")
+            value["mutex_group"] = generated_by_code[compiled_code].get("mutex_group")
 
 
 def prepare_atomic_ai_append(session, version, command):
