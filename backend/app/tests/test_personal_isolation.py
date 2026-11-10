@@ -139,6 +139,11 @@ def test_a_teacher_sees_only_their_own_tasks_and_everything_under_them(client, m
     assert client.post("/api/batches/%s/start" % hers.batch).status_code == 404
     assert client.post("/api/papers/%s/score" % hers.paper).status_code == 404
     assert client.post("/api/v2/manual-review-tasks/%s/claim" % hers.review, json={"version": 1}).status_code == 404
+    assert client.post("/api/v2/manual-review-tasks/%s/release" % hers.review, json={"version": 1}).status_code == 404
+    assert client.post("/api/v2/manual-review-tasks/%s/resolve" % hers.review, json={
+        "version": 1, "final_score": 1, "reason": "steal",
+        "evidence": [{"evidence_unit_id": "u1", "quote": "x"}],
+    }).status_code == 404
 
     # 自己的照常可见。
     assert client.get("/api/batches/%s/summary" % his.batch).status_code == 200
