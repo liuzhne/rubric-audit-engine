@@ -103,6 +103,33 @@ def prepare_atomic_recompile(session, version, command, edits):
     return pipeline.PreparedRubricGraph.from_mapping(graph)
 
 
+def _sync_ai_mutex_groups(existing, generated, command):
+    """已有的 AI 细则改取本次编译规整后的互斥组（方案 §4.1(2)）。
+
+    追加路径从库里原样取已有细则，只追加新编号；不同步的话，先“仅应用此条”写入的
+    单档细则在其余档追加后仍游离在组外，存量的单档阻断和撞组也永远修不好。
+
+    只改机器能产生的值：起草原名、空、原名加指纹后缀。老师在原子规则编辑里改成别的
+    名字的保持不动。改了的细则内容签名会变，回到待确认——判分语义确实变了。
+    """
+    generated_by_code = {rule["rule_code"]: rule for rule in generated}
+    drafted = {}
+    for criterion in command["rubric"]["criteria"]:
+        for index, row in enumerate(criterion.get("deduction_rules_structured") or [], 1):
+            if isinstance(row, dict) and row.get("generation_fingerprint") and row.get("draft_row_key"):
+                code = row.get("rule_code") or f"manual.{criterion['code'].lower()}.deduct.{index}.v1"
+                drafted[code] = row
+    for value in existing:
+        code = value["rule_code"]
+        row = drafted.get(code)
+        original = row.get("mutex_group") if row is not None else None
+        if not original or code not in generated_by_code:
+            continue
+        fingerprint = str(row.get("generation_fingerprint"))
+        if value.get("mutex_group") in {None, "", original, f"{original}-{fingerprint[:8]}"}:
+            value["mutex_group"] = generated_by_code[code].get("mutex_group")
+
+
 def prepare_atomic_ai_append(session, version, command):
     """Append explicitly fingerprinted suggestions without replacing imported rules."""
     rules = session.scalars(select(models.AtomicRule).where(models.AtomicRule.rubric_version_id == version.id)).all()
@@ -118,6 +145,7 @@ def prepare_atomic_ai_append(session, version, command):
     additions = [rule for rule in generated["atomic_rules"] if rule["rule_code"] in eligible - codes]
     if not additions:
         raise ValueError("导入原子规则必须使用完整原子规则编辑，不能由评分项投影重新编译")
+    _sync_ai_mutex_groups(graph["atomic_rules"], generated["atomic_rules"], command)
     graph["atomic_rules"].extend(additions)
     graph["artifacts"].extend(generated["artifacts"])
     graph["source_rules"].extend(generated["source_rules"])

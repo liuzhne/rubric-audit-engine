@@ -27,7 +27,10 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.config import settings
 from backend.app.db import models
-from backend.app.services.rubric_import.deduction_caps import normalize_ai_group_caps
+from backend.app.services.rubric_import.deduction_caps import (
+    effective_mutex_groups,
+    normalize_ai_group_caps,
+)
 from backend.app.services.rubrics.rule_origin import entry_ai_model
 from backend.app.services.rubrics.rule_origin import is_ai_entry
 from backend.app.services.rubric_import.compiler import analyze_rule_input
@@ -202,6 +205,22 @@ def _decimal(value: object, *, default: str = "0") -> Decimal:
         return Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise ValueError(f"invalid decimal value: {value!r}") from exc
+
+
+def _compiled_deduction_points(deduction: object, max_score: object) -> Decimal | None:
+    """这一行结构化扣分会编译成细则时返回分值，否则返回 None。
+
+    编译循环与互斥组规整共用这一个判断：规整只数真正会生成细则的行。
+    """
+
+    if not isinstance(deduction, Mapping):
+        return None
+    if str(deduction.get("source") or "").startswith("ai_") and deduction.get("confirmed") is not True:
+        return None
+    points = _decimal(deduction.get("points") or deduction.get("max_points"))
+    if points <= 0 or points > _decimal(max_score):
+        return None
+    return points
 
 
 def _number_text(value: object) -> str:
@@ -1313,9 +1332,12 @@ def _manual_nodes(payload: Mapping[str, object]):
             )
         elif mode in {"deductive", "deduct"} and projection["deduction_rules_structured"]:
             compiled_count = 0
-            for deduction_index, deduction in enumerate(
-                projection["deduction_rules_structured"], start=1
-            ):
+            structured_rows = projection["deduction_rules_structured"]
+            mutex_groups = effective_mutex_groups(structured_rows, compiled={
+                index for index, deduction in enumerate(structured_rows)
+                if _compiled_deduction_points(deduction, projection["max_score"]) is not None
+            })
+            for deduction_index, deduction in enumerate(structured_rows, start=1):
                 if not isinstance(deduction, Mapping):
                     continue
                 source = str(deduction.get("source") or "")
@@ -1333,10 +1355,8 @@ def _manual_nodes(payload: Mapping[str, object]):
                         }
                     )
                     continue
-                points = _decimal(
-                    deduction.get("points") or deduction.get("max_points")
-                )
-                if points <= 0 or points > _decimal(projection["max_score"]):
+                points = _compiled_deduction_points(deduction, projection["max_score"])
+                if points is None:
                     continue
                 compiled_count += 1
                 judge_type = (
@@ -1389,7 +1409,7 @@ def _manual_nodes(payload: Mapping[str, object]):
                         max_points=points,
                         repeat_policy=deduction.get("repeat_policy") or "once",
                         cap_points=deduction.get("cap_points"),
-                        mutex_group=deduction.get("mutex_group"),
+                        mutex_group=mutex_groups[deduction_index - 1],
                         applies_to=projection["applies_to"],
                         creation_method="manual",
                         source_rule_codes=[code],

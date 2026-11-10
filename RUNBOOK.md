@@ -1313,6 +1313,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-09 | AI 起草互斥组规整（分期 A） | 新增排错“发布被 `mutex_definition_invalid` 挡住”（报错指向发布校验，真正原因在起草或采用时少了档）与 `inspect_ai_draft_rules` 只读核对命令 |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 3.0 新增“供应链与安全扫描”；新增 `.github/dependabot.yml`；排错补“action 没固定 SHA 的测试失败”与“Dependabot 升级 PR 让任务失败”（不要直接关 PR，改动推到它的分支上） |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 3.0 第 5 条改为 `release-gates-passed` 绿即可合并，说明为何不开 strict 与热修后手动重跑门禁；排错补“发布 PR 显示落后于 main、不要点 Update branch” |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 3.0 补：线上版本看 `/opt/pgs/RELEASE`、从预演起冻结 develop 并核对提交、守卫不是安全边界；部署文档标明 Vercel 链路已停用，上线清单改核对 Lightsail 部署与 `RELEASE`；部署文档标题与开头、§2A、上线清单的线上验证项改为 Lightsail 现状（Vercel 项只在恢复 Vercel 时适用），9.4 标题去掉“迁移中”，开头补现状说明（数据在实例上，见 9.4.1），原 Supabase 段标为历史 |
@@ -3177,3 +3178,26 @@ cd frontend/workbench && npx vitest run src/stores/assistant.test.js
   - 真正原因：同一个编号带了不同的文字，只可能是前端出错或有人构造请求。后端按第一次的结果回放，没有新建消息；查前端为什么复用了编号。
 
 维护记录：2026-11-06 · 评分助手：发送去重：新增迁移发布与回滚步骤、回放日志，排错写明同一句话出现两次与文字不一致的真实原因。
+
+### 2026-11-09 评分标准发布被 `mutex_definition_invalid` 挡住
+
+症状：第 3 步或 `/api/rubrics/{id}/review-workspace` 的 `structural_blockers` 里有 `mutex_definition_invalid`，`field_path` 为 `/atomic_rules/<细则编号>/mutex_group`。2026-11-09 之前页面显示的是英文 “mutex group '…' must have 2+ non-band rules in one criterion”。
+
+- 报错指向：发布校验认为互斥组定义写错了（同组参与评分的细则不足 2 条、跨评分项，或含分档细则）。
+- 真正原因：几乎都是 AI 起草的组只剩 1 档——模型只写了一档、预览里取消了同组其他档，或点了“仅应用此条”。这类组名形如 `T04-B03-G01-SEVERITY`（评分项、批次、组序号）。分期 A 上线后，新编译的草稿不再出现这种情况；存量草稿在下次应用任意 AI 建议时修好，也可以手工处理。
+- 手工处理：在第 2 步的原子规则编辑里清空这条细则的互斥组再保存，它会回到待确认；或者补齐同组的其他档。组名不以 `-SEVERITY` 结尾的是人工写的，按原意修正。
+- 核对（只读，查完回滚，只输出编号和数字，不输出规则正文和原文；本地把前缀换成 `.venv/bin/python -m`）：
+
+  ```bash
+  ssh pgs-prod 'docker exec pgs-app-1 python -m backend.app.scripts.inspect_ai_draft_rules <评分标准 ID>'
+  ```
+
+  ```bash
+  ssh pgs-prod 'docker exec pgs-app-1 python -m backend.app.scripts.inspect_ai_draft_rules --all'
+  ```
+
+  `lone_mutex_groups` 是单档互斥组（`blocks_publish` 与发布校验的判断一致：只因排除剩 1 条的不挡）；`collided_mutex_groups` 是同名多次起草，不挡发布，但会把不同问题并成一组判分；`single_tier_ranges` 是引用了区间原文却只有一档的 AI 组，由分期 B 处理。`--all` 只列出有问题的评分标准。
+
+测试：`.venv/bin/python -m pytest -q backend/app/tests/test_ai_mutex_normalization.py`
+
+维护记录：2026-11-09 · AI 起草互斥组规整：新增 `mutex_definition_invalid` 排错与核对脚本命令。

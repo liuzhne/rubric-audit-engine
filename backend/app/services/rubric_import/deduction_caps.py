@@ -4,6 +4,58 @@ from decimal import Decimal, InvalidOperation
 from collections.abc import Mapping
 
 
+def _ai_mutex_identity(row):
+    """(互斥组, 生成指纹)；不是可归属的 AI 起草行时返回 None。
+
+    识别口径与 ``normalize_ai_group_caps`` 相同：来源以 ``ai_`` 开头，并带生成指纹和
+    草稿行键。人工、Excel 行和缺少归属信息的旧行都不规整。
+    """
+    if not isinstance(row, Mapping):
+        return None
+    mutex = row.get("mutex_group")
+    fingerprint = row.get("generation_fingerprint")
+    if not (str(row.get("source") or "").startswith("ai_")
+            and isinstance(mutex, str) and mutex
+            and isinstance(fingerprint, str) and fingerprint
+            and row.get("draft_row_key")):
+        return None
+    return mutex, fingerprint
+
+
+def effective_mutex_groups(rows, *, compiled):
+    """每行结构化扣分真正写进 AtomicRule 的互斥组，与 ``rows`` 等长。
+
+    ``compiled`` 是会编译成细则的行下标（从 0 起）。评分项投影保留起草时的原名，
+    只有写进细则的值在这里规整（AI起草互斥组规整与区间拆档方案 §4.1）：
+
+    - 同一次生成的同一组只剩 1 行会编译：不写互斥组。执行器本来就跳过单条互斥组，
+      发布校验却会把它当成定义写错。
+    - 2 行以上、同名已被投影里更早的组或人工行占用：加 ``-指纹前 8 位``，不让两次
+      生成的不同问题并进同一个互斥组。先应用的那一代保持原名，已确认的细则不受影响。
+    - 人工和 Excel 行原样返回，写错了照旧由发布校验挡住。
+    """
+    result = [row.get("mutex_group") if isinstance(row, Mapping) else None for row in rows]
+    groups = {}
+    for index, row in enumerate(rows):
+        identity = _ai_mutex_identity(row)
+        if identity is not None and index in compiled:
+            groups.setdefault(identity, []).append(index)
+    # 人工行的名字不管出现在前还是在后都先占住：它们不规整，AI 组只能让开。
+    taken = {
+        result[index] for index, row in enumerate(rows)
+        if index in compiled and result[index] and _ai_mutex_identity(row) is None
+    }
+    for (mutex, fingerprint), members in groups.items():  # 按首次出现的顺序
+        if len(members) < 2:
+            name = None
+        else:
+            name = mutex if mutex not in taken else f"{mutex}-{fingerprint[:8]}"
+            taken.add(name)
+        for index in members:
+            result[index] = name
+    return result
+
+
 def normalize_ai_group_caps(rows, *, criterion_code, maximum):
     """Normalize only attributable single-hit AI groups, including old clients.
 
