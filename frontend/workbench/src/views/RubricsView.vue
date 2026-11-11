@@ -9,6 +9,7 @@ import { canPublishRubric, canSubmitReview, compilationReady, isScoringCompleten
 import AiRuleDraftPanel from "@/components/AiRuleDraftPanel.vue";
 import ParseCoveragePanel from "@/components/ParseCoveragePanel.vue";
 import RuleAuditPanel from "@/components/RuleAuditPanel.vue";
+import RuleScopePanel from "@/components/RuleScopePanel.vue";
 import StructureSuggestionPanel from "@/components/StructureSuggestionPanel.vue";
 import SourceReviewPanel from '@/components/SourceReviewPanel.vue';
 import TableRecognitionPanel from '@/components/TableRecognitionPanel.vue';
@@ -309,7 +310,7 @@ async function cancelImportSession() {
 /**
  * 跟踪一个后台 AI 任务（审查、结构识别）：轮询到结束为止（页面隐藏时暂停），结束时
  * 调用一次 `onFinish`。刷新或关页面不影响任务，回到页面时由 resume 接着跟踪。
- * @param {"review"|"structure"|"import"} key
+ * @param {"review"|"structure"|"import"|"scope"} key
  * @param {(task: any) => unknown} onFinish
  * @param {(message: string) => void} report
  */
@@ -461,6 +462,22 @@ const reviewTracker = aiTaskTracker("review", async (task) => {
   const latest = await store.loadRuleReview(id);
   if (selected.value === id) ruleReview.value = latest;
 }, (message) => { parseError.value = message; });
+
+// 适用范围识别（docs/评分细则适用范围方案.md 第 6 节）：完成后重新读取草稿，规则上显示新范围。
+const scopeTracker = aiTaskTracker("scope", async (task) => {
+  const id = selected.value;
+  if (task.status !== "succeeded" || !id || task.rubric_id !== id) return;
+  await refreshDetail(id);
+}, (message) => { parseError.value = message; });
+const unscopedRuleCount = computed(() => (workspace.value?.rules || []).filter((rule) =>
+  rule.judge_type === "semantic" && rule.status !== "rejected" && !rule.scope).length);
+const runScopeIdentification = () => parseAction(async (id) => {
+  await scopeTracker.track(await store.startScopeIdentification(id, { connectionId: draftConnection.value || null }));
+});
+/** @param {"cancel"|"retry"} action */
+const scopeAction = (action) => parseAction(async () => {
+  await scopeTracker.track(await store.aiTaskAction("scope", action));
+});
 
 const suggestStructure = ({ dryRun }) => parseAction(async (id) => {
   if (dryRun) { structureEstimate.value = (await store.estimateStructure(id)).estimate; return; }
@@ -896,11 +913,11 @@ async function refreshDetail(id = selected.value) {
       total_score: full.total_score, criteria: structuredClone(full.criteria || []) };
     if (nextWorkspace.atomic_editing) editForm.value.atomic_rules = nextWorkspace.rules.map((rule) => ({
       id: rule.id, content_token: rule.content_token, criterion_id: rule.criterion_id,
-      rule_code: rule.rule_code, judge_scope: rule.judge_scope, judge_scope_hint: rule.judge_scope_hint,
+      rule_code: rule.rule_code, scope: rule.scope, scope_label: rule.scope_label,
       changes: Object.fromEntries([
         'name','rule_text','direction','effect_type','max_points','repeat_policy','cap_points',
         'judge_type','checker_key','checker_params','evidence_policy','positive_example',
-        'negative_example','boundary_example','strictness','applies_to','mutex_group',
+        'negative_example','boundary_example','strictness','mutex_group',
         'depends_on_rule_codes','levels',
       ].map((key) => [key, structuredClone(rule[key])])),
     }));
@@ -1041,6 +1058,7 @@ async function saveAndValidate() {
 watch(selected, async (id) => {
   classificationProgress.value = null; classificationPoller.stop(); store.classificationTask = null;
   structureTracker.stop(); reviewTracker.stop(); store.structureTask = null; store.ruleReviewTask = null;
+  scopeTracker.stop(); store.scopeTask = null;
   workspace.value = null; coverage.value = null; draft.value = null;
   selectedCriterion.value = null; sourceMode.value = true; sourceFilter.value = "pending"; chosenVisibility.value = null;
   editForm.value = null; reviewError.value = null; reviewNotice.value = null;
@@ -1059,8 +1077,10 @@ watch(selected, async (id) => {
       await store.resumeDraftTasks(id); watchDraftTasks();
       const classification = await store.resumeClassificationTask(id);
       if (classification && selected.value === id) await trackClassification(id, classification);
-      const { review, structure } = await store.resumeReviewTasks(id);
-      if (selected.value === id) { await reviewTracker.track(review); await structureTracker.track(structure); }
+      const { review, structure, scope } = await store.resumeReviewTasks(id);
+      if (selected.value === id) {
+        await reviewTracker.track(review); await structureTracker.track(structure); await scopeTracker.track(scope);
+      }
     }
     catch (err) { if (!(err instanceof StaleContextError)) draftError.value = err instanceof Error ? err.message : "读取起草任务失败"; }
   }
@@ -1321,6 +1341,9 @@ onUnmounted(() => {
             </div>
             <p v-if="publishError" class="notice notice-danger" role="alert">{{ publishError }}</p>
           </section>
+          <RuleScopePanel v-if="step === 3 && current.status === 'draft'" :pending="unscopedRuleCount"
+            :busy="operationBusy" :editable="canEdit" :task="store.scopeTask"
+            @run="runScopeIdentification" @task-action="scopeAction" />
           <RuleAuditPanel v-if="step === 3 && current.status !== 'published'" :review="ruleReview" :estimate="ruleEstimate"
             :busy="operationBusy" :editable="canEdit" :connection-id="draftConnection" :task="store.ruleReviewTask"
             @estimate="estimateReview" @run="runReview" @dismiss="dismissFinding" @task-action="reviewAction" />

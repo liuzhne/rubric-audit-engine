@@ -183,42 +183,38 @@ def test_review_hint_points_section_existence_rules_to_the_structure_checker():
     assert judge_scope.review_hint({**SEMANTIC, "name": "缺少结论章", "applies_to": "结论"}) is None
 
 
-def test_review_workspace_shows_scope_without_changing_the_content_token(client):
+def test_review_workspace_shows_stored_scope_without_changing_the_content_token(client):
+    # 适用范围改由模型给出（docs/评分细则适用范围方案.md）：工作区只读显示库里的范围，空即全文。
     rubric = _create(client)
-    rules = {rule["rule_code"]: rule for rule in _workspace(client, rubric["id"])["rules"]}
-    cross = next((rule for rule in rules.values() if "研究问题" in rule["name"] + rule["rule_text"]), None)
-    assert cross is not None, [(rule["name"], rule["rule_text"], rule["judge_type"]) for rule in rules.values()]
-
-    assert cross["judge_scope"] == {"scope": "cross_section", "targets": ["绪论", "结论"], "source": "wording"}
-    assert {rule["judge_scope_hint"] for rule in rules.values()} == {None}
+    rules = _workspace(client, rubric["id"])["rules"]
+    assert {rule["scope_label"] for rule in rules} == {"全文"}
+    assert all(rule["scope"] is None and "judge_scope" not in rule for rule in rules)
     with client.session_factory() as session:
-        row = session.scalar(select(models.AtomicRule).where(models.AtomicRule.id == cross["id"]))
-        assert cross["content_token"] == content_token(row)
+        row = session.scalar(select(models.AtomicRule).where(models.AtomicRule.id == rules[0]["id"]))
+        row.scope = {"type": "section", "sections": ["绪论"], "source": "ai_identified", "vocabulary": "section-roles@1"}
+        session.commit()
+    shown = next(rule for rule in _workspace(client, rubric["id"])["rules"] if rule["id"] == rules[0]["id"])
+    assert shown["scope"]["sections"] == ["绪论"] and shown["scope_label"] == "章节内：绪论"
+    with client.session_factory() as session:
+        row = session.scalar(select(models.AtomicRule).where(models.AtomicRule.id == rules[0]["id"]))
+        assert shown["content_token"] == content_token(row)
 
 
-def test_rule_edit_validates_and_clears_judge_scope(client):
+def test_rule_edit_cannot_set_the_scope(client):
     rubric = _create(client)
     rule = _workspace(client, rubric["id"])["rules"][0]
     policy = dict(rule["evidence_policy"] or {})
 
-    # 不可哈希的值（列表、对象）也要回 400，不能在成员判断时抛 TypeError 变成 500。
-    for value in ("chapter", ["section"], {"scope": "section"}):
-        bad = client.patch(f"/api/rubrics/{rubric['id']}/rules/{rule['rule_code']}",
-                           json={"changes": {"evidence_policy": {**policy, "judge_scope": value}}, "reason": "合成修改"})
-        assert bad.status_code == 400 and "judge_scope" in bad.json()["detail"], (value, bad.text)
+    rejected = client.patch(f"/api/rubrics/{rubric['id']}/rules/{rule['rule_code']}",
+                            json={"changes": {"applies_to": "绪论"}, "reason": "合成修改"})
+    assert rejected.status_code == 400 and "applies_to" in rejected.json()["detail"], rejected.text
 
     ok = client.patch(f"/api/rubrics/{rubric['id']}/rules/{rule['rule_code']}",
                       json={"changes": {"evidence_policy": {**policy, "judge_scope": "section"}}, "reason": "合成修改"})
     assert ok.status_code == 200, ok.text
     edited = next(item for item in _workspace(client, rubric["id"])["rules"] if item["rule_code"] == rule["rule_code"])
-    assert edited["evidence_policy"]["judge_scope"] == "section"
-    assert edited["judge_scope"]["source"] == "explicit"
-
-    cleared = client.patch(f"/api/rubrics/{rubric['id']}/rules/{rule['rule_code']}",
-                           json={"changes": {"evidence_policy": {**policy, "judge_scope": None}}, "reason": "合成修改"})
-    assert cleared.status_code == 200, cleared.text
-    edited = next(item for item in _workspace(client, rubric["id"])["rules"] if item["rule_code"] == rule["rule_code"])
     assert "judge_scope" not in edited["evidence_policy"]
+    assert edited["scope"] is None
 
 
 # ── 复核原因 ────────────────────────────────────────────────────────
