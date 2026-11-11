@@ -226,7 +226,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
             request_options["rate_limit_retries"] = rate_limit_retries
         if deadline is not None:
             request_options["deadline"] = deadline
-        timeout = self.request_timeout_seconds(default_timeout_seconds)
+        timeout = self.request_timeout_seconds(default_timeout_seconds, scoring=scoring)
         if timeout is not None:
             request_options["timeout_seconds"] = timeout
         plan = self._json_plan(scoring)

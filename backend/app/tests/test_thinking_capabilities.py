@@ -353,6 +353,27 @@ def test_explicit_connection_limits_still_win_for_a_thinking_model():
     assert capture.read_timeout == 90
 
 
+@pytest.mark.parametrize("factory", ["chat", "responses", "messages"])
+def test_scoring_json_call_keeps_the_previous_timeout_under_auxiliary(factory):
+    """``scoring=True`` 的超时与上限取自同一份计划：auxiliary 下评分计划是旧行为，不放到 240 秒。"""
+
+    if factory == "chat":
+        capture = _Capture(_chat_body())
+        scorer = _chat(ZHIPU, "glm-5.3", capture)
+    elif factory == "responses":
+        capture = _Capture({"id": "r", "status": "completed", "output_text": '{"ok": true}', "usage": {}})
+        scorer = OpenAIResponsesScorer(api_key="k", base_url=OPENAI, model_name="gpt-5", client=capture.client())
+    else:
+        capture = _Capture(_message_body())
+        scorer = AnthropicMessagesScorer(api_key="k", base_url=ANTHROPIC, model_name="claude-opus-5-5",
+                                         client=capture.client(), structured_output="off")
+    assert scorer.thinking_plan.raises_output_limit and scorer.scoring_thinking_plan.legacy
+
+    scorer.complete_json("一致性", {"x": 1}, default_max_tokens=2048, default_timeout_seconds=120, scoring=True)
+
+    assert capture.read_timeout == 120
+
+
 def test_glm_52_is_disabled_and_keeps_the_existing_budget():
     capture = _Capture(_chat_body())
     scorer = _chat(ZHIPU, "glm-5.2", capture)
