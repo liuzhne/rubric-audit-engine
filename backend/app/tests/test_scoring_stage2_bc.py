@@ -96,91 +96,81 @@ def _load(client, rubric_id):
         ).to_mapping()
 
 
-# ── 快照 @4 ────────────────────────────────────────────────────────
+# ── 快照 @5（docs/评分细则适用范围方案.md 第 8 节） ──────────────────
 
 
-def test_snapshot_carries_applies_to_and_scope_only_while_the_switch_is_on(client, monkeypatch):
+def test_snapshot_carries_scope_only_while_the_switch_is_on(client, monkeypatch):
     rubric = _create(client)
     with client.session_factory() as session:
         rule = _first_rule(session, rubric["id"])
+        # 旧的人工字段不再进快照：只认模型给出的 scope。
         rule.applies_to = "第3章 系统设计"
         rule.evidence_policy = {**(rule.evidence_policy or {}), "judge_scope": "section"}
+        rule.scope = {"type": "section", "sections": ["系统设计"], "source": "ai_draft", "vocabulary": "section-roles@1"}
         code = rule.rule_code
         session.commit()
     _publish(client, rubric["id"])
 
     off = {item["rule_code"]: item for item in _load(client, rubric["id"])["atomic_rules"]}
     assert off[code]["schema_version"] == "atomic-rule-snapshot@3"
-    assert "applies_to" not in off[code]
+    assert "scope" not in off[code] and "applies_to" not in off[code]
     assert "judge_scope" not in off[code]["evidence_policy"]
 
     monkeypatch.setattr(settings, "SCORING_JUDGE_SCOPE_ENABLED", True)
     on_snapshot = _load(client, rubric["id"])
     on = {item["rule_code"]: item for item in on_snapshot["atomic_rules"]}
-    assert on[code]["schema_version"] == "atomic-rule-snapshot@4"
-    assert on[code]["applies_to"] == "第3章 系统设计"
-    assert on[code]["evidence_policy"]["judge_scope"] == "section"
-    assert {item["applies_to"] for code_, item in on.items() if code_ != code} == {"global"}
-    assert judge_scope.infer_judge_scope(on[code]) == {"scope": "section", "targets": ["第3章 系统设计"]}
-    # 同一已发布版本：版本哈希不变，只是快照（与判定身份）不同。
+    assert on[code]["schema_version"] == "atomic-rule-snapshot@5"
+    assert on[code]["scope"] == {"type": "section", "sections": ["系统设计"]}
+    assert "judge_scope" not in on[code]["evidence_policy"] and "applies_to" not in on[code]
+    # 没有范围的规则在身份里明确记为全文（方案 Q5）。
+    assert {item["scope"]["type"] for code_, item in on.items() if code_ != code} == {"document"}
+    assert judge_scope.rule_scope(on[code]) == {"scope": "section", "targets": ["系统设计"]}
     assert on_snapshot["version_hash"] == _load(client, rubric["id"])["version_hash"]
     monkeypatch.setattr(settings, "SCORING_JUDGE_SCOPE_ENABLED", False)
     assert _load(client, rubric["id"])["rubric_snapshot_hash"] != on_snapshot["rubric_snapshot_hash"]
 
 
-def test_snapshot_contract_rejects_an_unknown_judge_scope():
+def _snapshot_value(**overrides):
     value = {
-        "schema_version": "atomic-rule-snapshot@4",
+        "schema_version": "atomic-rule-snapshot@5",
         "rule_code": "R1", "criterion_code": "T01", "direction": "deduct", "effect_type": "score",
         "judge_type": "semantic", "checker_key": None, "checker_version": None, "checker_params": {},
         "evidence_policy": {"mode": "source_quote", "requirement": "required", "minimum_coverage": "1",
-                            "allowed_finding_codes": ["R1"], "judge_scope": "chapter"},
+                            "allowed_finding_codes": ["R1"]},
         "max_points": "2", "repeat_policy": "once", "cap_points": None, "depends_on_rule_codes": [],
         "mutex_group": None, "levels": [], "name": "规则", "rule_text": "规则", "positive_example": None,
-        "negative_example": None, "boundary_example": None, "context_needs": [], "applies_to": "global",
+        "negative_example": None, "boundary_example": None, "context_needs": [],
+        "scope": {"type": "cross_section", "sections": ["绪论", "结论"]},
     }
-    with pytest.raises(ValueError, match="judge_scope"):
-        AtomicRuleSnapshot.from_mapping(value)
-    value["evidence_policy"]["judge_scope"] = "section"
-    assert AtomicRuleSnapshot.from_mapping(value).to_mapping()["evidence_policy"]["judge_scope"] == "section"
-    # @3 仍是闭合契约：不认识的键照旧拒绝。
-    value["schema_version"] = "atomic-rule-snapshot@3"
-    value.pop("applies_to")
+    value.update(overrides)
+    return value
+
+
+@pytest.mark.parametrize("scope", [
+    {"type": "chapter", "sections": []},
+    {"type": "section", "sections": []},
+    {"type": "document", "sections": ["绪论"]},
+    {"type": "cross_section", "sections": ["绪论", "绪论"]},
+    {"type": "section", "sections": ["绪论"], "source": "ai_draft"},
+])
+def test_snapshot_contract_checks_the_scope_shape(scope):
     with pytest.raises(ValueError):
-        AtomicRuleSnapshot.from_mapping(value)
+        AtomicRuleSnapshot.from_mapping(_snapshot_value(scope=scope))
 
 
-# ── 推断与页面 ──────────────────────────────────────────────────────
+def test_snapshot_contract_accepts_scope_only_on_at5():
+    assert AtomicRuleSnapshot.from_mapping(_snapshot_value()).to_mapping()["scope"]["sections"] == ["绪论", "结论"]
+    with pytest.raises(ValueError):
+        AtomicRuleSnapshot.from_mapping(_snapshot_value(schema_version="atomic-rule-snapshot@3"))
+    with pytest.raises(ValueError):
+        AtomicRuleSnapshot.from_mapping(_snapshot_value(schema_version="atomic-rule-snapshot@4"))
+    legacy = _snapshot_value()
+    legacy["evidence_policy"]["judge_scope"] = "section"
+    with pytest.raises(ValueError):
+        AtomicRuleSnapshot.from_mapping(legacy)
 
 
-SEMANTIC = {"judge_type": "semantic"}
-
-
-@pytest.mark.parametrize(
-    ("rule", "expected"),
-    [
-        ({**SEMANTIC, "evidence_policy": {"judge_scope": "document"}, "applies_to": "绪论"}, ("document", [], "explicit")),
-        ({**SEMANTIC, "evidence_policy": {"judge_scope": "section"}, "applies_to": "第3章 系统设计"}, ("section", ["第3章 系统设计"], "explicit")),
-        # 指定了范围但没写适用范围：章节取规则文字里认出的角色。
-        ({**SEMANTIC, "evidence_policy": {"judge_scope": "section"}, "name": "结论部分过于简略"}, ("section", ["结论"], "explicit")),
-        ({**SEMANTIC, "evidence_policy": {"judge_scope": "cross_section"}, "name": "语言表达"}, ("document", [], "explicit")),
-        ({**SEMANTIC, "applies_to": "系统设计"}, ("section", ["系统设计"], "applies_to")),
-        ({**SEMANTIC, "name": "研究问题在结论中没有回应"}, ("cross_section", ["绪论", "结论"], "wording")),
-        ({**SEMANTIC, "name": "语言表达不规范"}, ("document", [], "default")),
-        ({"judge_type": "deterministic", "applies_to": "绪论"}, ("document", [], "deterministic")),
-    ],
-)
-def test_explain_judge_scope(rule, expected):
-    explained = judge_scope.explain_judge_scope(rule)
-    assert (explained["scope"], explained["targets"], explained["source"]) == expected
-
-
-def test_review_hint_points_section_existence_rules_to_the_structure_checker():
-    assert judge_scope.review_hint({**SEMANTIC, "name": "缺少结论章", "rule_text": ""})
-    assert judge_scope.review_hint({**SEMANTIC, "name": "缺少论证依据", "rule_text": ""}) is None
-    assert judge_scope.review_hint({"judge_type": "deterministic", "name": "缺少结论章"}) is None
-    # 已经按章节取证据的，不再提示。
-    assert judge_scope.review_hint({**SEMANTIC, "name": "缺少结论章", "applies_to": "结论"}) is None
+# ── 页面 ────────────────────────────────────────────────────────────
 
 
 def test_review_workspace_shows_stored_scope_without_changing_the_content_token(client):
@@ -320,23 +310,20 @@ def test_core_persistence_explains_review_rules_and_leaves_plain_items_without_r
     assert reasons is None and text is None
 
 
-def test_section_scope_from_applies_to_selects_only_that_section(monkeypatch):
+def test_section_scope_selects_only_that_section(monkeypatch):
     from backend.app.services.llm import core_view
     from backend.app.services.scoring.retrieval.selection import build_v4_envelope
     from backend.app.tests.test_scoring_stage2 import BUDGET
-    from backend.app.tests.test_scoring_stage2 import _envelope
-    from backend.app.tests.test_scoring_stage2 import _base_mapping
-    from backend.app.tests.test_scoring_stage2 import _paper_units
+    from backend.app.tests.test_scoring_stage2 import _thesis_envelope
     import json
 
-    content_hash = _base_mapping()["evidence_units"][0]["normalized_content_hash"]
     rule = {
-        "schema_version": "atomic-rule-snapshot@4",
-        "applies_to": "第三章 系统设计",
+        "schema_version": "atomic-rule-snapshot@5",
+        "scope": {"type": "section", "sections": ["系统设计"]},
         "name": "数据库设计说明不足",
         "rule_text": "没有给出表结构与字段含义",
     }
-    envelope = _envelope(units=_paper_units(content_hash), rule=rule)
+    envelope = _thesis_envelope(rule)
     value = build_v4_envelope(envelope, top_k=12, judge_scope=True, **BUDGET).to_mapping()
 
     assert value["coverage_mode"] == "section"
@@ -344,5 +331,6 @@ def test_section_scope_from_applies_to_selects_only_that_section(monkeypatch):
 
     monkeypatch.setattr(settings, "SCORING_JUDGE_SCOPE_ENABLED", True)
     view = json.loads(core_view.build_core_request(build_v4_envelope(envelope, top_k=12, judge_scope=True, **BUDGET)).user)
-    assert view["scope"] == {"type": "section", "targets": [{"name": "第三章 系统设计", "evidence": 3}]}
+    assert view["scope"] == {"type": "section", "sections": [
+        {"role": "系统设计", "headings": ["第3章 系统设计"], "coverage": "complete"}]}
     assert view["rule"]["name"] == "数据库设计说明不足"

@@ -7,6 +7,7 @@ checker packages and semantic prompt/runtime adapter, and never creates a
 
 from __future__ import annotations
 
+from backend.app.services.scoring.retrieval.scope_policy import RULE_SCOPE_POLICY
 from collections.abc import Mapping
 from copy import deepcopy
 import hashlib
@@ -685,6 +686,8 @@ class TechnicalProposalLLMRuntime:
 
 class TechnicalProposalProfile:
     profile_key = PROFILE_KEY
+    # 适用范围的三个判断（docs/评分细则适用范围方案.md 第 8 节），Core 规则执行器按它调用。
+    rule_scope_policy = RULE_SCOPE_POLICY
     profile_version = TECHNICAL_PROPOSAL_PROFILE_VERSION
     prompt_version = TECHNICAL_PROPOSAL_PROMPT_VERSION
 

@@ -218,7 +218,10 @@ def _diversify(units: list[dict]) -> list[dict]:
         depth += 1
 
 
-def _section_coverage(all_units, selected):
+def _section_coverage(all_units, selected, *, full=False):
+    """每个标题路径的可选与已选段数。``full``（按范围取证据时）也列出一段没选的路径，
+    判断模型看到的是不是整章、目标章节在论文里有没有（docs/评分细则适用范围方案.md 第 8 节）。"""
+
     available = Counter(tuple(item["section_path"]) for item in all_units)
     chosen = Counter(tuple(item["section_path"]) for item in selected)
     return [
@@ -229,7 +232,7 @@ def _section_coverage(all_units, selected):
             "complete": chosen[path] == available[path],
         }
         for path in sorted(available)
-        if chosen[path]
+        if chosen[path] or full
     ]
 
 
@@ -243,7 +246,9 @@ def _build_mapping(base, selected, *, query, coverage_mode, context_window_token
         "rule_code": rule["rule_code"],
         "query_hash": canonical_sha256({"query": query}),
         "selected_evidence_unit_ids": [item["evidence_unit_id"] for item in selected],
-        "section_coverage": _section_coverage(base["evidence_units"], selected),
+        "section_coverage": _section_coverage(
+            base["evidence_units"], selected, full=coverage_mode in {"section", "cross_section"}
+        ),
     }
     selection_hash = canonical_sha256(
         {**selection_projection, "coverage_mode": coverage_mode}
@@ -324,6 +329,7 @@ def build_v4_envelope(
             JUDGE_SCOPE_VERSION,
             select_scoped_units,
         )
+        from backend.app.services.scoring.retrieval.section_roles import RoleResolver
 
         coverage_mode = scope["scope"]
         selector_version = SELECTOR_VERSION + "+" + JUDGE_SCOPE_VERSION
@@ -332,6 +338,7 @@ def build_v4_envelope(
             scope,
             rank=lambda units: _diversify(_rank(units, query)),
             top_k=top_k,
+            resolver=RoleResolver.from_envelope(base),
         )
     else:
         coverage_mode = _coverage_mode(base, _structural_query(base, selection_rules))
@@ -416,11 +423,10 @@ def _judge_scope(base: dict, selection_rules=None):
     """Scope of the rule (or of a shared selection's lowest rule code); None = document."""
 
     from backend.app.services.scoring.retrieval.judge_scope import DOCUMENT
-    from backend.app.services.scoring.retrieval.judge_scope import infer_judge_scope
+    from backend.app.services.scoring.retrieval.judge_scope import rule_scope
+    from backend.app.services.scoring.retrieval.judge_scope import shared_rule
 
-    rules = list(selection_rules or [base["atomic_rule_snapshot"]])
-    rule = min(rules, key=lambda item: item["rule_code"])
-    scope = infer_judge_scope(rule)
+    scope = rule_scope(shared_rule(list(selection_rules or [base["atomic_rule_snapshot"]])))
     return None if scope["scope"] == DOCUMENT else scope
 
 

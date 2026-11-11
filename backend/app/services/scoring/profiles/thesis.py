@@ -7,6 +7,7 @@ here and are selected exclusively by versioned checker keys.
 
 from __future__ import annotations
 
+from backend.app.services.scoring.retrieval.scope_policy import RULE_SCOPE_POLICY
 from collections.abc import Mapping
 from copy import deepcopy
 import re
@@ -503,6 +504,23 @@ class ThesisLLMRuntime:
     def supports_group_calls(self) -> bool:
         return callable(getattr(self.scorer, "score_core_group", None))
 
+    def classify_section_headings(self, *, headings, profile_key):
+        """一篇论文一次：把词表对不上的一级标题归到章节角色（docs/评分细则适用范围方案.md 8.1）。
+
+        只发标题，不发正文；Mock 或没有 ``complete_json`` 的评分器返回空（只用词表）。厂商异常
+        原样抛出，由执行器记日志后退回词表。用量与思考守卫和评分调用走同一套计量。
+        """
+
+        from backend.app.services.scoring.retrieval.section_roles import classify_headings
+
+        if not callable(getattr(self.scorer, "complete_json", None)) or str(
+            getattr(self.scorer, "provider", "")
+        ).lower() == "mock":
+            return {}
+        return self._metered(
+            lambda: classify_headings(self.scorer, headings, profile_key), envelope=None
+        )
+
     def score_group(self, *, envelopes, group_code):
         """One provider call for every tier of a mutex group.
 
@@ -651,6 +669,8 @@ class ThesisLLMRuntime:
 
 class ThesisProfile:
     profile_key = "thesis"
+    # 适用范围的三个判断（docs/评分细则适用范围方案.md 第 8 节），Core 规则执行器按它调用。
+    rule_scope_policy = RULE_SCOPE_POLICY
     profile_version = THESIS_PROFILE_VERSION
     prompt_version = THESIS_PROMPT_VERSION
     # 子类（通用文档）只替换下面几项，解析、证据、检查器实现与模型调用全部复用。
