@@ -277,7 +277,7 @@ def get_latest_batch_scoring_job(session, batch_id):
     )
 
 
-def list_attention_batch_scoring_jobs(session, *, organization_id=None):
+def list_attention_batch_scoring_jobs(session, *, organization_id=None, owner_id=None):
     """List the latest active or failed execution for each visible batch."""
     recent_failure_cutoff = utcnow() - timedelta(hours=ATTENTION_FAILURE_HOURS)
     latest_generation = (
@@ -308,6 +308,9 @@ def list_attention_batch_scoring_jobs(session, *, organization_id=None):
     )
     if organization_id is not None:
         query = query.where(GradingBatch.organization_id == organization_id)
+    if owner_id is not None:
+        # 教师只看自己任务的作业；能看全组织的身份由调用方传 None。
+        query = query.where(GradingBatch.owner_id == owner_id)
     return list(session.scalars(query).all())
 
 

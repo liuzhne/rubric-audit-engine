@@ -1315,6 +1315,8 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 |---|---|---|
 | 2026-11-11 | 按模型能力表决定思考（复审修正） | 表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次，新增日志 `thinking_output_limit_fallback` 与对应排错；写明只有严格 Schema 才是正式输出的硬上界 |
 | 2026-11-11 | 按模型能力表决定思考 | 新环境变量 `THINKING_CAPABILITY_SCOPE`（off / auxiliary / all，默认 auxiliary，经仓库变量进生产）；无迁移；`llm_call` 日志新增思考与正式输出字段，新增 `thinking_capability_mismatch`、`thinking_explicit_adjusted`；能力表维护步骤；排错：守卫报思考没关、起草截断、思考模型超时、表外模型上限变大 |
+| 2026-11-10 | 评分任务个人隔离：#95 复审修正 | 无新命令、无迁移变化；`public/` 已重建；排错：归档后“评分标准”“创建人”变成“—” |
+| 2026-11-10 | 评分任务个人隔离 | 迁移 `0043_batch_owner_isolation`（先跑迁移工作流再部署）；发布前查没有归属的任务；排错：教师说任务“不见了”、新接口漏了归属条件；`public/` 已重建 |
 | 2026-11-10 | AI 起草互斥组规整（#94 复审） | 核对脚本加 `invalid_mutex_groups`（跨评分项或含分档的组），与单档组合起来覆盖 `mutex_definition_invalid` 的全部情况 |
 | 2026-11-09 | AI 起草互斥组规整（分期 A） | 新增排错“发布被 `mutex_definition_invalid` 挡住”（报错指向发布校验，真正原因在起草或采用时少了档）与 `inspect_ai_draft_rules` 只读核对命令 |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 3.0 新增“供应链与安全扫描”；新增 `.github/dependabot.yml`；排错补“action 没固定 SHA 的测试失败”与“Dependabot 升级 PR 让任务失败”（不要直接关 PR，改动推到它的分支上） |
@@ -3204,6 +3206,48 @@ cd frontend/workbench && npx vitest run src/stores/assistant.test.js
 测试：`.venv/bin/python -m pytest -q backend/app/tests/test_ai_mutex_normalization.py`
 
 维护记录：2026-11-09 · AI 起草互斥组规整：新增 `mutex_definition_invalid` 排错与核对脚本命令。
+
+### 2026-11-10 评分任务个人隔离
+
+方案见 `docs/评分任务个人隔离方案.md`。教师只看得到自己建的评分任务及其下的文件、结果、作业、复核与导出；组织管理员与平台管理员看本组织全部。没有新环境变量，没有开关。
+
+发布：迁移 `0043_batch_owner_isolation`（回填空的 `owner_id`，给 `grading_batches` / `evaluation_batches` 的 `owner_id` 建索引，不新建表）。生产先跑迁移工作流（先 `dry_run`，再 `-f dry_run=false`，`expected_head=0043_batch_owner_isolation`），再部署。顺序不能反：先部署的话，没回填的旧任务会从教师的列表里消失，直到迁移跑完。
+
+发布前后各查一次没有归属的任务（只读；生产库用 `begin read only … rollback`，不要用会话级 `SET`）：
+
+```sql
+select count(*) filter (where owner_id is null) as no_owner,
+       count(*) filter (where owner_id is null and created_by is null) as no_owner_no_creator
+from grading_batches;
+```
+
+迁移后 `no_owner` 应等于 `no_owner_no_creator`。剩下的这些只有管理员看得到；要交给某位教师，由维护者把 `owner_id` 改成该用户的 id。
+
+回滚：降级 0043 只删索引，回填的归属留着。要恢复“全组织可见”只能回退代码版本。
+
+验证：`.venv/bin/python -m pytest -q backend/app/tests/test_personal_isolation.py backend/app/tests/test_organization_isolation.py`。
+
+排错：
+
+- **教师说自己的任务“不见了”，或打开旧链接是 404。**
+  - 报错指向：像是任务被删了，或登录到了别的组织。
+  - 真正原因：任务的 `owner_id` 是空的或是别人的。任务若是同事建的，这是隔离生效后的正常结果；若是自己建的旧任务，查 `select id, name, owner_id, created_by from grading_batches where id = '…'`，`owner_id` 为空说明迁移没跑或这一行连创建人也没有。
+- **管理员的任务列表里“创建人”是“—”。**
+  - 报错指向：像是用户被删了。
+  - 真正原因：任务没有归属（`owner_id` 为空）。这种任务教师都看不到。
+- **新加的列表接口，教师能看到同事的数据。**
+  - 报错指向：没有报错，测试也可能全绿——本地与多数测试关着鉴权，关着鉴权时不收窄。
+  - 真正原因：查询只加了 `organization_id` 条件，没用 `guards.batch_scope` / `paper_scope` / `run_scope`（或没传 `owner_id=guards.personal_owner_id(principal)`）。数据库 RLS 只按组织，兜不住。照 `test_personal_isolation.py` 加一个开鉴权、同组织两位教师的用例。
+
+维护记录：2026-11-10 · 评分任务个人隔离：新增迁移发布顺序、发布前后的核对查询与三条排错。
+
+#95 复审补充排错：
+
+- **归档或重新打开任务后，列表里这一行的“评分标准”或“创建人”变成“—”，刷新后又回来。**
+  - 报错指向：像是评分标准被删了，或任务丢了归属。
+  - 真正原因：阶段动作的响应不带连表标签，前端把空值合并进了列表行。已在 `stores/batches.js` 的 `applyStageResult` 修掉；再出现说明浏览器还在用旧页面，刷新即可。
+
+维护记录：2026-11-10 · 评分任务个人隔离：#95 复审修正：补一条排错。
 
 ### 2026-11-11 按模型能力表决定思考
 

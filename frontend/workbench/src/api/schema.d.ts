@@ -3716,6 +3716,8 @@ export interface components {
             name: string;
             /** Owner Id */
             owner_id?: string | null;
+            /** Owner Name */
+            owner_name?: string | null;
             /** Paper Type */
             paper_type?: string | null;
             /** Rubric Id */
