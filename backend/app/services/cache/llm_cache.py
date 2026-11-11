@@ -70,7 +70,9 @@ class CacheEnvelopeEntry:
 def _scoring_thinking(scorer):
     plan = getattr(scorer, "scoring_thinking_plan", None)
     if plan is not None:
-        return dict(plan.identity)
+        # 身份之外再记实际发出的思考字段：只改了能力表的写法、身份不变时，旧键也不会命中按旧写法
+        # 得到的结果（不必再记得升 PROMPT_VERSION；CORE_PROVIDER_PROMPT_VERSION 不进这个键）。
+        return {**plan.identity, "request_fields": plan.fields()}
     return {"enabled": None, "type": getattr(scorer, "thinking_type", None)}
 
 

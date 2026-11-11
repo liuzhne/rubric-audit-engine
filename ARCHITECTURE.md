@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-11 | 按模型能力表决定思考（复审修正） | `transport.post_with_retry` 新增 `output_limit_fallback`：表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次（只在辅助调用）；`errors.output_limit_rejected` 识别；L0 键加实际思考字段；Vertex 区域主机改整串匹配。调用链方向不变 |
 | 2026-11-11 | 按模型能力表决定思考 | 新增 `llm/hosts.py`（主机族，`auth_headers` 改用它）与 `llm/thinking_capabilities.py`（能力表与解析）；三个适配器构造时算出辅助计划与评分计划，请求合并计划的写法，思考开着时放开请求上限；`thinking_params` 只剩旧行为且名单改查表；运行身份读评分计划，强度与放开的上限写进 `model_version`；旧路径 L0 缓存键加思考身份与正式输出预算；起草器去掉 `isinstance`，改问适配器要实发上限。无迁移，见 §2026-11-11 小节 |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 只改工作流与仓库安全设置；应用模块、调用链与数据流不变 |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 只改仓库规则集与发布规则；流水线、模块与调用链不变 |
@@ -1919,18 +1920,20 @@ complete_json / complete_with_tools（AI 任务、评分助手）
   └─ 合并 thinking_plan.fields()；实发上限 request_output_tokens(正式输出预算)；超时 request_timeout_seconds
 score_core_* / score_envelope / score_criterion（评分路径）
   └─ 合并 scoring_thinking_plan.fields()（v1 信封与计划不一致时按信封冻结的设置旧换算）；实发上限 _scoring_max_tokens
-post_with_retry(call_context=…)
-  └─ llm_call 日志记思考开关、强度、来源、命中记录、正式输出预算与实发上限、正式输出用量；
-     表说能关却观测到思考 → thinking_capability_mismatch
+post_with_retry(call_context=…, output_limit_fallback=…)
+  ├─ llm_call 日志记思考开关、强度、来源、命中记录、正式输出预算与实发上限、正式输出用量；
+  │  表说能关却观测到思考 → thinking_capability_mismatch
+  └─ 猜的上限被 400 拒绝（errors.output_limit_rejected）→ 按放开前的上限立即重发一次，
+     记 thinking_output_limit_fallback（只在 AI 任务与评分助手传入）
 ```
 
 数据流与持久化：
 - 运行身份不改封闭结构：`thinking.type` 只记开关，`sampling.max_tokens` 记正式输出预算（Core 证据预算按它扣，不受放开的请求上限影响），强度与放开的上限在 `model_version` 里。scope 不是 `all` 时评分路径的身份与请求和改动前逐字节相同。
 - 能力表不进连接快照：改表不会让在跑的任务报“连接配置已变更”。
-- 旧兼容路径的 L0 缓存键加 `thinking`（评分计划的身份）与 `max_tokens`（正式输出预算），`llm_cache.PROMPT_VERSION=2026-11-11-1`。
+- 旧兼容路径的 L0 缓存键加 `thinking`（评分计划的身份与实际发出的思考字段）与 `max_tokens`（正式输出预算），`llm_cache.PROMPT_VERSION=2026-11-11-1`。
 - 正式输出用量只进日志（`usage.observed_usage` 的 `answer_tokens` / `answer_source`），不加列、无迁移。
 - 语义一致性检查走 `complete_json(scoring=True)`，用评分计划。
 - `ai_rule_drafter` 不再按类型判断适配器：有 `request_output_tokens` 的就是真实适配器，6144 作为正式输出预算交给它；截断与超时提示按辅助计划区分“关不掉思考”。
 - “测试连接”里 Claude 的探测请求用同一份辅助计划，测试与 AI 任务发同样的思考参数。
 
-维护记录：2026-11-11 · 按模型能力表决定思考：新增两个模块与调用链；接口、数据库不变，head `0042_assistant_message_client_id` 不变。
+维护记录：2026-11-11 · 按模型能力表决定思考：新增两个模块与调用链；接口、数据库不变，head `0042_assistant_message_client_id` 不变。2026-11-11 · 复审修正：传输层加猜测上限被拒的退回，L0 键加实际思考字段。

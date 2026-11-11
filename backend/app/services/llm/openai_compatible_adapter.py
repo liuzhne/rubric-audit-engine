@@ -251,6 +251,12 @@ class OpenAICompatibleChatScorer(LLMScorer):
         request_options["call_context"] = thinking.call_context(
             plan, answer_budget=default_max_tokens, max_tokens=body["max_tokens"],
         )
+        fallback = None if scoring else thinking.output_limit_fallback(
+            plan, field="max_tokens", sent=body["max_tokens"], configured=self.max_tokens,
+            explicit=self.max_tokens_explicit, answer_budget=default_max_tokens,
+        )
+        if fallback:
+            request_options["output_limit_fallback"] = fallback
         if response_schema is not None:
             # ``reasoning`` is an OpenRouter extension.  Other OpenAI-compatible
             # providers (including Google AI Studio) may reject the same field,
@@ -297,6 +303,12 @@ class OpenAICompatibleChatScorer(LLMScorer):
         options = {"attempts_limit": 1, "deadline": deadline, "call_context": thinking.call_context(
             self.thinking_plan, answer_budget=max_tokens, max_tokens=body["max_tokens"],
         )}
+        fallback = thinking.output_limit_fallback(
+            self.thinking_plan, field="max_tokens", sent=body["max_tokens"],
+            configured=int(max_tokens or self.max_tokens), explicit=self.max_tokens_explicit,
+        )
+        if fallback:
+            options["output_limit_fallback"] = fallback
         if rate_limit_retries:
             options["rate_limit_retries"] = rate_limit_retries
             options["rate_limit_delay_seconds"] = rate_limit_delay_seconds
@@ -359,7 +371,8 @@ class OpenAICompatibleChatScorer(LLMScorer):
         )
 
     def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None, rate_limit_retries=None, deadline=None,
-                         rate_limit_delay_seconds=None, rate_limit_min_call_seconds=None, call_context=None):
+                         rate_limit_delay_seconds=None, rate_limit_min_call_seconds=None, call_context=None,
+                         output_limit_fallback=None):
         return post_with_retry(
             self,
             url="%s/chat/completions" % self.base_url,
@@ -385,6 +398,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
             rate_limit_delay_seconds=rate_limit_delay_seconds,
             rate_limit_min_call_seconds=rate_limit_min_call_seconds,
             call_context=call_context,
+            output_limit_fallback=output_limit_fallback,
         )
 
 

@@ -100,6 +100,21 @@ def log_thinking_mismatch(provider, model, *, usage, context):
     )
 
 
+def log_output_limit_fallback(provider, model, *, field, sent, fallback, context):
+    """厂商拒绝了按项目封顶放开的输出上限（模型最大输出更小），改用放开前的上限重发。
+
+    出现这一行说明能力表缺这个模型的记录（或记录没写最大输出）：补上记录后不再多花一次请求。
+    """
+
+    context = context if isinstance(context, dict) else {}
+    logger.warning(
+        "thinking_output_limit_fallback provider=%s model=%s field=%s sent=%s fallback=%s "
+        "thinking_source=%s entry=%s",
+        _field(provider), _field(model), _field(field), _field(sent), _field(fallback),
+        _field(context.get("source")), _field(context.get("entry")),
+    )
+
+
 _PROVIDER_MESSAGE_LIMIT = 300
 
 

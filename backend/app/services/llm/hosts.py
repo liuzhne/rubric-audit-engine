@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlsplit
 
 
@@ -22,6 +23,10 @@ BEDROCK = "bedrock"
 OTHER = "other"
 
 GOOGLE_FAMILIES = frozenset({VERTEX, GEMINI_API})
+
+# Vertex 区域端点：<区域>-aiplatform.googleapis.com（us-central1、asia-southeast1……）。整串匹配，
+# 区域只允许字母、数字与连字符。
+_VERTEX_REGIONAL_HOST = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*-aiplatform\.googleapis\.com")
 
 _EXACT_HOSTS = {
     "aiplatform.googleapis.com": VERTEX,
@@ -52,8 +57,7 @@ def host_family(base_url) -> str:
     exact = _EXACT_HOSTS.get(host)
     if exact:
         return exact
-    # Vertex 区域端点：<区域>-aiplatform.googleapis.com
-    if host.endswith("-aiplatform.googleapis.com"):
+    if _VERTEX_REGIONAL_HOST.fullmatch(host):
         return VERTEX
     # Bedrock：bedrock-runtime.<区域>.amazonaws.com 与 bedrock-mantle.<区域>.api.aws
     first = host.split(".", 1)[0]

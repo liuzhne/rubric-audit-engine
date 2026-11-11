@@ -231,6 +231,13 @@ class OpenAIResponsesScorer(LLMScorer):
         request_options["call_context"] = thinking.call_context(
             plan, answer_budget=default_max_tokens, max_tokens=body["max_output_tokens"],
         )
+        fallback = None if scoring else thinking.output_limit_fallback(
+            plan, field="max_output_tokens", sent=body["max_output_tokens"],
+            configured=self.max_output_tokens, explicit=self.max_output_tokens_explicit,
+            answer_budget=default_max_tokens,
+        )
+        if fallback:
+            request_options["output_limit_fallback"] = fallback
         if response_schema is not None:
             body["text"] = {"format": {
                 "type": "json_schema",
@@ -289,7 +296,7 @@ class OpenAIResponsesScorer(LLMScorer):
         )
 
     def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None, rate_limit_retries=None, deadline=None,
-                         call_context=None):
+                         call_context=None, output_limit_fallback=None):
         return post_with_retry(
             self,
             url="%s/responses" % self.base_url,
@@ -312,6 +319,7 @@ class OpenAIResponsesScorer(LLMScorer):
             rate_limit_retries=rate_limit_retries,
             deadline=deadline,
             call_context=call_context,
+            output_limit_fallback=output_limit_fallback,
         )
 
 

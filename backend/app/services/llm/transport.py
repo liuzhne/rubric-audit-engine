@@ -13,11 +13,13 @@ import httpx
 
 from backend.app.services.llm.call_log import log_call_failed
 from backend.app.services.llm.call_log import log_call_succeeded
+from backend.app.services.llm.call_log import log_output_limit_fallback
 from backend.app.services.llm.call_log import log_thinking_mismatch
 from backend.app.services.llm.debug_logging import log_llm_exception
 from backend.app.services.llm.debug_logging import log_llm_request
 from backend.app.services.llm.debug_logging import log_llm_response
 from backend.app.services.llm.debug_logging import log_llm_retry_sleep
+from backend.app.services.llm.errors import output_limit_rejected
 from backend.app.services.llm.errors import project_provider_error
 from backend.app.services.llm.errors import raise_provider_call_error
 from backend.app.services.llm.rate_limit import provider_circuit_key
@@ -28,11 +30,8 @@ from backend.app.services.llm.retry import retry_after_seconds
 from backend.app.services.llm.retry import retry_delay_seconds
 from backend.app.services.llm.retry import retry_fits_before_deadline
 from backend.app.services.llm.retry import retry_reason
+from backend.app.services.llm.thinking_capabilities import TABLE_SOURCES as _TABLE_SOURCES
 from backend.app.services.llm_observability import observation
-
-
-# 能力表做出的「可以关闭」判断（thinking_capabilities.TABLE_SOURCES）；这里写死避免循环导入。
-_TABLE_SOURCES = frozenset({"table", "family_default"})
 
 
 def langfuse_usage(usage):
@@ -67,6 +66,7 @@ def post_with_retry(
     rate_limit_delay_seconds=None,
     rate_limit_min_call_seconds=None,
     call_context=None,
+    output_limit_fallback=None,
 ):
     """Send one provider request with the shared retry/deadline/circuit policy.
 
@@ -81,6 +81,13 @@ def post_with_retry(
     fields; ``success_output(data)`` adds protocol-specific trace fields.
     ``call_context`` carries the thinking plan of this call (no content) for the
     call log and the capability-table mismatch warning.
+
+    ``output_limit_fallback`` is ``(field, value)`` when the output limit was
+    raised for a thinking model whose maximum output is unknown
+    (``thinking_capabilities.output_limit_fallback``): if the provider rejects
+    that limit with a 400 naming the parameter, the request is sent again once,
+    immediately, with ``payload[field] = value``.  The resend does not use up a
+    retry attempt.
     """
 
     base_attempts = (
@@ -103,7 +110,8 @@ def post_with_retry(
             "attempt_limit": attempts,
         },
     ) as generation:
-        for attempt in range(attempts):
+        attempt = 0
+        while attempt < attempts:
             # 调用方的截止时间（例如起草的总预算）同时约束每次调用的超时，
             # 否则单次调用可以越过预算，被平台强行终止。
             # 没有截止时间、也没显式超时时不传 timeout，沿用客户端默认值（与改动前一致）。
@@ -179,6 +187,18 @@ def post_with_retry(
                     metadata={"provider_error": projected.to_mapping()},
                 )
                 log_llm_exception(provider_label, exc, attempt, attempts)
+                if output_limit_fallback is not None and output_limit_rejected(projected):
+                    # 猜的上限超过了这个模型的最大输出：改用放开前的上限马上再发一次，不占重试次数。
+                    field, value = output_limit_fallback
+                    output_limit_fallback = None
+                    log_output_limit_fallback(
+                        provider_label, scorer.model_name, field=field,
+                        sent=payload.get(field), fallback=value, context=call_context,
+                    )
+                    payload = {**payload, field: value}
+                    if isinstance(call_context, dict):
+                        call_context = {**call_context, "max_tokens": value}
+                    continue
                 if projected.code == "rate_limited":
                     will_retry = projected.retryable and attempt < attempts - 1
                 else:
@@ -225,6 +245,7 @@ def post_with_retry(
                     provider_label, delay_seconds, attempt, attempts, retry_reason(exc),
                 )
             time.sleep(delay_seconds)
+            attempt += 1
     raise_provider_call_error(provider_label, last_error)
 
 

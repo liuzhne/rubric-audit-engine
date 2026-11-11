@@ -553,18 +553,20 @@ def plans(protocol, base_url, model_name, *, thinking_type=None, effort=None, sc
     scope = scope or current_scope()
     if protocol == CHAT:
         legacy = legacy_chat_plan(base_url, model_name, thinking_type)
-        new = (lambda: resolve_chat(base_url, model_name, thinking_type))
     elif protocol == MESSAGES:
         legacy = legacy_messages_plan(thinking_type, effort)
-        new = (lambda: resolve_messages(base_url, model_name, thinking_type, effort))
     elif protocol == RESPONSES:
         legacy = legacy_responses_plan()
-        new = (lambda: resolve_responses(base_url, model_name))
     else:
         raise ValueError("unsupported protocol")
     if scope == SCOPE_OFF:
         return legacy, legacy
-    auxiliary = new()
+    if protocol == CHAT:
+        auxiliary = resolve_chat(base_url, model_name, thinking_type)
+    elif protocol == MESSAGES:
+        auxiliary = resolve_messages(base_url, model_name, thinking_type, effort)
+    else:
+        auxiliary = resolve_responses(base_url, model_name)
     return auxiliary, (auxiliary if scope == SCOPE_ALL else legacy)
 
 
@@ -590,6 +592,24 @@ def request_max_tokens(plan: ThinkingPlan, *, configured: int, explicit: bool, a
     if answer_budget is None:
         return configured
     return max(configured, int(answer_budget))
+
+
+def output_limit_fallback(plan: ThinkingPlan, *, field: str, sent, configured, explicit: bool,
+                          answer_budget=None):
+    """上限是猜的、厂商以 400 拒绝时改发的 ``(字段, 上限)``；不需要退回时为 None。
+
+    只用于 AI 任务与评分助手（没有运行身份）。思考开着、能力表又不知道这个模型的最大输出（未知
+    模型、或记录没写最大输出）时，请求上限按项目封顶放开；真实最大输出更小的模型（例如 16,384 的
+    GPT-4o mini、8,192 的旧模型）会拒绝。退回值是放开前的取法，与改动前发的相同。连接显式上限
+    照发，不退回。
+    """
+
+    if explicit or not plan.raises_output_limit or plan.model_max_output_tokens is not None:
+        return None
+    fallback = int(configured) if answer_budget is None else max(int(configured), int(answer_budget))
+    if sent is None or fallback >= int(sent):
+        return None
+    return field, fallback
 
 
 def call_context(plan: ThinkingPlan, *, answer_budget=None, max_tokens=None) -> dict:
@@ -634,6 +654,7 @@ __all__ = [
     "lookup",
     "model_version_suffix",
     "normalize_model_name",
+    "output_limit_fallback",
     "plans",
     "prefix_matches",
     "request_max_tokens",

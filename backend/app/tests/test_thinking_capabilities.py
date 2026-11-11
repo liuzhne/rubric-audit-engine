@@ -68,6 +68,9 @@ def _default_scope(monkeypatch):
         (BEDROCK, hosts.BEDROCK),
         ("https://bedrock-runtime.us-west-2.amazonaws.com", hosts.BEDROCK),
         ("https://generativelanguage.googleapis.com.example.com/v1", hosts.OTHER),
+        ("https://asia-southeast1-aiplatform.googleapis.com.example.com/v1", hosts.OTHER),
+        ("https://-aiplatform.googleapis.com/v1", hosts.OTHER),
+        ("https://example.com/us-central1-aiplatform.googleapis.com", hosts.OTHER),
         (UNKNOWN, hosts.OTHER),
         ("", hosts.OTHER),
     ],
@@ -452,6 +455,127 @@ def test_scope_off_restores_the_previous_auxiliary_request(monkeypatch):
     assert capture.read_timeout == 120
 
 
+# ---------------------------------------------------------------- 猜的上限被拒时退回
+
+
+class _Sequence(_Capture):
+    """按顺序给出应答：``(状态码, 应答体)``。"""
+
+    def __init__(self, *responses):
+        super().__init__(None)
+        self.responses = list(responses)
+
+    def client(self, timeout=5.0):
+        def respond(request):
+            self.requests.append(request)
+            status, body = self.responses.pop(0)
+            return httpx.Response(status, json=body)
+
+        return httpx.Client(transport=httpx.MockTransport(respond), timeout=timeout)
+
+    def sent(self, field):
+        return [json.loads(request.content)[field] for request in self.requests]
+
+
+_OPENAI_TOO_LARGE = {"error": {
+    "message": "max_tokens is too large: 32768. This model supports at most 16384 completion tokens, "
+               "whereas you provided 32768.",
+    "type": "invalid_request_error", "param": "max_tokens", "code": None,
+}}
+_VERTEX_OUT_OF_RANGE = [{"error": {
+    "code": 400, "status": "INVALID_ARGUMENT",
+    "message": "Unable to submit request because it has a maxOutputTokens value of 32768 but the supported "
+               "range is from 1 (inclusive) to 8193 (exclusive). Update the value and try again.",
+}}]
+_CLAUDE_TOO_LARGE = {"type": "error", "error": {
+    "type": "invalid_request_error",
+    "message": "max_tokens: 32768 > 8192, which is the maximum allowed number of output tokens for "
+               "claude-3-5-haiku-20241022",
+}}
+_RESPONSES_TOO_LARGE = {"error": {
+    "message": "Invalid 'max_output_tokens': integer above maximum value. Expected a value <= 16384, "
+               "but got 32768 instead.",
+    "type": "invalid_request_error", "param": "max_output_tokens", "code": "integer_above_max_value",
+}}
+
+
+@pytest.mark.parametrize("base_url, model, error", [
+    (OPENAI, "gpt-4o-mini", _OPENAI_TOO_LARGE),
+    (VERTEX, "google/gemini-2.0-flash", _VERTEX_OUT_OF_RANGE),
+])
+def test_unknown_model_rejecting_the_raised_limit_is_resent_once_with_the_previous_limit(
+    caplog, base_url, model, error,
+):
+    capture = _Sequence((400, error), (200, _chat_body()))
+    scorer = _chat(base_url, model, capture)
+    assert scorer.thinking_plan.source == thinking.SOURCE_UNKNOWN
+
+    with caplog.at_level(logging.INFO, logger="paper_grading.llm.calls"):
+        result = scorer.complete_json("起草", {"x": 1}, default_max_tokens=6144, default_timeout_seconds=120,
+                                      attempts_limit=1)
+
+    assert result == {"ok": True}
+    # 放开前的取法：max(连接上限, 正式输出预算)，与改动前发的相同；退回不占重试次数。
+    assert capture.sent("max_tokens") == [thinking.THINKING_ON_MAX_TOKENS_CAP, max(scorer.max_tokens, 6144)]
+    fallback = [record.getMessage() for record in caplog.records
+                if record.getMessage().startswith("thinking_output_limit_fallback")]
+    assert fallback == [
+        "thinking_output_limit_fallback provider=%s model=%s field=max_tokens sent=32768 fallback=6144 "
+        "thinking_source=unknown entry=-" % (scorer.provider_name, model)
+    ]
+    succeeded = [record.getMessage() for record in caplog.records if record.getMessage().startswith("llm_call ")]
+    assert succeeded and "max_tokens=6144" in succeeded[-1]
+
+
+def test_assistant_tool_step_falls_back_to_its_step_budget():
+    body = {"id": "t", "choices": [{"finish_reason": "stop", "message": {"content": "好的"}}], "usage": {}}
+    capture = _Sequence((400, _OPENAI_TOO_LARGE), (200, body))
+    scorer = _chat(OPENAI, "gpt-4o-mini", capture)
+
+    scorer.complete_with_tools([{"role": "user", "content": "hi"}], [], max_tokens=1200, deadline=None)
+
+    assert capture.sent("max_tokens") == [thinking.THINKING_ON_MAX_TOKENS_CAP, 1200]
+
+
+def test_claude_and_responses_fall_back_on_their_own_limit_field():
+    capture = _Sequence((400, _CLAUDE_TOO_LARGE), (200, _message_body()))
+    scorer = AnthropicMessagesScorer(api_key="k", base_url=ANTHROPIC, model_name="claude-3-5-haiku-20241022",
+                                     client=capture.client(), structured_output="off")
+    scorer.complete_json("指令", {"x": 1}, default_max_tokens=6144)
+    assert capture.sent("max_tokens") == [thinking.THINKING_ON_MAX_TOKENS_CAP, max(scorer.max_tokens, 6144)]
+
+    capture = _Sequence(
+        (400, _RESPONSES_TOO_LARGE),
+        (200, {"id": "r", "status": "completed", "output_text": '{"ok": true}', "usage": {}}),
+    )
+    scorer = OpenAIResponsesScorer(api_key="k", base_url=OPENAI, model_name="gpt-4o-mini", client=capture.client())
+    scorer.complete_json("指令", {"x": 1}, default_max_tokens=6144)
+    assert capture.sent("max_output_tokens") == [
+        thinking.THINKING_ON_MAX_TOKENS_CAP, max(scorer.max_output_tokens, 6144),
+    ]
+
+
+@pytest.mark.parametrize("case", ["known_maximum", "explicit_limit", "other_400", "second_rejection", "scoring"])
+def test_no_fallback_outside_a_guessed_limit_rejected_once(monkeypatch, case):
+    error = {"error": {"message": "response_format is invalid", "type": "invalid_request_error"}} \
+        if case == "other_400" else _OPENAI_TOO_LARGE
+    responses = [(400, error), (400, error)] if case == "second_rejection" else [(400, error)]
+    capture = _Sequence(*responses)
+    kwargs = {"max_tokens": 4000} if case == "explicit_limit" else {}
+    model = "glm-5.3" if case == "known_maximum" else "gpt-4o-mini"
+    base_url = ZHIPU if case == "known_maximum" else OPENAI
+    if case == "scoring":
+        monkeypatch.setattr(settings, "THINKING_CAPABILITY_SCOPE", "all")
+    scorer = _chat(base_url, model, capture, **kwargs)
+
+    with pytest.raises(Exception):
+        scorer.complete_json("起草", {"x": 1}, default_max_tokens=6144, attempts_limit=1,
+                             scoring=case == "scoring")
+
+    expected_requests = 2 if case == "second_rejection" else 1
+    assert len(capture.requests) == expected_requests
+
+
 # ---------------------------------------------------------------- 运行身份
 
 
@@ -559,8 +683,34 @@ def test_legacy_cache_key_includes_scoring_thinking_and_answer_budget():
 
     scorer = _chat(ZHIPU, "glm-5.2", _Capture({}))
     request = build_request(scorer, Criterion(), [], {}, "rubric@1")
-    assert request["thinking"] == {"enabled": False, "type": None}
+    assert request["thinking"] == {"enabled": False, "type": None, "request_fields": {}}
     assert request["max_tokens"] == 2048
+
+
+def test_legacy_cache_key_changes_when_only_the_wire_form_changes(monkeypatch):
+    """只改能力表的写法、身份不变时，旧兼容路径的 L0 缓存键也要变（不靠记得升版本号）。"""
+
+    from backend.app.services.cache.llm_cache import build_request
+
+    class Criterion:
+        id = code = name = "C1"
+        max_score = 10
+
+    monkeypatch.setattr(settings, "THINKING_CAPABILITY_SCOPE", "all")
+    scorer = _chat(ZHIPU, "glm-5.2", _Capture({}))
+    before = build_request(scorer, Criterion(), [], {}, "rubric@1")
+    assert before["thinking"]["request_fields"] == {"thinking": {"type": "disabled"}}
+
+    plan = scorer.scoring_thinking_plan
+    scorer.scoring_thinking_plan = thinking.ThinkingPlan(
+        plan.thinking_on, plan.identity_type, plan.effort, {"reasoning_effort": "none"}, plan.source, plan.entry,
+        plan.model_max_output_tokens,
+    )
+    after = build_request(scorer, Criterion(), [], {}, "rubric@1")
+    assert after["thinking"]["enabled"] == before["thinking"]["enabled"]
+    assert after["thinking"]["type"] == before["thinking"]["type"]
+    assert after["model_version"] == before["model_version"]
+    assert after != before
 
 
 # ---------------------------------------------------------------- 观测：正式输出与误标

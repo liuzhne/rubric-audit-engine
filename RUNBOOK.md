@@ -1313,6 +1313,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-11 | 按模型能力表决定思考（复审修正） | 表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次，新增日志 `thinking_output_limit_fallback` 与对应排错；写明只有严格 Schema 才是正式输出的硬上界 |
 | 2026-11-11 | 按模型能力表决定思考 | 新环境变量 `THINKING_CAPABILITY_SCOPE`（off / auxiliary / all，默认 auxiliary，经仓库变量进生产）；无迁移；`llm_call` 日志新增思考与正式输出字段，新增 `thinking_capability_mismatch`、`thinking_explicit_adjusted`；能力表维护步骤；排错：守卫报思考没关、起草截断、思考模型超时、表外模型上限变大 |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 3.0 新增“供应链与安全扫描”；新增 `.github/dependabot.yml`；排错补“action 没固定 SHA 的测试失败”与“Dependabot 升级 PR 让任务失败”（不要直接关 PR，改动推到它的分支上） |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 3.0 第 5 条改为 `release-gates-passed` 绿即可合并，说明为何不开 strict 与热修后手动重跑门禁；排错补“发布 PR 显示落后于 main、不要点 Update branch” |
@@ -3181,7 +3182,7 @@ cd frontend/workbench && npx vitest run src/stores/assistant.test.js
 
 ### 2026-11-11 按模型能力表决定思考
 
-方案见 `docs/模型思考能力表方案.md`。规则：能关闭思考的模型直接关闭，输出上限沿用现有值；关不掉的发最低强度，请求上限放到 `min(模型最大输出, 32768)`，正式输出靠严格 Schema 的上界约束，真正的上限是超时。写法来自 `backend/app/services/llm/thinking_capabilities.py` 的能力表，按「协议 + 主机族 + 模型名前缀」匹配；连接的显式配置优先，表外模型不发参数、按可能在思考处理。
+方案见 `docs/模型思考能力表方案.md`。规则：能关闭思考的模型直接关闭，输出上限沿用现有值；关不掉的发最低强度，请求上限放到 `min(模型最大输出, 32768)`，真正的上限是超时。正式输出的长度靠输出结构约束，只有用严格 Schema 时才是硬上界：起草回退到精简 Schema 时没有上界，审查只有提示词约束（方案 5.3）。写法来自 `backend/app/services/llm/thinking_capabilities.py` 的能力表，按「协议 + 主机族 + 模型名前缀」匹配；连接的显式配置优先，表外模型不发参数、按可能在思考处理。
 
 开关 `THINKING_CAPABILITY_SCOPE`（经仓库变量进生产，`scripts/production_env.py` 已放行；没设即默认值）：
 
@@ -3211,6 +3212,7 @@ cd frontend/workbench && npx vitest run src/stores/assistant.test.js
 - 每次调用的 `llm_call` 行尾多了 `answer_tokens=` / `answer=`（`reported` 是厂商报告的准确值，`estimated` 是按可见文字估算，`-` 是算不出来）、`thinking=on|off`、`effort=`、`thinking_source=`（`explicit` / `explicit_adjusted` / `table` / `family_default` / `unknown` / `legacy`）、`entry=`（命中的记录）、`answer_budget=`（正式输出预算）、`max_tokens=`（实发上限）。
 - `thinking_capability_mismatch`：能力表说能关、也发了关闭写法，应答里却有思考。
 - `thinking_explicit_adjusted`：连接显式配置了“关闭”，表里记着这个模型关不掉，改发了最低强度。
+- `thinking_output_limit_fallback`：表里不知道这个模型的最大输出、上限放到了 32768，厂商以 400 拒绝；已按放开前的上限重发一次（`sent=` 原上限，`fallback=` 重发的上限）。
 
 排错：
 - **现象**：评分失败，错误码 `PROVIDER_THINKING_NOT_DISABLED`。
@@ -3225,5 +3227,8 @@ cd frontend/workbench && npx vitest run src/stores/assistant.test.js
 - **现象**：表外模型（`thinking_source=unknown`）的 AI 任务请求上限是 32768、等待 240 秒。
   - 报错指向：像是配置被改了。
   - 真正原因：未知模型按可能在思考处理（方案 Q1）。确认它能关思考后按上面的步骤补一条记录，或在连接里显式配置思考设置。
+- **现象**：AI 任务或评分助手的一次调用发了两次请求，第一次 400。
+  - 报错指向：像是重试策略错了（这些调用的超时与 5xx 只试 1 次）。
+  - 真正原因：看同一时间有没有 `thinking_output_limit_fallback`：表外模型的最大输出比 32768 小（GPT-4o mini、旧 Claude、Gemini 2.0 等），厂商拒绝了猜的上限，传输层按放开前的上限重发，不占重试次数。按模型官方页补一条带 `max_output` 的记录（或在连接里显式写 `max_tokens`），以后就不再多发一次。重发后若又报截断，说明这个模型其实在思考，最大输出又小，只能换模型或请厂商调整。
 
-维护记录：2026-11-11 · 按模型能力表决定思考：新增开关、能力表维护步骤、日志字段与四条排错。
+维护记录：2026-11-11 · 按模型能力表决定思考：新增开关、能力表维护步骤、日志字段与四条排错。2026-11-11 · 复审修正：写明严格 Schema 之外没有硬上界；新增 `thinking_output_limit_fallback` 日志与“一次调用发了两次请求”的排错。

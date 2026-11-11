@@ -375,7 +375,7 @@ class AnthropicMessagesScorer(LLMScorer):
         return thinking.call_context(plan, answer_budget=answer_budget, max_tokens=body.get("max_tokens"))
 
     def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None, rate_limit_retries=None, deadline=None,
-                         call_context=None):
+                         call_context=None, output_limit_fallback=None):
         return post_with_retry(
             self,
             url="%s/messages" % self.base_url,
@@ -401,6 +401,7 @@ class AnthropicMessagesScorer(LLMScorer):
             rate_limit_retries=rate_limit_retries,
             deadline=deadline,
             call_context=call_context,
+            output_limit_fallback=output_limit_fallback,
         )
 
     def _validate_frozen_controls(self, provider):
@@ -524,6 +525,12 @@ class AnthropicMessagesScorer(LLMScorer):
             plan=plan,
         )
         request_options["call_context"] = self._context(body, plan, default_max_tokens)
+        fallback = None if scoring else thinking.output_limit_fallback(
+            plan, field="max_tokens", sent=body["max_tokens"], configured=self.max_tokens,
+            explicit=self.max_tokens_explicit, answer_budget=default_max_tokens,
+        )
+        if fallback:
+            request_options["output_limit_fallback"] = fallback
         return parse_messages_json(self._send(body, **request_options))
 
 
