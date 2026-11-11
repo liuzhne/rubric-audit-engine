@@ -690,7 +690,9 @@ def test_drafting_uses_strict_bounded_schema_for_compatible_providers(host, open
                 "source_refs": ["/criterion/description"]}]}]}
             return httpx.Response(200, request=httpx.Request("POST", self.base_url),
                 json={"choices": [{"message": {"content": json.dumps(value)}}]})
-    scorer = Scorer(api_key="test-key", base_url="https://" + host + "/api/v1", response_format_json=False)
+    # 用能关闭思考的模型：思考关闭时 6144 就是请求上限（关不掉的模型见 test_thinking_capabilities）。
+    scorer = Scorer(api_key="test-key", base_url="https://" + host + "/api/v1", response_format_json=False,
+                    model_name="gemini-2.5-flash")
     draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis")
     assert len(calls) == 1
     schema = calls[0]["response_format"]["json_schema"]
@@ -790,6 +792,9 @@ def test_openai_responses_drafting_uses_same_schema_and_dedicated_budget():
     # 截止时间一路传到适配器，约束每次调用与重试（不越过请求的时间预算）。
     deadline = options[0].pop("deadline")
     assert 0 < deadline - time.monotonic() <= settings.RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS
+    # 调用日志的思考上下文：gpt-4.1-mini 是非推理模型，思考关闭，6144 就是请求上限。
+    context = options[0].pop("call_context")
+    assert (context["thinking"], context["answer_budget"], context["max_tokens"]) == ("off", 6144, 6144)
     # 超时不重试（attempts_limit=1），429 另有两次按 Retry-After 的等待。
     assert options[0] == {
         "attempts_limit": 1,
@@ -883,7 +888,9 @@ def test_responses_drafting_timeout_is_one_attempt_with_draft_wait_and_one_break
     monkeypatch.setattr(settings, "OPENAI_MAX_RETRIES", 2)
     rate_limit.reset_provider_runtime_for_tests()
     calls = []
-    scorer = OpenAIResponsesScorer(api_key="test", base_url="https://example.invalid/v1", client=_timeout_client(calls))
+    # 百炼上能关闭思考的混合模型：思考关闭时起草缺省等待照旧是 120 秒（关不掉的放到 240 秒）。
+    scorer = OpenAIResponsesScorer(api_key="test", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                                   model_name="kimi-k3", client=_timeout_client(calls))
 
     with pytest.raises(AIRuleDraftValidationError) as caught:
         draft_deduction_rules(criterion=_criterion(), input_analysis={}, scorer=scorer, business_profile_key="thesis")

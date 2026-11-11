@@ -8,6 +8,8 @@
 不影响主流程。是否据 findings 扣分由评分项/人工决定（人在回路）。
 """
 
+import inspect
+
 from backend.app.core.config import settings
 
 INTRO_KEYWORDS = ("绪论", "引言", "研究背景", "研究问题", "introduction")
@@ -21,6 +23,13 @@ INSTRUCTIONS = (
     "只返回一个 JSON 对象：{\"research_questions\":[{\"text\":..,\"answered\":true/false}],"
     "\"conclusion_claims\":[{\"text\":..,\"supported\":true/false}]}。不要返回多余文字。"
 )
+
+
+def _parameters(function):
+    try:
+        return inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return {}
 
 
 def analyze_semantic_coherence(parsed, scorer):
@@ -37,7 +46,9 @@ def analyze_semantic_coherence(parsed, scorer):
         "body_summary": (parsed.get("full_text") or "")[:4000],
     }
     try:
-        result = scorer.complete_json(INSTRUCTIONS, payload)
+        # 语义一致性属于评分路径：用适配器的评分计划（THINKING_CAPABILITY_SCOPE=all 前与改动前相同）。
+        options = {"scoring": True} if "scoring" in _parameters(scorer.complete_json) else {}
+        result = scorer.complete_json(INSTRUCTIONS, payload, **options)
     except NotImplementedError:
         return []  # 该模型不支持通用补全
     except Exception:

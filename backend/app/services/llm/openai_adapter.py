@@ -3,6 +3,7 @@ import json
 import httpx
 
 from backend.app.core.config import settings
+from backend.app.services.llm import thinking_capabilities as thinking
 from backend.app.services.llm.auth_headers import openai_auth_headers
 from backend.app.services.llm.base import LLMScorer
 from backend.app.services.llm.base import validated_envelope_provider
@@ -48,6 +49,14 @@ class OpenAIResponsesScorer(LLMScorer):
         self.max_output_tokens = int(max_output_tokens or settings.OPENAI_MAX_OUTPUT_TOKENS)
         self.temperature = float(temperature if temperature is not None else settings.OPENAI_TEMPERATURE)
         self.top_p = float(top_p if top_p is not None else 1)
+        # 按模型能力表决定思考（docs/模型思考能力表方案.md）；Responses 连接没有思考选项，只看表。
+        self.thinking_plan, self.scoring_thinking_plan = thinking.plans(
+            thinking.RESPONSES, self.base_url, self.model_name,
+        )
+        self.thinking_type = self.scoring_thinking_plan.identity_type
+        self.model_version = type(self).model_version + thinking.model_version_suffix(
+            self.scoring_thinking_plan, max_tokens_explicit=self.max_output_tokens_explicit,
+        )
         self._owns_client = client is None
         self.usage_meter = UsageMeter()
         self.client = client or httpx.Client(timeout=self.timeout_seconds)
@@ -68,7 +77,8 @@ class OpenAIResponsesScorer(LLMScorer):
             "temperature": self.temperature,
             "instructions": _instructions(),
             "input": _input_payload(paper, criterion, evidence_candidates, structure_checks, anchors),
-            "max_output_tokens": self.max_output_tokens,
+            "max_output_tokens": self._scoring_max_tokens(self.max_output_tokens),
+            **self.scoring_thinking_plan.fields(),
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -78,7 +88,7 @@ class OpenAIResponsesScorer(LLMScorer):
                 }
             },
         }
-        response = self._post_with_retry(payload)
+        response = self._post_with_retry(payload, call_context=self._scoring_context(payload))
         response.raise_for_status()
         data = response.json()
         output = _parse_json_output(data)
@@ -94,8 +104,8 @@ class OpenAIResponsesScorer(LLMScorer):
 
         envelope, provider = validated_envelope_provider(self, envelope)
         envelope_payload = envelope.to_mapping()
-        if provider["thinking"] != {"enabled": False, "type": None}:
-            raise ValueError("OpenAI Responses PromptEnvelope does not support thinking controls")
+        if provider["thinking"] != self.scoring_thinking_plan.identity:
+            raise ValueError("OpenAI Responses PromptEnvelope thinking does not match the adapter")
         if provider["response_format"] != "json_schema":
             raise ValueError("OpenAI Responses PromptEnvelope requires json_schema response_format")
         if provider["response_schema"] != "criterion-score-v2":
@@ -109,7 +119,8 @@ class OpenAIResponsesScorer(LLMScorer):
             **_sampling_controls(sampling),
             "instructions": _envelope_instructions(criterion["scoring_mode"]),
             "input": json.dumps(envelope_payload, ensure_ascii=False, separators=(",", ":")),
-            "max_output_tokens": sampling["max_tokens"],
+            "max_output_tokens": self._scoring_max_tokens(sampling["max_tokens"]),
+            **self.scoring_thinking_plan.fields(),
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -119,7 +130,7 @@ class OpenAIResponsesScorer(LLMScorer):
                 }
             },
         }
-        response = self._post_with_retry(payload)
+        response = self._post_with_retry(payload, call_context=self._scoring_context(payload))
         response.raise_for_status()
         data = response.json()
         _raise_if_incomplete(data)
@@ -133,9 +144,10 @@ class OpenAIResponsesScorer(LLMScorer):
 
     def _validated_core(self, envelope):
         envelope, provider = validated_core_envelope_provider(self, envelope)
-        if provider["thinking"] != {"enabled": False, "type": None}:
+        # 思考身份必须与本适配器的评分计划一致（能力表接管评分路径后，推理模型也能在 Core 里评分）。
+        if provider["thinking"] != self.scoring_thinking_plan.identity:
             raise ValueError(
-                "OpenAI Responses PromptEnvelopeV3 does not support thinking controls"
+                "OpenAI Responses PromptEnvelopeV3 thinking does not match the adapter"
             )
         if provider["response_format"] != "json_schema":
             raise ValueError(
@@ -155,7 +167,8 @@ class OpenAIResponsesScorer(LLMScorer):
             **_sampling_controls(sampling),
             "instructions": request.system,
             "input": request.user,
-            "max_output_tokens": sampling["max_tokens"],
+            "max_output_tokens": self._scoring_max_tokens(sampling["max_tokens"]),
+            **self.scoring_thinking_plan.fields(),
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -166,7 +179,7 @@ class OpenAIResponsesScorer(LLMScorer):
             },
         }
         self.last_view_summary = compression_summary(request)
-        response = self._post_with_retry(payload)
+        response = self._post_with_retry(payload, call_context=self._scoring_context(payload))
         response.raise_for_status()
         data = response.json()
         _raise_if_incomplete(data)
@@ -193,7 +206,9 @@ class OpenAIResponsesScorer(LLMScorer):
         )
         return decode_core_group_response(envelopes, raw, request)
 
-    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None, attempts_limit=None, default_timeout_seconds=None, rate_limit_retries=None, deadline=None):
+    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None, attempts_limit=None, default_timeout_seconds=None, rate_limit_retries=None, deadline=None, scoring=False):
+        """``default_max_tokens`` 是正式输出预算；``scoring=True`` 用评分计划（语义一致性检查）。"""
+
         request_options = {}
         if attempts_limit is not None:
             request_options["attempts_limit"] = attempts_limit
@@ -201,19 +216,21 @@ class OpenAIResponsesScorer(LLMScorer):
             request_options["rate_limit_retries"] = rate_limit_retries
         if deadline is not None:
             request_options["deadline"] = deadline
-        if default_timeout_seconds is not None and not self.timeout_seconds_explicit:
-            request_options["timeout_seconds"] = max(self.timeout_seconds, default_timeout_seconds)
+        timeout = self.request_timeout_seconds(default_timeout_seconds, scoring=scoring)
+        if timeout is not None:
+            request_options["timeout_seconds"] = timeout
+        plan = self._json_plan(scoring)
         body = {
             "model": self.model_name,
             "temperature": settings.OPENAI_TEMPERATURE,
             "instructions": instructions,
             "input": json.dumps(payload, ensure_ascii=False),
-            "max_output_tokens": (
-                self.max_output_tokens
-                if self.max_output_tokens_explicit or default_max_tokens is None
-                else max(self.max_output_tokens, default_max_tokens)
-            ),
+            "max_output_tokens": self.request_output_tokens(default_max_tokens, scoring=scoring),
+            **plan.fields(),
         }
+        request_options["call_context"] = thinking.call_context(
+            plan, answer_budget=default_max_tokens, max_tokens=body["max_output_tokens"],
+        )
         if response_schema is not None:
             body["text"] = {"format": {
                 "type": "json_schema",
@@ -239,7 +256,40 @@ class OpenAIResponsesScorer(LLMScorer):
         except ValueError as exc:
             raise ResponsesJSONOutputError("invalid_json") from exc
 
-    def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None, rate_limit_retries=None, deadline=None):
+    # -- 思考计划：上限、超时与日志上下文 ---------------------------------------------------------
+
+    def _json_plan(self, scoring=False):
+        return self.scoring_thinking_plan if scoring else self.thinking_plan
+
+    def request_output_tokens(self, answer_budget=None, *, scoring=False):
+        """AI 任务的实发上限：``answer_budget`` 是正式输出预算（docs/模型思考能力表方案.md 第 5.2 节）。"""
+
+        return thinking.request_max_tokens(
+            self._json_plan(scoring), configured=self.max_output_tokens,
+            explicit=self.max_output_tokens_explicit, answer_budget=answer_budget,
+        )
+
+    def request_timeout_seconds(self, default_timeout_seconds=None, *, scoring=False):
+        if default_timeout_seconds is None or self.timeout_seconds_explicit:
+            return None
+        timeout = max(self.timeout_seconds, default_timeout_seconds)
+        if self._json_plan(scoring).raises_output_limit:
+            timeout = max(timeout, thinking.THINKING_ON_TIMEOUT_SECONDS)
+        return timeout
+
+    def _scoring_max_tokens(self, answer_budget):
+        if self.scoring_thinking_plan.raises_output_limit and not self.max_output_tokens_explicit:
+            return self.scoring_thinking_plan.raised_max_tokens()
+        return int(answer_budget)
+
+    def _scoring_context(self, payload):
+        return thinking.call_context(
+            self.scoring_thinking_plan, answer_budget=self.max_output_tokens,
+            max_tokens=payload.get("max_output_tokens"),
+        )
+
+    def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None, rate_limit_retries=None, deadline=None,
+                         call_context=None):
         return post_with_retry(
             self,
             url="%s/responses" % self.base_url,
@@ -261,6 +311,7 @@ class OpenAIResponsesScorer(LLMScorer):
             timeout_seconds=timeout_seconds,
             rate_limit_retries=rate_limit_retries,
             deadline=deadline,
+            call_context=call_context,
         )
 
 
@@ -325,7 +376,20 @@ def _observed_usage_from_responses(data):
         ),
         finish_reason=incomplete or data.get("status"),
         truncated=truncated,
+        answer_text=_answer_text(data, output),
     )
+
+
+def _answer_text(data, output):
+    """可见输出的文字（只用于估算正式输出用量；结构不合预期时返回 None，不影响计量）。"""
+
+    text = data.get("output_text")
+    if isinstance(text, str) and text:
+        return text
+    try:
+        return _extract_output_text([item for item in output if isinstance(item, dict)])
+    except (AttributeError, TypeError):
+        return None
 
 
 def _instructions():

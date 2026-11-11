@@ -5,8 +5,9 @@
 
 三条与另两个适配器不同的约定（见 docs/模型协议适配器改造方案.md 第 5 节）：
 
-- **默认不发采样参数、``thinking`` 和 ``effort``**。新模型收到 ``temperature``/``top_p``
-  直接 400，Opus 5.5 收到 ``thinking: disabled`` 也 400；只有连接显式配置才发。
+- **默认不发采样参数**。新模型收到 ``temperature``/``top_p`` 直接 400；只有连接显式配置才发。
+  ``thinking`` 与 ``effort`` 按模型能力表决定（docs/模型思考能力表方案.md）：能关的按表关闭，
+  关不掉的（Opus 5.5 收到 ``thinking: disabled`` 会 400）发最低强度；连接显式配置优先。
 - **结构化输出有两种模式**。Bedrock mantle 与第三方兼容端点不支持
   ``output_config.format``，那里只靠指令约束；两种模式都由调用方的本地校验兜底，
   发送前删掉 Claude 不支持的 schema 约束。
@@ -24,6 +25,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from backend.app.core.config import settings
+from backend.app.services.llm import thinking_capabilities as thinking
 from backend.app.services.llm.base import LLMScorer
 from backend.app.services.llm.base import validated_envelope_provider
 from backend.app.services.llm.core_adapter import _decimal_text
@@ -93,19 +95,34 @@ def resolve_structured_output(base_url, options=None) -> str:
     return "json_schema" if host in _STRUCTURED_OUTPUT_HOSTS else "off"
 
 
-def request_controls(*, temperature=None, top_p=None, thinking_type=None, effort=None) -> dict:
-    """连接显式配置的调用参数（线上形状）。没配置的一概不发。"""
+def request_controls(*, temperature=None, top_p=None, thinking_type=None, effort=None, plan=None) -> dict:
+    """调用参数（线上形状）。采样参数只发连接显式配置的。
+
+    ``plan``（``ThinkingPlan``）给出时，思考与强度按它发；否则只发显式配置的 ``thinking_type`` / ``effort``
+    （改动前的行为）。
+    """
 
     body = {}
     if temperature is not None:
         body["temperature"] = float(temperature)
     elif top_p is not None:
         body["top_p"] = float(top_p)
+    if plan is not None:
+        body.update(plan.fields())
+        return body
     if thinking_type:
         body["thinking"] = {"type": thinking_type}
     if effort:
         body["output_config"] = {"effort": effort}
     return body
+
+
+def thinking_plans(base_url, model_name, *, thinking_type=None, effort=None, scope=None):
+    """``(辅助计划, 评分计划)``，连接测试与适配器共用，测试与评分发同样的参数。"""
+
+    return thinking.plans(
+        thinking.MESSAGES, base_url, model_name, thinking_type=thinking_type, effort=effort, scope=scope,
+    )
 
 
 def sanitize_schema(schema):
@@ -152,7 +169,7 @@ def observed_usage_from_messages(data):
     """计量用：计费用量之外，再记有没有思考与结束原因（不含任何内容）。
 
     Claude 的思考 token 计入 ``output_tokens``，不单独报告；有没有思考看应答里有没有
-    ``thinking`` / ``redacted_thinking`` 块。
+    ``thinking`` / ``redacted_thinking`` 块。思考过时正式输出按 ``text`` 块的文字估算。
     """
 
     usage = usage_from_messages(data)
@@ -169,6 +186,11 @@ def observed_usage_from_messages(data):
         ),
         finish_reason=stop_reason,
         truncated=stop_reason == "max_tokens",
+        answer_text="\n".join(
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+        ),
     )
 
 
@@ -250,7 +272,14 @@ class AnthropicMessagesScorer(LLMScorer):
             self.base_url, {"structured_output": structured_output}
         )
         self.response_format = "json_schema" if self.structured_output == "json_schema" else "none"
-        self.model_version = PROTOCOL_VERSION + (";effort=%s" % effort if effort else "")
+        # 按模型能力表决定思考与强度：辅助计划给 AI 任务，评分计划给 score_*（scope 不是 all 时与改动前相同）。
+        self.thinking_plan, self.scoring_thinking_plan = thinking_plans(
+            self.base_url, self.model_name, thinking_type=thinking_type, effort=effort,
+        )
+        # 强度与放开后的请求上限写进 model_version（PromptEnvelope 的 provider 是封闭结构）。
+        self.model_version = PROTOCOL_VERSION + thinking.model_version_suffix(
+            self.scoring_thinking_plan, max_tokens_explicit=self.max_tokens_explicit,
+        )
         self._owns_client = client is None
         self.usage_meter = UsageMeter()
         self.client = client or httpx.Client(timeout=self.timeout_seconds)
@@ -271,14 +300,12 @@ class AnthropicMessagesScorer(LLMScorer):
         """The executable controls frozen into every PromptEnvelope (V1/V3/V4).
 
         Records what is sent: unsent sampling is the API's nominal default
-        ``1``, unsent thinking is ``null``.
+        ``1``; thinking is the scoring plan's identity (unsent and off is
+        ``null``, unsent but on by default is ``provider-default``).
+        ``max_tokens`` is the answer budget; a raised request limit for a
+        thinking model is recorded in ``model_version``.
         """
 
-        thinking = (
-            {"enabled": False, "type": None}
-            if self.thinking_type is None
-            else {"enabled": self.thinking_type != "disabled", "type": self.thinking_type}
-        )
         return {
             "sampling": {
                 "temperature": 1 if self.temperature is None else self.temperature,
@@ -286,24 +313,22 @@ class AnthropicMessagesScorer(LLMScorer):
                 "seed": None,
                 "max_tokens": self.max_tokens,
             },
-            "thinking": thinking,
+            "thinking": self.scoring_thinking_plan.identity,
             "response_format": self.response_format,
         }
 
     # -- request construction ----------------------------------------------------
 
-    def _body(self, system, user, *, schema=None, max_tokens=None):
+    def _body(self, system, user, *, schema=None, max_tokens=None, plan=None):
+        """``plan`` 默认是评分计划；``max_tokens`` 已是实发上限。"""
+
+        plan = plan or self.scoring_thinking_plan
         body = {
             "model": self.model_name,
-            "max_tokens": int(max_tokens or self.max_tokens),
+            "max_tokens": int(max_tokens or self._scoring_max_tokens(self.max_tokens)),
             "system": system,
             "messages": [{"role": "user", "content": user}],
-            **request_controls(
-                temperature=self.temperature,
-                top_p=self.top_p,
-                thinking_type=self.thinking_type,
-                effort=self.effort,
-            ),
+            **request_controls(temperature=self.temperature, top_p=self.top_p, plan=plan),
         }
         if schema is not None and self.structured_output == "json_schema":
             body.setdefault("output_config", {})["format"] = {
@@ -320,7 +345,37 @@ class AnthropicMessagesScorer(LLMScorer):
         except ValueError as exc:
             raise MessagesJSONOutputError("invalid_envelope") from exc
 
-    def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None, rate_limit_retries=None, deadline=None):
+    # -- 思考计划：上限、超时与日志上下文 ---------------------------------------------------------
+
+    def _json_plan(self, scoring=False):
+        return self.scoring_thinking_plan if scoring else self.thinking_plan
+
+    def request_output_tokens(self, answer_budget=None, *, scoring=False):
+        """AI 任务的实发上限：``answer_budget`` 是正式输出预算（docs/模型思考能力表方案.md 第 5.2 节）。"""
+
+        return thinking.request_max_tokens(
+            self._json_plan(scoring), configured=self.max_tokens, explicit=self.max_tokens_explicit,
+            answer_budget=answer_budget,
+        )
+
+    def request_timeout_seconds(self, default_timeout_seconds=None, *, scoring=False):
+        if default_timeout_seconds is None or self.timeout_seconds_explicit:
+            return None
+        timeout = max(self.timeout_seconds, default_timeout_seconds)
+        if self._json_plan(scoring).raises_output_limit:
+            timeout = max(timeout, thinking.THINKING_ON_TIMEOUT_SECONDS)
+        return timeout
+
+    def _scoring_max_tokens(self, answer_budget):
+        if self.scoring_thinking_plan.raises_output_limit and not self.max_tokens_explicit:
+            return self.scoring_thinking_plan.raised_max_tokens()
+        return int(answer_budget)
+
+    def _context(self, body, plan, answer_budget):
+        return thinking.call_context(plan, answer_budget=answer_budget, max_tokens=body.get("max_tokens"))
+
+    def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None, rate_limit_retries=None, deadline=None,
+                         call_context=None):
         return post_with_retry(
             self,
             url="%s/messages" % self.base_url,
@@ -345,6 +400,7 @@ class AnthropicMessagesScorer(LLMScorer):
             timeout_seconds=timeout_seconds,
             rate_limit_retries=rate_limit_retries,
             deadline=deadline,
+            call_context=call_context,
         )
 
     def _validate_frozen_controls(self, provider):
@@ -371,7 +427,7 @@ class AnthropicMessagesScorer(LLMScorer):
             chat_input_payload(paper, criterion, evidence_candidates, structure_checks, anchors),
             schema=score_schema(),
         )
-        data = self._send(body)
+        data = self._send(body, call_context=self._context(body, self.scoring_thinking_plan, self.max_tokens))
         output = parse_messages_json(data)
         output.setdefault("criterion_id", criterion.id)
         output.setdefault("criterion_name", criterion.name)
@@ -394,9 +450,9 @@ class AnthropicMessagesScorer(LLMScorer):
             chat_envelope_instructions(criterion["scoring_mode"]),
             json.dumps(envelope_payload, ensure_ascii=False, separators=(",", ":")),
             schema=envelope_score_schema(criterion["scoring_mode"]),
-            max_tokens=provider["sampling"]["max_tokens"],
+            max_tokens=self._scoring_max_tokens(provider["sampling"]["max_tokens"]),
         )
-        data = self._send(body)
+        data = self._send(body, call_context=self._context(body, self.scoring_thinking_plan, self.max_tokens))
         output = parse_messages_json(data)
         output.setdefault("criterion_id", criterion["code"])
         output.setdefault("criterion_name", criterion["name"])
@@ -416,10 +472,13 @@ class AnthropicMessagesScorer(LLMScorer):
             request.system,
             request.user,
             schema=request.schema,
-            max_tokens=provider["sampling"]["max_tokens"],
+            # 信封记正式输出预算（Core 证据预算按它扣）；思考开着时实发上限放到封顶值，写在 model_version 里。
+            max_tokens=self._scoring_max_tokens(provider["sampling"]["max_tokens"]),
         )
         self.last_view_summary = compression_summary(request)
-        return parse_messages_json(self._send(body))
+        return parse_messages_json(
+            self._send(body, call_context=self._context(body, self.scoring_thinking_plan, self.max_tokens))
+        )
 
     def score_core_envelope(self, *, envelope):
         """Score one immutable PromptEnvelopeV3/V4 semantic rule via its view."""
@@ -440,7 +499,9 @@ class AnthropicMessagesScorer(LLMScorer):
 
     # -- generic JSON completion (drafting, classification, structure, coherence) --
 
-    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None, attempts_limit=None, default_timeout_seconds=None, rate_limit_retries=None, deadline=None):
+    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None, attempts_limit=None, default_timeout_seconds=None, rate_limit_retries=None, deadline=None, scoring=False):
+        """``default_max_tokens`` 是正式输出预算；``scoring=True`` 用评分计划（语义一致性检查）。"""
+
         request_options = {}
         if attempts_limit is not None:
             request_options["attempts_limit"] = attempts_limit
@@ -448,21 +509,21 @@ class AnthropicMessagesScorer(LLMScorer):
             request_options["rate_limit_retries"] = rate_limit_retries
         if deadline is not None:
             request_options["deadline"] = deadline
-        if default_timeout_seconds is not None and not self.timeout_seconds_explicit:
-            request_options["timeout_seconds"] = max(self.timeout_seconds, default_timeout_seconds)
+        timeout = self.request_timeout_seconds(default_timeout_seconds, scoring=scoring)
+        if timeout is not None:
+            request_options["timeout_seconds"] = timeout
         if response_schema is not None:
             # 起草层已有一次格式修正；传输层再重试会把一次超时放大成多次等待（同 Chat）。
             request_options["attempts_limit"] = 1
+        plan = self._json_plan(scoring)
         body = self._body(
             instructions,
             json.dumps(payload, ensure_ascii=False),
             schema=response_schema,
-            max_tokens=(
-                self.max_tokens
-                if self.max_tokens_explicit or default_max_tokens is None
-                else max(self.max_tokens, default_max_tokens)
-            ),
+            max_tokens=self.request_output_tokens(default_max_tokens, scoring=scoring),
+            plan=plan,
         )
+        request_options["call_context"] = self._context(body, plan, default_max_tokens)
         return parse_messages_json(self._send(body, **request_options))
 
 
@@ -477,6 +538,7 @@ __all__ = [
     "parse_messages_json",
     "request_controls",
     "resolve_structured_output",
+    "thinking_plans",
     "sanitize_schema",
     "usage_from_messages",
 ]

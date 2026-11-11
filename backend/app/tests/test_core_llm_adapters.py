@@ -355,8 +355,18 @@ def test_classification_transport_attempt_limit_disables_implicit_timeout_retrie
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("adapter", [OpenAIResponsesScorer, OpenAICompatibleChatScorer])
-@pytest.mark.parametrize("explicit_timeout, expected", [(None, 120), (25, 25)])
+@pytest.mark.parametrize(
+    "adapter, explicit_timeout, expected",
+    [
+        # 表外模型按「可能在思考」处理（Q1），AI 任务的缺省等待放到 240 秒（Q2）；
+        (OpenAIResponsesScorer, None, 240),
+        # Chat 没配连接时用平台默认的显式「关闭」，等待照旧取任务缺省值；
+        (OpenAICompatibleChatScorer, None, 120),
+        # 连接显式超时始终优先。
+        (OpenAIResponsesScorer, 25, 25),
+        (OpenAICompatibleChatScorer, 25, 25),
+    ],
+)
 def test_classification_timeout_is_scoped_and_respects_explicit_connection(adapter, explicit_timeout, expected):
     import httpx
 

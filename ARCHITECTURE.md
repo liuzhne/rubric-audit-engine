@@ -70,7 +70,7 @@ flowchart LR
 | `services/calibration/`、`eval/`、`services/release_gates.py` | 锚点、QWK/MAE/漂移、候选和人工批准记录 | 把 Mock/test-only 演练声明为生产门禁通过 |
 | `services/report/`、`services/spreadsheet/` | v1/v2 HTML、JSON、Excel、在线写表适配 | 修改历史评分结果 |
 | `services/deployment/`、`backend/app/scripts/ops_backup.py` | inventory、OPS readiness、Postgres 验证、带 manifest 的备份/校验/恢复 | 以 OPS 绿色替代评分质量发布批准 |
-| `services/ai_connections.py`、`services/llm/`、`services/cache/` | 私有 BYOK 加密/快照、三种协议适配（Chat Completions / Responses / Claude Messages，共用 `llm/transport`）、重试、诊断、L0 缓存、按连接的进程内并发与熔断 | 把部署级旧 Key 复制成用户私有连接；在 Core 外改变已冻结策略；把进程内额度误当成跨实例全局额度 |
+| `services/ai_connections.py`、`services/llm/`、`services/cache/` | 私有 BYOK 加密/快照、三种协议适配（Chat Completions / Responses / Claude Messages，共用 `llm/transport`）、按模型能力表决定思考（`llm/thinking_capabilities`，主机族在 `llm/hosts`）、重试、诊断、L0 缓存、按连接的进程内并发与熔断 | 把部署级旧 Key 复制成用户私有连接；在 Core 外改变已冻结策略；把进程内额度误当成跨实例全局额度 |
 | `services/llm_observability.py` | 以 Langfuse v4/OpenTelemetry 建立 `scoring_run -> rule_scoring_task -> llm_generation -> retry_attempt` Trace，从应用源头脱敏和采样 | 保存权威分数/任务状态；默认上传完整 Prompt/论文；让 Exporter 失败传播到评分主链 |
 
 ## 4. 核心调用链
@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-11 | 按模型能力表决定思考 | 新增 `llm/hosts.py`（主机族，`auth_headers` 改用它）与 `llm/thinking_capabilities.py`（能力表与解析）；三个适配器构造时算出辅助计划与评分计划，请求合并计划的写法，思考开着时放开请求上限；`thinking_params` 只剩旧行为且名单改查表；运行身份读评分计划，强度与放开的上限写进 `model_version`；旧路径 L0 缓存键加思考身份与正式输出预算；起草器去掉 `isinstance`，改问适配器要实发上限。无迁移，见 §2026-11-11 小节 |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 只改工作流与仓库安全设置；应用模块、调用链与数据流不变 |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 只改仓库规则集与发布规则；流水线、模块与调用链不变 |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | §6 改为“部署成功后线上是 main 的最新提交，实际版本以 `/opt/pgs/RELEASE` 为准”；分片收集规则与 pytest 默认一致；调用链不变 |
@@ -1897,3 +1898,39 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
 - 流式回放没有进度事件，只有 `accepted` 与 `done`。
 
 维护记录：2026-11-06 · 评分助手：发送去重：记录请求编号的生成、回放与唯一索引兜底的调用链；迁移 head 升为 `0042_assistant_message_client_id`。
+
+### 2026-11-11 按模型能力表决定思考
+
+方案见 `docs/模型思考能力表方案.md`。同一协议下各厂商关思考、调强度的写法不同，原来散落在 `thinking_params` 的 Google 名单、Chat 适配器里 OpenRouter 的特判、Claude 的“只发显式配置”和 Responses 的“什么都不发”里；现在集中到一张能力表。
+
+模块：
+- `llm/hosts.py`：`host_family(base_url)` 把主机归成 `vertex`、`gemini_api`、`zhipu`、`openrouter`、`dashscope`、`deepseek`、`moonshot`、`openai`、`anthropic`、`bedrock`、`other`。`auth_headers.is_vertex_host` 与 `thinking_params.is_google_openai_host` 都改为调用它。
+- `llm/thinking_capabilities.py`：能力表 `CAPABILITIES`（每条：协议、主机族、模型名前缀、能否关闭、关闭写法、最低强度与写法、最大输出、来源、核实日期）；`lookup` 按规整后的模型名取最长前缀，前缀必须落在版本号边界上；`resolve_chat` / `resolve_messages` / `resolve_responses` 按“显式配置 → 表 → 未知模型”得到不可变的 `ThinkingPlan`；`legacy_*_plan` 复现改动前的行为；`plans()` 按 `THINKING_CAPABILITY_SCOPE` 返回 `(辅助计划, 评分计划)`。
+- `llm/thinking_params.py`：只剩旧行为（评分路径在 scope 不是 `all` 时用），`google_can_disable_thinking` 改查表。
+
+调用链：
+
+```
+get_llm_scorer → 适配器构造
+  └─ thinking.plans(协议, base_url, 模型, 显式配置) → thinking_plan（辅助）、scoring_thinking_plan（评分）
+       ├─ thinking_type / provider_controls().thinking ← 评分计划的身份（开关）
+       └─ model_version ← 协议版本 + ;effort=… + ;max_tokens=…（思考开着、连接没写上限时）
+complete_json / complete_with_tools（AI 任务、评分助手）
+  └─ 合并 thinking_plan.fields()；实发上限 request_output_tokens(正式输出预算)；超时 request_timeout_seconds
+score_core_* / score_envelope / score_criterion（评分路径）
+  └─ 合并 scoring_thinking_plan.fields()（v1 信封与计划不一致时按信封冻结的设置旧换算）；实发上限 _scoring_max_tokens
+post_with_retry(call_context=…)
+  └─ llm_call 日志记思考开关、强度、来源、命中记录、正式输出预算与实发上限、正式输出用量；
+     表说能关却观测到思考 → thinking_capability_mismatch
+```
+
+数据流与持久化：
+- 运行身份不改封闭结构：`thinking.type` 只记开关，`sampling.max_tokens` 记正式输出预算（Core 证据预算按它扣，不受放开的请求上限影响），强度与放开的上限在 `model_version` 里。scope 不是 `all` 时评分路径的身份与请求和改动前逐字节相同。
+- 能力表不进连接快照：改表不会让在跑的任务报“连接配置已变更”。
+- 旧兼容路径的 L0 缓存键加 `thinking`（评分计划的身份）与 `max_tokens`（正式输出预算），`llm_cache.PROMPT_VERSION=2026-11-11-1`。
+- 正式输出用量只进日志（`usage.observed_usage` 的 `answer_tokens` / `answer_source`），不加列、无迁移。
+- 语义一致性检查走 `complete_json(scoring=True)`，用评分计划。
+- `ai_rule_drafter` 不再按类型判断适配器：有 `request_output_tokens` 的就是真实适配器，6144 作为正式输出预算交给它；截断与超时提示按辅助计划区分“关不掉思考”。
+- “测试连接”里 Claude 的探测请求用同一份辅助计划，测试与 AI 任务发同样的思考参数。
+
+维护记录：2026-11-11 · 按模型能力表决定思考：新增两个模块与调用链；接口、数据库不变，head `0042_assistant_message_client_id` 不变。

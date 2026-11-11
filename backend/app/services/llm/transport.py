@@ -13,6 +13,7 @@ import httpx
 
 from backend.app.services.llm.call_log import log_call_failed
 from backend.app.services.llm.call_log import log_call_succeeded
+from backend.app.services.llm.call_log import log_thinking_mismatch
 from backend.app.services.llm.debug_logging import log_llm_exception
 from backend.app.services.llm.debug_logging import log_llm_request
 from backend.app.services.llm.debug_logging import log_llm_response
@@ -28,6 +29,10 @@ from backend.app.services.llm.retry import retry_delay_seconds
 from backend.app.services.llm.retry import retry_fits_before_deadline
 from backend.app.services.llm.retry import retry_reason
 from backend.app.services.llm_observability import observation
+
+
+# 能力表做出的「可以关闭」判断（thinking_capabilities.TABLE_SOURCES）；这里写死避免循环导入。
+_TABLE_SOURCES = frozenset({"table", "family_default"})
 
 
 def langfuse_usage(usage):
@@ -61,6 +66,7 @@ def post_with_retry(
     deadline=None,
     rate_limit_delay_seconds=None,
     rate_limit_min_call_seconds=None,
+    call_context=None,
 ):
     """Send one provider request with the shared retry/deadline/circuit policy.
 
@@ -73,6 +79,8 @@ def post_with_retry(
     ``timeout_seconds``, ``usage_meter`` and the optional connection snapshot.
     ``usage_of(data)`` maps a decoded success body onto the neutral usage
     fields; ``success_output(data)`` adds protocol-specific trace fields.
+    ``call_context`` carries the thinking plan of this call (no content) for the
+    call log and the capability-table mismatch warning.
     """
 
     base_attempts = (
@@ -136,8 +144,15 @@ def post_with_retry(
                 usage = usage_of(data)
                 log_call_succeeded(
                     provider_label, scorer.model_name, data,
-                    elapsed_ms=elapsed_ms, attempt=attempt, usage=usage,
+                    elapsed_ms=elapsed_ms, attempt=attempt, usage=usage, context=call_context,
                 )
+                if (
+                    isinstance(call_context, dict)
+                    and call_context.get("thinking") == "off"
+                    and call_context.get("source") in _TABLE_SOURCES
+                    and usage.get("reasoning_source")
+                ):
+                    log_thinking_mismatch(provider_label, scorer.model_name, usage=usage, context=call_context)
                 scorer.usage_meter.record_success(usage)
                 generation.update(
                     output={
