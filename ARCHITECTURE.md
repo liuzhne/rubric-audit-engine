@@ -593,6 +593,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
 | 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | 新增 `scoring/retrieval/section_roles.py`（标题对到章节角色）与 `scope_policy.py`（Profile 注入 Core 的三个判断）；`judge_scope.py` 改为只读 `@5` 的 `scope`；规则快照 `@4` 删除、`@5` 新增；执行器加缺章短路与多章引用检查。开关默认关，见 §2026-11-11 小节 |
+| 2026-11-11 | 评分细则适用范围（#99 第三轮复审） | 识别完成只重读审查工作区、不重建编辑表单；规则编辑器的范围显示改取工作区（`ruleScopes`），不放进编辑表单 |
 | 2026-11-11 | 评分细则适用范围（#99 第二轮复审） | 范围移出 `rule_content`（不进 `content_token` 与审查签名），审查工作区单独给出；重新编译时 `review_carry.carry_rule_scopes` 把内容未变的规则的范围带过去；前端没有进行中的识别任务时一律重新识别 |
 | 2026-11-11 | 评分细则适用范围（#99 复审） | 范围识别写回时锁评分标准行并核对当前执行草稿；全部不合格的输出按不合格处理；已有 `judge_scope` 修改时保留；前端卸载时停止跟踪、有未保存修改时不能识别、成功后再点按重新识别。调用链不变 |
 | 2026-11-11 | 评分细则适用范围（分期 A：评分标准侧） | 新增 `services/rubric_scope/`（`vocabulary` 章节角色词表与校验、`identification` 范围识别）与 AI 任务种类 `rule_scope`；起草组带 `scope` 经前端复制到行、编译写进 `atomic_rules.scope`（0044）；审查工作区只读显示范围，不再给判定范围推断。评分调用链不变，见 §2026-11-11 小节 |
@@ -1998,7 +1999,7 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - 审查工作区规则带 `scope`（只读）与 `scope_label`，两者都不在 `rule_content` 里，不进 `content_token` 与审查签名；原来的 `judge_scope` / `judge_scope_hint` 推断展示删除。
 - 重新编译（`pipeline` 持久化）：`review_carry.snapshot_rule_scopes` / `carry_rule_scopes` 把内容与评分上下文未变的规则的范围带到新版本；人工与 Excel 行的范围因此不会在下一次保存后丢失。
 - 不再由人指定：`lifecycle` 可编辑字段去掉 `applies_to`，`evidence_policy.judge_scope` 随修改去掉；规则编辑器只读显示范围。Excel“适用范围”列仍写进 `applies_to`，只用来给 Word 批注找对应规则。
-- 前端：第 3 步 `RuleScopePanel` 发起识别；`stores/rubrics.scopeTask` 与其它 AI 任务一样轮询、可停止与重试。
+- 前端：第 3 步 `RuleScopePanel` 发起识别；`stores/rubrics.scopeTask` 与其它 AI 任务一样轮询、可停止与重试。完成时只重读审查工作区，不重建编辑表单；`AtomicRuleEditor` 的范围显示取自工作区（`ruleScopes`），不在编辑表单里，所以识别期间或读取途中的修改不会被覆盖。
 - 评分：本分期不读 `scope`，`SCORING_JUDGE_SCOPE_ENABLED` 打开时仍按旧的 `judge_scope.py` 推断（生产没开），分期 B 改写。
 
 维护记录：2026-11-11 · 评分细则适用范围（分期 A）：新增模块、AI 任务种类与编译落库；迁移 head 升为 `0044_atomic_rule_scope`。

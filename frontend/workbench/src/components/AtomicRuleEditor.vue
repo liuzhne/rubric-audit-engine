@@ -1,5 +1,10 @@
 <script setup>
-defineProps({ rules: { type: Array, required: true }, disabled: Boolean });
+const props = defineProps({
+  rules: { type: Array, required: true },
+  disabled: Boolean,
+  /** 规则 id → {scope, scope_label}：只读的适用范围，来自审查工作区，不在编辑表单里。 */
+  scopes: { type: Object, default: () => ({}) },
+});
 const selects = {
   direction: ['评分方向', ['band','deduct','bonus','none']],
   effect_type: ['生效方式', ['score','review','block_submission','report_only']],
@@ -10,8 +15,14 @@ const labels = { band:'分档', deduct:'扣分', bonus:'加分', none:'不计分
 const advanced = { checker_key:'检查器', checker_params:'检查器参数', evidence_policy:'证据要求', positive_example:'正例', negative_example:'反例', boundary_example:'边界示例', depends_on_rule_codes:'依赖规则' };
 // 适用范围（docs/评分细则适用范围方案.md）：由模型在起草或范围识别时给出，这里只读。
 const scopeSources = { ai_draft: '起草时 AI 识别', ai_identified: '范围识别任务' };
+/** @param {any} rule */
+function scopeOf(rule) {
+  return props.scopes[rule.id] || {};
+}
+/** @param {any} rule */
 function scopeSource(rule) {
-  return rule.scope ? (scopeSources[rule.scope.source] || 'AI 识别') : '尚未识别，按全文';
+  const scope = scopeOf(rule).scope;
+  return scope ? (scopeSources[scope.source] || 'AI 识别') : '尚未识别，按全文';
 }
 function updateJson(event, object, key) {
   const input = event.target;
@@ -42,7 +53,7 @@ function updateJson(event, object, key) {
       </div>
       <p v-if="rule.changes.judge_type === 'semantic'" class="field" data-test="rule-scope">
         <span class="field-label">适用范围</span>
-        <span>{{ rule.scope_label || '全文' }}</span>
+        <span>{{ scopeOf(rule).scope_label || '全文' }}</span>
         <span class="faint">（{{ scopeSource(rule) }}；不可手动修改）</span>
       </p>
       <div v-for="(level, index) in rule.changes.levels" :key="index" class="level-editor">

@@ -464,18 +464,17 @@ const reviewTracker = aiTaskTracker("review", async (task) => {
 }, (message) => { parseError.value = message; });
 
 // 适用范围识别（docs/评分细则适用范围方案.md 第 6 节）：完成后重新读取草稿，规则上显示新范围。
-// 有未保存的修改时不重新读取：刷新会重建表单、丢掉修改（有未保存修改时按钮禁用，这里兜住
-// 识别开始后才动手改的情况）。范围不进 content_token，这些修改照常可以保存。
+// 识别完成只重新读取审查工作区，不重建编辑表单：范围不进 content_token，编辑器上的范围显示
+// 直接取工作区（ruleScopes），所以识别期间或读取途中做的修改都不会被覆盖，照常可以保存。
 const scopeTracker = aiTaskTracker("scope", async (task) => {
   const id = selected.value;
   if (task.status !== "succeeded" || !id || task.rubric_id !== id) return;
-  if (dirty.value) {
-    // 范围不进 content_token，保存不会因为识别写了范围而被拒；保存后页面会重新读取。
-    reviewNotice.value = "适用范围识别已完成。当前有未保存的修改，保存后即可看到识别结果。";
-    return;
-  }
-  await refreshDetail(id);
+  const latest = await api.get(`/rubrics/${id}/review-workspace`);
+  if (selected.value === id && latest.compilation_id === workspace.value?.compilation_id) workspace.value = latest;
 }, (message) => { parseError.value = message; });
+/** 规则编号 → 只读的适用范围显示；来自审查工作区，不在编辑表单里。 */
+const ruleScopes = computed(() => Object.fromEntries((workspace.value?.rules || []).map((rule) =>
+  [rule.id, { scope: rule.scope, scope_label: rule.scope_label }])));
 const unscopedRuleCount = computed(() => (workspace.value?.rules || []).filter((rule) =>
   rule.judge_type === "semantic" && rule.status !== "rejected" && !rule.scope).length);
 const runScopeIdentification = () => parseAction(async (id) => {
@@ -920,7 +919,7 @@ async function refreshDetail(id = selected.value) {
       total_score: full.total_score, criteria: structuredClone(full.criteria || []) };
     if (nextWorkspace.atomic_editing) editForm.value.atomic_rules = nextWorkspace.rules.map((rule) => ({
       id: rule.id, content_token: rule.content_token, criterion_id: rule.criterion_id,
-      rule_code: rule.rule_code, scope: rule.scope, scope_label: rule.scope_label,
+      rule_code: rule.rule_code,
       changes: Object.fromEntries([
         'name','rule_text','direction','effect_type','max_points','repeat_policy','cap_points',
         'judge_type','checker_key','checker_params','evidence_policy','positive_example',
@@ -1290,7 +1289,7 @@ onUnmounted(() => {
             <RuleReviewPanel v-if="activeCriterion && workspace" :criterion="activeCriterion" :rules="criterionRules" :busy="operationBusy" :editable="editable"
               :defer-confirmation="hasPendingAiDraft" @confirm="confirmRules([$event])" @confirm-all="confirmRules"
               @exclude="setRuleExcluded($event, true)" @restore="setRuleExcluded($event, false)" />
-            <AtomicRuleEditor v-if="editForm?.atomic_rules && current.status === 'draft'" :rules="editForm.atomic_rules.filter(r => r.criterion_id === selectedCriterion)" :disabled="!canEdit || operationBusy" />
+            <AtomicRuleEditor v-if="editForm?.atomic_rules && current.status === 'draft'" :rules="editForm.atomic_rules.filter(r => r.criterion_id === selectedCriterion)" :scopes="ruleScopes" :disabled="!canEdit || operationBusy" />
             <details v-else-if="editableCriterion && current.status === 'draft'" class="card card-pad">
               <summary>修改 {{ activeCriterion?.code }} 的评分细则</summary>
               <p class="faint">保存会生成新的执行草稿；新条款需重新核对确认。</p>
