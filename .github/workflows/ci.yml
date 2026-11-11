@@ -661,6 +661,8 @@ jobs:
           SCORING_INSUFFICIENT_EVIDENCE_MODE: ${{ vars.SCORING_INSUFFICIENT_EVIDENCE_MODE }}
           # 评分证据与理由（docs/评分证据与理由改造方案.md）；没设即 off，统一评测后再设。
           SCORING_DECISION_BASIS_MODE: ${{ vars.SCORING_DECISION_BASIS_MODE }}
+          # 按模型能力表决定思考（docs/模型思考能力表方案.md）；没设即 auxiliary，off 回滚，all 要 QWK 复核后再设。
+          THINKING_CAPABILITY_SCOPE: ${{ vars.THINKING_CAPABILITY_SCOPE }}
         run: |
           set -euo pipefail
           host="${SITE_URL#https://}"

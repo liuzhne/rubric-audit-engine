@@ -11,17 +11,8 @@ Claude（Anthropic Messages）的 ``x-api-key`` 不经过这里。
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit
-
-
-_VERTEX_HOST = "aiplatform.googleapis.com"
-
-
-def is_vertex_host(base_url) -> bool:
-    """全局端点 ``aiplatform.googleapis.com`` 与区域端点 ``<区域>-aiplatform.googleapis.com``。"""
-
-    host = (urlsplit(str(base_url or "")).hostname or "").rstrip(".").casefold()
-    return host == _VERTEX_HOST or host.endswith("-" + _VERTEX_HOST)
+# 主机识别集中在 hosts（能力表也用它）；这里保留原名导出，调用方不用改。
+from backend.app.services.llm.hosts import is_vertex_host
 
 
 def openai_auth_headers(base_url, api_key) -> dict[str, str]:

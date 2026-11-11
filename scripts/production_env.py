@@ -92,10 +92,12 @@ OPTIONAL_SWITCHES = ("SITE_LEADS_ENABLED", "ASSISTANT_AGENT_ENABLED", "SCORING_J
 #: 取值不是 true / false 的可选设置：没设时不写进 .env，应用取默认值。第一个取值是默认值。
 #: SCORING_TOKEN_BUDGET_TARGET=envelope 是预算检查的回退；SCORING_INSUFFICIENT_EVIDENCE_MODE=review 打开“证据不足”；
 #: SCORING_DECISION_BASIS_MODE=cite 让每条判定都给依据（docs/评分证据与理由改造方案.md）。
+#: THINKING_CAPABILITY_SCOPE：按模型能力表决定思考的范围（docs/模型思考能力表方案.md）；off 是回滚，all 要 QWK 复核后再设。
 OPTIONAL_CHOICES = {
     "SCORING_TOKEN_BUDGET_TARGET": ("provider_view", "envelope"),
     "SCORING_INSUFFICIENT_EVIDENCE_MODE": ("off", "review"),
     "SCORING_DECISION_BASIS_MODE": ("off", "cite"),
+    "THINKING_CAPABILITY_SCOPE": ("auxiliary", "off", "all"),
 }
 # --from-environment 只取这些：部署任务的环境里还有 GITHUB_*、RUNNER_* 等无关变量。
 ENVIRONMENT_NAMES = (

@@ -578,6 +578,7 @@ def test_production_env_passes_the_scoring_stage2_settings(tmp_path, monkeypatch
         "SCORING_JUDGE_SCOPE_ENABLED",
         "SCORING_INSUFFICIENT_EVIDENCE_MODE",
         "SCORING_DECISION_BASIS_MODE",
+        "THINKING_CAPABILITY_SCOPE",
     ):
         monkeypatch.delenv(name, raising=False)
     output = tmp_path / "pgs.env"
@@ -585,14 +586,17 @@ def test_production_env_passes_the_scoring_stage2_settings(tmp_path, monkeypatch
 
     assert script.main(args) == 0
     assert "SCORING_" not in output.read_text(encoding="utf-8")
+    assert "THINKING_CAPABILITY_SCOPE" not in output.read_text(encoding="utf-8")
 
     output.unlink()
     monkeypatch.setenv("SCORING_JUDGE_SCOPE_ENABLED", "true")
     monkeypatch.setenv("SCORING_INSUFFICIENT_EVIDENCE_MODE", "review")
     monkeypatch.setenv("SCORING_TOKEN_BUDGET_TARGET", "envelope")
     monkeypatch.setenv("SCORING_DECISION_BASIS_MODE", "cite")
+    monkeypatch.setenv("THINKING_CAPABILITY_SCOPE", "off")
     assert script.main(args) == 0
     text = output.read_text(encoding="utf-8")
+    assert "THINKING_CAPABILITY_SCOPE='off'" in text
     assert "SCORING_JUDGE_SCOPE_ENABLED='true'" in text
     assert "SCORING_INSUFFICIENT_EVIDENCE_MODE='review'" in text
     assert "SCORING_TOKEN_BUDGET_TARGET='envelope'" in text
@@ -611,6 +615,7 @@ def test_production_env_passes_the_scoring_stage2_settings(tmp_path, monkeypatch
         "SCORING_JUDGE_SCOPE_ENABLED",
         "SCORING_INSUFFICIENT_EVIDENCE_MODE",
         "SCORING_DECISION_BASIS_MODE",
+        "THINKING_CAPABILITY_SCOPE",
     ):
         assert "%s: ${{ vars.%s }}" % (name, name) in lightsail
 

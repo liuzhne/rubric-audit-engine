@@ -255,7 +255,12 @@ def test_byok_compatible_connection_does_not_inherit_platform_thinking(monkeypat
 
     scorer = get_llm_scorer(runtime)
 
-    assert scorer.thinking_type == ""
+    # 没有继承平台的「关闭」：评分路径照旧什么都不发（身份 type 为空）；AI 任务按能力表处理，
+    # 表外模型不发参数、按可能在思考处理（docs/模型思考能力表方案.md Q1）。
+    assert not scorer.thinking_type
+    assert scorer.configured_thinking_type == ""
+    assert scorer.scoring_thinking_plan.fields() == {}
+    assert scorer.thinking_plan.fields() == {}
     scorer.close()
 
 
