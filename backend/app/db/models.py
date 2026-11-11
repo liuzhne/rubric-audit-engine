@@ -1712,7 +1712,7 @@ class EvaluationBatch(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     organization_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("organizations.id"),
@@ -1925,7 +1925,8 @@ class GradingBatch(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
+    # 评分任务按个人隔离的依据：教师只看得到 owner_id 是自己的任务（docs/评分任务个人隔离方案.md）。
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=True, index=True)
     organization_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("organizations.id"), nullable=True, index=True, deferred=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     department: Mapped[str] = mapped_column(String(100), nullable=True)

@@ -84,6 +84,28 @@ describe("batches store", () => {
     expect(store.total).toBe(3);
   });
 
+  it("阶段动作的响应不带连表标签时，列表里的评分标准与创建人保持原样", async () => {
+    stub({
+      "/batches": [
+        { id: "b1", name: "批次", status: "reviewed", state_version: 3,
+          rubric_name: "毕业论文标准", rubric_version_label: "v2", owner_name: "张老师" },
+      ],
+      "/batches/b1/archive": {
+        id: "b1", name: "批次", status: "archived", state_version: 4,
+        rubric_name: null, rubric_version_label: null, owner_name: null,
+      },
+    });
+    const store = useBatchesStore();
+    await store.load();
+
+    await store.archive("b1");
+
+    expect(store.batches[0]).toMatchObject({
+      status: "archived", state_version: 4,
+      rubric_name: "毕业论文标准", rubric_version_label: "v2", owner_name: "张老师",
+    });
+  });
+
   it("按阶段筛选交给服务端，不在客户端筛第二遍", async () => {
     stub({
       "/batches": BATCHES,

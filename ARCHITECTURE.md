@@ -595,6 +595,8 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 | 2026-11-11 | 邀请与重置：直接给链接 | 只改前端 `views/AccountView.vue`：创建邀请、签发重置后显示并复制完整链接（`secretLink`）；接口、模块边界与调用链不变 |
 | 2026-11-11 | 按模型能力表决定思考（复审修正） | `transport.post_with_retry` 新增 `output_limit_fallback`：表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次（只在辅助调用）；`errors.output_limit_rejected` 识别；L0 键加实际思考字段；Vertex 区域主机改整串匹配。调用链方向不变 |
 | 2026-11-11 | 按模型能力表决定思考 | 新增 `llm/hosts.py`（主机族，`auth_headers` 改用它）与 `llm/thinking_capabilities.py`（能力表与解析）；三个适配器构造时算出辅助计划与评分计划，请求合并计划的写法，思考开着时放开请求上限；`thinking_params` 只剩旧行为且名单改查表；运行身份读评分计划，强度与放开的上限写进 `model_version`；旧路径 L0 缓存键加思考身份与正式输出预算；起草器去掉 `isinstance`，改问适配器要实发上限。无迁移，见 §2026-11-11 小节 |
+| 2026-11-10 | 评分任务个人隔离：#95 复审修正 | 前端 `stores/batches.js` 的 `applyStageResult` 不再用阶段动作响应里的空值覆盖列表连表取来的标签（评分标准名与版本、创建人）；模块边界与调用链不变 |
+| 2026-11-10 | 评分任务个人隔离 | 新增 `services/ownership.py`（归属条件）；`api/guards.py` 的四个守卫与三个列表条件改为“组织 + 教师本人”；`exports.py`、`submissions_v2.py` 改调共享守卫；人工复核任务服务加 `owner_id` 参数；迁移 `0043_batch_owner_isolation`；`BatchRead.owner_name` |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 只改工作流与仓库安全设置；应用模块、调用链与数据流不变 |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 只改仓库规则集与发布规则；流水线、模块与调用链不变 |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | §6 改为“部署成功后线上是 main 的最新提交，实际版本以 `/opt/pgs/RELEASE` 为准”；分片收集规则与 pytest 默认一致；调用链不变 |
@@ -1900,6 +1902,31 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
 - 流式回放没有进度事件，只有 `accepted` 与 `done`。
 
 维护记录：2026-11-06 · 评分助手：发送去重：记录请求编号的生成、回放与唯一索引兜底的调用链；迁移 head 升为 `0042_assistant_message_client_id`。
+
+### 2026-11-10 评分任务个人隔离
+
+方案见 [docs/评分任务个人隔离方案.md](docs/评分任务个人隔离方案.md)。评分任务及其下的文件、评分结果、作业、人工复核任务与导出，从“同组织可见”收窄为“教师只看自己建的，组织管理员与平台管理员看本组织全部”。
+
+```
+请求 ─▶ api/guards.py
+          personal_owner_id(principal)   未开鉴权 / 平台管理员 / 组织管理员 → None（不收窄）；其余 → 用户 id
+          visible_batch / visible_paper / visible_run / visible_job / visible_evaluation_batch   单个对象，看不到一律 404
+          batch_scope / paper_scope / run_scope                                              列表的查询条件，与上面同一口径
+        ─▶ services/ownership.py   “归属于谁”的条件：文件、评分结果一律按所属任务的 owner_id 判断
+```
+
+- **归属只看任务**：`papers.owner_id`、`scoring_runs.owner_id` 仍在写，但可见性不读它们；v1 的结果经 文件 → `grading_batches.owner_id`，v2 的结果经 提交 → `evaluation_batches.owner_id`。两头都挂不上的旧结果行才退回它自己的 `owner_id`。
+- **入口**：`routes/batches.py`（列表、概览）、`papers.py`、`scoring.py`、`exports.py`、`batch_jobs.py`、`submissions_v2.py`，以及评分助手的 `list_recent_batches`。助手的其余读写本来就走同一组守卫，没有单独的判断。
+- **服务层**：`batch_scoring.jobs.list_attention_batch_scoring_jobs` 与 `submissions.review_tasks` 的五个函数多一个 `owner_id` 参数，由路由传 `guards.personal_owner_id(principal)`；不传即不收窄（worker、脚本照旧）。
+- **持久化**：迁移 0043 把空的 `owner_id` 回填为 `created_by`，并给 `grading_batches` / `evaluation_batches` 的 `owner_id` 建索引。数据库 RLS 仍只按组织，个人这一层只在应用里。
+- **没有变的**：评分标准的可见性（私有 / 组织）、校准锚点、L0 缓存与规则级决策账本（组织内共用的缓存，没有接口能读出别人的内容）、worker 领取任务（不分用户）。
+- **前端**：任务列表对管理员多一列“创建人”（`BatchRead.owner_name`）；教师不显示。
+
+维护记录：2026-11-10 · 评分任务个人隔离：记录归属判断的位置、各入口与没有变的边界；迁移 head 升为 `0043_batch_owner_isolation`。
+
+#95 复审补充：归档、重新打开等阶段动作的响应是批次本身，不带列表接口连表取来的 `rubric_name` / `rubric_version_label` / `owner_name`。前端 `applyStageResult` 合并时跳过这三项的空值，列表里的评分标准与创建人不会被抹成“—”。
+
+维护记录：2026-11-10 · 评分任务个人隔离：#95 复审修正：记录阶段动作结果的合并方式。
 
 ### 2026-11-11 按模型能力表决定思考
 

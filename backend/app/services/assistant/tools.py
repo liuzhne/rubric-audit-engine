@@ -100,11 +100,14 @@ def _list_published_rubrics(ctx: RunContext, _params: NoParams):
     ]
 
 
-@register("list_recent_batches", "列出当前组织最近的评分任务", RecentBatchesParams, read_only=True)
+@register("list_recent_batches", "列出当前用户能看到的最近的评分任务", RecentBatchesParams, read_only=True)
 def _list_recent_batches(ctx: RunContext, params: RecentBatchesParams):
-    query = select(GradingBatch).order_by(GradingBatch.created_at.desc()).limit(params.limit)
-    if ctx.principal.organization_id is not None:
-        query = query.where(GradingBatch.organization_id == ctx.principal.organization_id)
+    query = (
+        select(GradingBatch)
+        .where(*guards.batch_scope(ctx.principal))
+        .order_by(GradingBatch.created_at.desc())
+        .limit(params.limit)
+    )
     return [{"id": b.id, "name": b.name} for b in ctx.db.scalars(query).all()]
 
 

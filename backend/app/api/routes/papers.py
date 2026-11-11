@@ -90,9 +90,11 @@ _visible_batch = guards.visible_batch
 def list_papers(batch_id: Optional[str] = None, db: Session = Depends(get_db), principal: CurrentPrincipal = Depends(current_principal)):
     # 稳定排序：同一时刻上传的材料若没有 tiebreaker，两次请求可能给出不同
     # 顺序，评分工作区的「下一份」就会跳错行。neighbors 端点必须用同一口径。
-    query = select(Paper).order_by(Paper.created_at.desc(), Paper.id.desc())
-    if principal.organization_id is not None:
-        query = query.where(Paper.organization_id == principal.organization_id)
+    query = (
+        select(Paper)
+        .where(*guards.paper_scope(principal))
+        .order_by(Paper.created_at.desc(), Paper.id.desc())
+    )
     if batch_id:
         query = query.where(Paper.batch_id == batch_id)
     return db.scalars(query).all()

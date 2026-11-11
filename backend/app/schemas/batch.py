@@ -69,6 +69,8 @@ class BatchRead(BaseModel):
     # 乐观并发游标：客户端带回它，过期的写请求会冲突失败而非静默覆盖。
     state_version: int
     owner_id: Optional[str] = None
+    #: 创建人的显示名。教师只看得到自己的任务；管理员靠它分清全组织的任务各是谁的。
+    owner_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
