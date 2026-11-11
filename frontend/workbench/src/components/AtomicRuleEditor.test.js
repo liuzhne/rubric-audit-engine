@@ -23,12 +23,12 @@ it('单次旧上限可显式清除，累计封顶输入仍可编辑；清除不�
 });
 
 it('语义规则只读显示适用范围和来源，没有可编辑的范围输入', () => {
+  const scopes = { r: { scope: { type: 'cross_section', sections: ['绪论', '结论'], source: 'ai_draft' }, scope_label: '跨章节：绪论、结论' } };
   const rule = { id: 'r', rule_code: 'T01.r1',
-    scope: { type: 'cross_section', sections: ['绪论', '结论'], source: 'ai_draft' }, scope_label: '跨章节：绪论、结论',
     changes: { name:'研究问题与结论呼应', rule_text:'绪论的研究问题在结论中没有回应', direction:'deduct', effect_type:'score',
       judge_type:'semantic', repeat_policy:'once', max_points:2, levels:[],
       evidence_policy: { mode:'source_quote', requirement:'required', minimum_coverage:'1' } } };
-  const wrapper = mount(AtomicRuleEditor, { props: { rules: [rule] } });
+  const wrapper = mount(AtomicRuleEditor, { props: { rules: [rule], scopes } });
   const field = wrapper.find('[data-test="rule-scope"]');
   expect(field.text()).toContain('跨章节：绪论、结论');
   expect(field.text()).toContain('起草时 AI 识别');
@@ -40,7 +40,7 @@ it('语义规则只读显示适用范围和来源，没有可编辑的范围输�
 it('确定性规则不显示适用范围；没有范围的语义规则按全文显示', () => {
   const deterministic = { id: 'd', rule_code: 'T01.d1', changes: { name:'必备章节', rule_text:'缺少结论章', direction:'deduct',
     effect_type:'score', judge_type:'deterministic', levels:[] } };
-  const semantic = { id: 's', rule_code: 'T01.s1', scope: null, scope_label: '全文',
+  const semantic = { id: 's', rule_code: 'T01.s1',
     changes: { name:'论证充分', rule_text:'论证不充分', direction:'deduct', effect_type:'score', judge_type:'semantic', levels:[] } };
   const wrapper = mount(AtomicRuleEditor, { props: { rules: [deterministic, semantic] } });
   const scopes = wrapper.findAll('[data-test="rule-scope"]');
