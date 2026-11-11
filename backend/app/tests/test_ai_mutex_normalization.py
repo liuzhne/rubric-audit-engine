@@ -365,3 +365,39 @@ def test_append_sync_recognizes_a_truncated_suffixed_name():
     command = {"rubric": {"criteria": [{"code": "T04", "deduction_rules_structured": [row]}]}}
     _sync_ai_mutex_groups(existing, generated, command)
     assert existing[0]["mutex_group"] is None
+
+
+def _rows_with_every_name_taken():
+    names = (MUTEX, *suffixed_mutex_groups(MUTEX, FP_B))
+    return [row for name in names for row in (manual_row(name), manual_row(name))] + [
+        ai_row(0, fingerprint=FP_B), ai_row(1, fingerprint=FP_B)]
+
+
+def test_every_candidate_taken_raises_instead_of_merging():
+    rows = _rows_with_every_name_taken()
+    with pytest.raises(ValueError, match="互斥组"):
+        effective_mutex_groups(rows, compiled=set(range(len(rows))))
+
+
+def test_every_candidate_taken_rejects_creation(client):
+    response = client.post("/api/rubrics", json={"name": "合成候选名全被占用", "version": "v1", "total_score": 10,
+        "criteria": [{"code": "T04", "name": "合成格式", "max_score": 10, "scoring_mode": "deductive",
+                      "deduction_rules_structured": _rows_with_every_name_taken()}]})
+    assert response.status_code == 400
+    assert "互斥组" in response.json()["detail"]
+
+
+def test_every_candidate_taken_blocks_the_append_path_without_writing(client):
+    rubric = _import_rubric(client, name="合成追加候选名全被占用")["rubric"]
+    before = workspace(client, rubric["id"])
+    names = ("METHOD-B01-G01-SEVERITY", *suffixed_mutex_groups("METHOD-B01-G01-SEVERITY", FP_A))
+    rows = [row for name in names for row in (manual_row(name), manual_row(name))] + _method_rows(2)
+    criteria = client.get(f"/api/rubrics/{rubric['id']}").json()["criteria"]
+    criteria[0]["scoring_mode"] = "deductive"
+    criteria[0]["deduction_rules_structured"] = rows
+    response = client.post(f"/api/rubrics/{rubric['id']}/recompile", json={
+        "supersedes_compilation_id": before["compilation_id"], "version": "v2", "criteria": criteria})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "RUBRIC_RECOMPILE_BLOCKED" and "互斥组" in detail["context"]["reason"]
+    assert workspace(client, rubric["id"])["compilation_id"] == before["compilation_id"]

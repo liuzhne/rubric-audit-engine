@@ -59,7 +59,8 @@ def effective_mutex_groups(rows, *, compiled):
       发布校验却会把它当成定义写错。
     - 2 行以上、同名已被投影里更早的组或人工行占用：改用 ``suffixed_mutex_groups`` 里
       第一个没被占用的名字（通常是 ``原名-指纹前 8 位``），不让两次生成的不同问题并进
-      同一个互斥组。先应用的那一代保持原名，已确认的细则不受影响。
+      同一个互斥组。先应用的那一代保持原名，已确认的细则不受影响。候选名都已被占用时
+      抛 ``ValueError``，不并进别的组；建评分标准与重新编译的接口把它转成 400 / 422，不落库。
     - 人工和 Excel 行原样返回，写错了照旧由发布校验挡住。
     """
     result = [row.get("mutex_group") if isinstance(row, Mapping) else None for row in rows]
@@ -79,8 +80,13 @@ def effective_mutex_groups(rows, *, compiled):
         else:
             name = mutex
             if name in taken:
-                candidates = suffixed_mutex_groups(mutex, fingerprint)
-                name = next((item for item in candidates if item not in taken), candidates[-1])
+                free = [item for item in suffixed_mutex_groups(mutex, fingerprint) if item not in taken]
+                if not free:
+                    # 只有人工规则恰好写成了这些机器名字才会走到这里；并进去会让两个问题互斥，宁可报错。
+                    raise ValueError(
+                        f"AI 起草的互斥组 {mutex!r} 与其他规则重名，可用的替代名也都已被占用；"
+                        "请修改人工规则的互斥组名后重试")
+                name = free[0]
             taken.add(name)
         for index in members:
             result[index] = name
