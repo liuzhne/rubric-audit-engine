@@ -31,8 +31,19 @@ const membersError = ref(null);
 const membersLoading = ref(false);
 
 const invite = reactive({ email: "", role: "member", busy: false, error: null });
-/** 一次性机密：邀请链接与重置令牌只在创建响应里出现一次，之后无法取回。 */
+/** 一次性机密：邀请链接与重置链接里的令牌只在创建响应里出现一次，之后无法取回。 */
 const issued = ref(null);
+
+/**
+ * 把令牌拼成对方可以直接打开的链接。后端只给令牌、不代发邮件；让管理员自己拼
+ * `/register?token=…` 既容易拼错，也没人知道该拼成什么。地址取当前页面的来源：
+ * 管理员在哪个入口操作，对方就从哪个入口注册。
+ * @param {"/register" | "/reset-password"} path
+ * @param {string} token
+ */
+function secretLink(path, token) {
+  return `${window.location.origin}${path}?token=${encodeURIComponent(token)}`;
+}
 const rowBusy = reactive({});
 
 async function loadMembers() {
@@ -71,7 +82,7 @@ async function onInvite() {
     issued.value = {
       kind: "invitation",
       subject: result.email,
-      value: result.invitation_token,
+      value: secretLink("/register", result.invitation_token),
     };
     invite.email = "";
     await loadMembers();
@@ -119,12 +130,12 @@ async function onIssueReset(member) {
     issued.value = {
       kind: "reset",
       subject: member.username,
-      value: result.reset_token,
+      value: secretLink("/reset-password", result.reset_token),
       expiresAt: result.expires_at,
     };
   } catch (error) {
     if (!(error instanceof StaleContextError)) {
-      membersError.value = error?.message || "签发重置令牌失败";
+      membersError.value = error?.message || "签发重置链接失败";
     }
   } finally {
     rowBusy[member.user_id] = false;
@@ -431,16 +442,17 @@ onMounted(async () => {
     <!-- 一次性机密 -->
     <section v-if="issued" class="notice notice-warn" role="status">
       <p class="notice-title">
-        {{ issued.kind === "invitation" ? "邀请令牌已创建" : "重置令牌已签发" }}
+        {{ issued.kind === "invitation" ? "邀请链接已创建" : "重置链接已签发" }}
       </p>
       <p>
         面向 <strong>{{ issued.subject }}</strong>。
         <template v-if="issued.expiresAt">有效期至 {{ formatTime(issued.expiresAt) }}。</template>
-        <strong>此令牌只显示这一次</strong>，请立即通过可信渠道转交；离开本页后无法再取回。
+        {{ issued.kind === "invitation" ? "对方打开链接即可注册并加入本组织。" : "对方打开链接即可设置新密码。" }}
+        <strong>此链接只显示这一次</strong>，请立即通过可信渠道转交；离开本页后无法再取回。
       </p>
       <div class="secret">
         <code>{{ issued.value }}</code>
-        <button class="btn btn-sm" type="button" @click="copySecret(issued.value)">复制</button>
+        <button class="btn btn-sm" type="button" @click="copySecret(issued.value)">复制链接</button>
         <button class="btn btn-sm" type="button" @click="issued = null">隐藏</button>
       </div>
       <p v-if="copyState === 'copied'" class="field-hint">已复制到剪贴板。</p>
@@ -454,7 +466,7 @@ onMounted(async () => {
       <div class="card-head">
         <div>
           <h2 class="card-title">组织成员</h2>
-          <p class="card-note">调整角色或为成员签发一次性密码重置令牌。本系统不代发邮件。</p>
+          <p class="card-note">调整角色或为成员签发一次性密码重置链接。本系统不代发邮件。</p>
         </div>
         <span class="chip">{{ members.length }} 人</span>
       </div>
@@ -498,7 +510,7 @@ onMounted(async () => {
                   :disabled="rowBusy[member.user_id]"
                   @click="onIssueReset(member)"
                 >
-                  签发重置令牌
+                  签发重置链接
                 </button>
               </td>
             </tr>

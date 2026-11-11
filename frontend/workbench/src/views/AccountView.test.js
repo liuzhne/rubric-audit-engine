@@ -142,3 +142,36 @@ it("手动选择 Claude 协议后显示设置，连接列表标出 Claude 与思
   expect(wrapper.get('[data-test="protocol-value"]').text()).toBe("Anthropic Messages（Claude） · 手动选择");
   expect(wrapper.find('[data-test="draft-effort"]').exists()).toBe(true);
 });
+
+it("创建邀请与签发重置后给出可以直接打开的链接，而不是让管理员自己拼", async () => {
+  const session = useSessionStore();
+  session.capabilities = { abilities: { manage_members: true } };
+  session.organizationId = "org-1";
+  vi.spyOn(session, "loadCapabilities").mockResolvedValue();
+  api.get.mockImplementation(async (url) => url === "/organizations/org-1/members"
+    ? [{ user_id: "u1", username: "zhang", display_name: "张老师", email: "zhang@example.test", role: "teacher" }]
+    : []);
+  api.post.mockImplementation(async (url) => url.endsWith("/password-reset-token")
+    ? { reset_token: "reset+token/1", expires_at: "2026-11-12T00:00:00Z" }
+    : { email: "new@example.test", invitation_token: "invite_token-1" });
+  const writeText = vi.fn().mockResolvedValue();
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  const wrapper = mount(AccountView);
+  await flushPromises();
+
+  await wrapper.get(".invite-email input").setValue("new@example.test");
+  await wrapper.get("form.invite-form").trigger("submit");
+  await flushPromises();
+  const invitation = `${window.location.origin}/register?token=invite_token-1`;
+  expect(wrapper.get(".secret code").text()).toBe(invitation);
+  expect(wrapper.text()).toContain("邀请链接已创建");
+  await wrapper.findAll("button").find(b => b.text() === "复制链接").trigger("click");
+  expect(writeText).toHaveBeenCalledWith(invitation);
+
+  await wrapper.findAll("button").find(b => b.text() === "签发重置链接").trigger("click");
+  await flushPromises();
+  // 令牌里的 + 与 / 要转义，否则对方打开后 + 会被读成空格，令牌对不上。
+  expect(wrapper.get(".secret code").text())
+    .toBe(`${window.location.origin}/reset-password?token=reset%2Btoken%2F1`);
+  vi.unstubAllGlobals();
+});
