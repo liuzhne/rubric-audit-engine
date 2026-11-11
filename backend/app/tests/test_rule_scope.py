@@ -280,3 +280,52 @@ def test_scope_task_refuses_a_rubric_that_is_not_a_draft(client, monkeypatch):
     monkeypatch.setattr(service, "get_llm_scorer", lambda *args, **kwargs: FakeScopeModel([]))
     response = client.post(f"/api/rubrics/{rubric['id']}/ai-tasks", json={"kind": "rule_scope", "params": {}})
     assert response.status_code == 409, response.text
+
+
+def test_scope_task_treats_all_invalid_entries_as_invalid_output(client, monkeypatch):
+    rubric = _create_rubric(client, [_manual_row(0)], name="合成范围全部无效")
+    bad = {"rules": [{"rule_code": "manual.t04.deduct.1.v1", "scope": {"type": "section", "sections": ["第九章"]}}]}
+    task, fake = _run_scope_task(client, monkeypatch, rubric["id"], [bad, bad])
+    assert task["status"] == "succeeded", task
+    assert len(fake.calls) == 2  # 全部不合格也带修正提示再问一次
+    assert task["result"]["failed"] == ["T04"] and task["result"]["discarded"] == 1
+
+
+def test_scope_write_back_refuses_a_superseded_draft(client):
+    from backend.app.services.rubric_scope.identification import ScopeIdentificationError
+    from backend.app.services.rubric_scope.identification import apply_identified_scopes
+
+    rubric = _create_rubric(client, [_manual_row(0)], name="合成范围草稿已换")
+    with client.session_factory() as session:
+        old_version = session.scalars(select(models.RubricVersion).where(
+            models.RubricVersion.rubric_id == rubric["id"])).one().id
+    workspace = client.get(f"/api/rubrics/{rubric['id']}/review-workspace").json()
+    criteria = client.get(f"/api/rubrics/{rubric['id']}").json()["criteria"]
+    saved = client.post(f"/api/rubrics/{rubric['id']}/recompile", json={
+        "supersedes_compilation_id": workspace["compilation_id"], "version": "v2", "criteria": criteria})
+    assert saved.status_code == 200, saved.text
+    with client.session_factory() as session:
+        with pytest.raises(ScopeIdentificationError) as caught:
+            apply_identified_scopes(session, rubric_id=rubric["id"], version_id=old_version, profile_key="thesis",
+                                    scopes={"manual.t04.deduct.1.v1": {"type": "document", "sections": []}},
+                                    actor_id=None)
+        session.rollback()
+    assert caught.value.code == "RUBRIC_VERSION_CHANGED"
+
+
+def test_editing_the_evidence_policy_keeps_an_existing_judge_scope(client):
+    rubric = _create_rubric(client, [_manual_row(0)], name="合成保留旧判定范围")
+    with client.session_factory() as session:
+        rule = session.scalars(select(models.AtomicRule).where(
+            models.AtomicRule.criterion.has(models.RubricCriterion.rubric_id == rubric["id"]))).one()
+        rule.evidence_policy = {**rule.evidence_policy, "judge_scope": "document"}
+        code, policy = rule.rule_code, dict(rule.evidence_policy)
+        session.commit()
+    response = client.patch(f"/api/rubrics/{rubric['id']}/rules/{code}", json={
+        "changes": {"evidence_policy": {**policy, "minimum_coverage": "1", "judge_scope": "section"}},
+        "reason": "合成修改"})
+    assert response.status_code == 200, response.text
+    with client.session_factory() as session:
+        rule = session.scalars(select(models.AtomicRule).where(models.AtomicRule.rule_code == code,
+            models.AtomicRule.criterion.has(models.RubricCriterion.rubric_id == rubric["id"]))).one()
+        assert rule.evidence_policy["judge_scope"] == "document"  # 已有的保留，新指定的不保存

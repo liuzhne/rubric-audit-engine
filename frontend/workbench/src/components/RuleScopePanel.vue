@@ -15,6 +15,8 @@ const props = defineProps({
   pending: { type: Number, default: 0 },
   busy: { type: Boolean, default: false },
   editable: { type: Boolean, default: false },
+  /** 有未保存的修改：识别会改规则内容，先保存再识别，否则保存时会因内容已变化被拒绝。 */
+  dirty: { type: Boolean, default: false },
   /** 最近一次识别任务（进行中、失败或刚完成）。 */
   task: { type: Object, default: null },
 });
@@ -27,14 +29,18 @@ const progress = computed(() => scopeTaskProgress(props.task));
   <section class="card card-pad" data-test="rule-scope-panel">
     <h3 class="card-title">适用范围</h3>
     <p class="card-note">
-      每条规则评分时看论文的哪一部分（全文、某一章或几章对照）由 AI 识别，不需要手动填写。起草的细则已自带范围；
-      其余规则可在这里识别，只看评分项与规则文字，不看论文。没有范围的规则按全文处理。
+      每条规则评分时要看论文的哪一部分（全文、某一章或几章对照）由 AI 识别，不需要手动填写。起草的细则已自带范围；
+      其余规则可在这里识别，只看评分项与规则文字，不看论文。
+    </p>
+    <p class="notice" data-test="rule-scope-not-applied">
+      目前范围只保存和显示，暂不影响评分：评分时按范围取证据的功能上线并打开后才生效，在此之前所有规则都按全文评分。
     </p>
     <p data-test="rule-scope-pending">{{ pending ? `${pending} 条规则还没有适用范围。` : '所有语义规则都已有适用范围。' }}</p>
     <p v-if="progress" class="faint" data-test="rule-scope-progress">{{ progress }}</p>
+    <p v-if="dirty && pending" class="notice notice-warn" data-test="rule-scope-dirty">请先保存当前修改，再识别适用范围。</p>
     <div class="actions">
       <button class="btn" type="button" data-test="rule-scope-run"
-        :disabled="busy || !editable || running || !pending" @click="emit('run')">识别适用范围</button>
+        :disabled="busy || !editable || running || dirty || !pending" @click="emit('run')">识别适用范围</button>
       <button v-if="running" class="btn btn-sm" type="button" :disabled="busy" @click="emit('task-action', 'cancel')">停止</button>
       <button v-if="canRetryAiTask(task)" class="btn btn-sm" type="button" :disabled="busy" @click="emit('task-action', 'retry')">重试失败的评分项</button>
     </div>

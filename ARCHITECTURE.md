@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-11 | 评分细则适用范围（#99 复审） | 范围识别写回时锁评分标准行并核对当前执行草稿；全部不合格的输出按不合格处理；已有 `judge_scope` 修改时保留；前端卸载时停止跟踪、有未保存修改时不能识别、成功后再点按重新识别。调用链不变 |
 | 2026-11-11 | 评分细则适用范围（分期 A：评分标准侧） | 新增 `services/rubric_scope/`（`vocabulary` 章节角色词表与校验、`identification` 范围识别）与 AI 任务种类 `rule_scope`；起草组带 `scope` 经前端复制到行、编译写进 `atomic_rules.scope`（0044）；审查工作区只读显示范围，不再给判定范围推断。评分调用链不变，见 §2026-11-11 小节 |
 | 2026-11-11 | 邀请与重置：直接给链接 | 只改前端 `views/AccountView.vue`：创建邀请、签发重置后显示并复制完整链接（`secretLink`）；接口、模块边界与调用链不变 |
 | 2026-11-11 | 按模型能力表决定思考（复审修正） | `transport.post_with_retry` 新增 `output_limit_fallback`：表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次（只在辅助调用）；`errors.output_limit_rejected` 识别；L0 键加实际思考字段；Vertex 区域主机改整串匹配。调用链方向不变 |
@@ -1986,7 +1987,8 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 编译 pipeline._ai_row_scope：只认可归属的 AI 行（ai_* 来源 + 指纹 + 行键）→ stored_scope(source=ai_draft) → atomic_rules.scope
 范围识别 AI 任务 rule_scope（rubric_scope.identification + ai_tasks.rule_scope）
   对象：草稿状态、参与评分、语义判断、scope 为空的规则；每个评分项一个条目（最多 20 条规则）
-  on_task_success → apply_identified_scopes：只写仍为空的规则，source=ai_identified，追加审计事件 scope，不改规则状态
+  on_task_success → apply_identified_scopes：锁评分标准行（与发布共用）、核对仍是建任务时的执行草稿，
+      只写仍为空的规则，source=ai_identified，追加审计事件 scope，不改规则状态；全部不合格的输出修正一次后记失败
 复制已有细则：atomic_recompile._fields、lifecycle.clone_published_rubric 都带上 scope
 ```
 

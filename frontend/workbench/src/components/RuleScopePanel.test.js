@@ -24,3 +24,10 @@ it("没有编辑权限时不能发起", () => {
   const wrapper = mount(RuleScopePanel, { props: { pending: 2, editable: false } });
   expect(wrapper.find('[data-test="rule-scope-run"]').element.disabled).toBe(true);
 });
+
+it("有未保存的修改时不能发起识别，并说明范围暂不影响评分", () => {
+  const wrapper = mount(RuleScopePanel, { props: { pending: 2, editable: true, dirty: true } });
+  expect(wrapper.find('[data-test="rule-scope-run"]').element.disabled).toBe(true);
+  expect(wrapper.find('[data-test="rule-scope-dirty"]').exists()).toBe(true);
+  expect(wrapper.find('[data-test="rule-scope-not-applied"]').text()).toContain("暂不影响评分");
+});
