@@ -1313,6 +1313,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-11 | AI 起草互斥组规整（#94 第二轮复审） | 核对脚本的 `blocks_publish` 与发布校验对齐：组里有分档细则时不看排除，照样算阻断 |
 | 2026-11-11 | 邀请与重置：直接给链接 | 无新命令、无后端变化；`public/` 已重建；邀请新成员的操作改为“复制链接发给对方”；排错：对方打不开邀请链接 |
 | 2026-11-11 | 按模型能力表决定思考（复审修正） | 表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次，新增日志 `thinking_output_limit_fallback` 与对应排错；写明只有严格 Schema 才是正式输出的硬上界 |
 | 2026-11-11 | 按模型能力表决定思考 | 新环境变量 `THINKING_CAPABILITY_SCOPE`（off / auxiliary / all，默认 auxiliary，经仓库变量进生产）；无迁移；`llm_call` 日志新增思考与正式输出字段，新增 `thinking_capability_mismatch`、`thinking_explicit_adjusted`；能力表维护步骤；排错：守卫报思考没关、起草截断、思考模型超时、表外模型上限变大 |
@@ -3202,7 +3203,7 @@ cd frontend/workbench && npx vitest run src/stores/assistant.test.js
   ssh pgs-prod 'docker exec pgs-app-1 python -m backend.app.scripts.inspect_ai_draft_rules --all'
   ```
 
-  `lone_mutex_groups` 是单档互斥组（`blocks_publish` 与发布校验对单条组的判断一致：只因排除剩 1 条的不挡）；`invalid_mutex_groups` 是 2 条以上、却跨评分项或含分档细则的组，发布校验同样报这个错（两类合起来覆盖 `mutex_definition_invalid` 的全部情况，这一类多半是人工写的，不归 AI 规整管）；`collided_mutex_groups` 是同名多次起草，不挡发布，但会把不同问题并成一组判分；`single_tier_ranges` 是引用了区间原文却只有一档的 AI 组，由分期 B 处理。`--all` 只列出有问题的评分标准。
+  `lone_mutex_groups` 是单档互斥组（`blocks_publish` 与发布校验对单条组的判断一致：只因排除剩 1 条、且这条不是分档细则的不挡）；`invalid_mutex_groups` 是 2 条以上、却跨评分项或含分档细则的组，发布校验同样报这个错（两类合起来覆盖 `mutex_definition_invalid` 的全部情况，这一类多半是人工写的，不归 AI 规整管）；`collided_mutex_groups` 是同名多次起草，不挡发布，但会把不同问题并成一组判分；`single_tier_ranges` 是引用了区间原文却只有一档的 AI 组，由分期 B 处理。`--all` 只列出有问题的评分标准。
 
 测试：`.venv/bin/python -m pytest -q backend/app/tests/test_ai_mutex_normalization.py`
 

@@ -8,7 +8,10 @@ import pytest
 
 from backend.app.scripts import inspect_ai_draft_rules as script
 from backend.app.services.rubric_import.compiler import point_range
+from backend.app.services.rubric_import.deduction_caps import MUTEX_GROUP_MAX_CHARS
 from backend.app.services.rubric_import.deduction_caps import effective_mutex_groups
+from backend.app.services.rubric_import.deduction_caps import suffixed_mutex_group
+from backend.app.services.rubrics.atomic_recompile import _sync_ai_mutex_groups
 from backend.app.tests.test_m8_web_rubric_lifecycle import _import_rubric
 from backend.app.tests.test_rubric_review_workspace import workspace
 
@@ -289,3 +292,45 @@ def test_inspect_script_reports_band_and_cross_criterion_groups(client):
         "criterion_codes": ["T04"], "mutex_group": "G3", "cross_criterion": False, "has_band": True,
         "rule_codes": ["manual.t04.deduct.1.v1", "manual.t04.deduct.2.v1"]}]
     assert report["lone_mutex_groups"] == []
+
+
+def test_inspect_script_lone_band_group_blocks_even_after_exclusion(client):
+    from backend.app.db import models
+    from backend.app.services.rubrics.rule_status import EXCLUDED_STATUS
+
+    rubric = _create(client, [manual_row("G5", points=1), manual_row("G5", points=2)], name="合成核对排除后的分档组")
+    with client.session_factory() as session:
+        criterion = session.get(models.Rubric, rubric["id"]).criteria[0]
+        rules = {rule.rule_code: rule for rule in session.query(models.AtomicRule).filter(
+            models.AtomicRule.criterion_id == criterion.id)}
+        # 排除一条后只剩 1 条，但剩下的是分档细则：发布校验不看排除，照样报 mutex_definition_invalid。
+        rules["manual.t04.deduct.1.v1"].direction = "band"
+        rules["manual.t04.deduct.2.v1"].status = EXCLUDED_STATUS
+        session.commit()
+        report = script.inspect_rubric(session, rubric["id"])
+        session.rollback()
+    assert report["lone_mutex_groups"] == [{
+        "criterion_code": "T04", "mutex_group": "G5", "rule_codes": ["manual.t04.deduct.1.v1"],
+        "blocks_publish": True}]
+    assert report["counts"]["lone_blocking_publish"] == 1
+
+
+LONG_MUTEX = "长" * 100  # 接口直接写进来的 AI 行可以比起草生成的原名长，正好顶到列宽
+
+
+def test_suffixed_name_stays_within_the_column_width():
+    rows = [ai_row(0, mutex=LONG_MUTEX), ai_row(1, mutex=LONG_MUTEX),
+            ai_row(0, mutex=LONG_MUTEX, fingerprint=FP_B), ai_row(1, mutex=LONG_MUTEX, fingerprint=FP_B)]
+    result = effective_mutex_groups(rows, compiled={0, 1, 2, 3})
+    assert result[:2] == [LONG_MUTEX, LONG_MUTEX]
+    assert result[2] == result[3] == suffixed_mutex_group(LONG_MUTEX, FP_B)
+    assert len(result[2]) == MUTEX_GROUP_MAX_CHARS and result[2].endswith(f"-{FP_B[:8]}")
+
+
+def test_append_sync_recognizes_a_truncated_suffixed_name():
+    row = ai_row(0, mutex=LONG_MUTEX)
+    existing = [{"rule_code": "manual.t04.deduct.1.v1", "mutex_group": suffixed_mutex_group(LONG_MUTEX, FP_A)}]
+    generated = [{"rule_code": "manual.t04.deduct.1.v1", "mutex_group": None}]
+    command = {"rubric": {"criteria": [{"code": "T04", "deduction_rules_structured": [row]}]}}
+    _sync_ai_mutex_groups(existing, generated, command)
+    assert existing[0]["mutex_group"] is None

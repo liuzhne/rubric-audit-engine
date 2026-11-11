@@ -4,6 +4,21 @@ from decimal import Decimal, InvalidOperation
 from collections.abc import Mapping
 
 
+# atomic_rules.mutex_group 的列宽（String(100)）。SQLite 不检查长度，Postgres 超长直接拒绝写入。
+MUTEX_GROUP_MAX_CHARS = 100
+
+
+def suffixed_mutex_group(mutex, fingerprint):
+    """撞名时写进细则的互斥组：``原名-指纹前 8 位``，总长不超过列宽。
+
+    起草生成的原名是 ``{评分项}-B{批}-G{组}-SEVERITY``，远短于列宽；接口直接写进来的
+    AI 行可以更长。超长时截短原名、保留完整后缀，同一次生成之内仍靠原名前缀区分。
+    编译规整与追加同步共用这一个写法，追加同步才认得出编译时加过后缀的名字。
+    """
+    suffix = f"-{fingerprint[:8]}"
+    return f"{mutex[:MUTEX_GROUP_MAX_CHARS - len(suffix)]}{suffix}"
+
+
 def ai_mutex_identity(row):
     """(互斥组, 生成指纹)；不是可归属的 AI 起草行时返回 None。
 
@@ -51,7 +66,7 @@ def effective_mutex_groups(rows, *, compiled):
         if len(members) < 2:
             name = None
         else:
-            name = mutex if mutex not in taken else f"{mutex}-{fingerprint[:8]}"
+            name = mutex if mutex not in taken else suffixed_mutex_group(mutex, fingerprint)
             taken.add(name)
         for index in members:
             result[index] = name

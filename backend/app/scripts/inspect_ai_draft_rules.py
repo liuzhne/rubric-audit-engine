@@ -8,7 +8,7 @@
 看评分标准当前的执行草稿（已发布的看发布版本），列出三类情况：
 
 - ``lone_mutex_groups``：互斥组里参与评分的细则只有 1 条。``blocks_publish`` 与发布校验
-  （``mutex_definition_invalid``）对单条组的判断一致：只因排除剩 1 条的不挡。
+  （``mutex_definition_invalid``）对单条组的判断一致：只因排除剩 1 条、且这条不是分档细则的不挡。
 - ``invalid_mutex_groups``：2 条以上、却跨评分项或含分档细则的组，发布校验同样报
   ``mutex_definition_invalid``。和上一类合起来覆盖这个错误码的全部情况。
 - ``collided_mutex_groups``：同一个互斥组里的细则来自不止一次起草，不同问题被并成一组。
@@ -89,7 +89,8 @@ def inspect_rubric(db, rubric_id: str) -> dict:
                 "criterion_code": criterion_code.get(members[0].criterion_id),
                 "mutex_group": name,
                 "rule_codes": codes,
-                "blocks_publish": name not in excluded_groups,
+                # 发布校验对含分档细则的组不看排除：分档细则写了互斥组本身就是错的。
+                "blocks_publish": has_band or name not in excluded_groups,
             })
         elif len(criterion_ids) != 1 or has_band:
             # 发布校验另外两种 mutex_definition_invalid：同组跨评分项、组里有分档细则。
