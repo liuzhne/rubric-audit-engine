@@ -592,7 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
-| 2026-11-11 | AI 起草互斥组规整（#94 第二轮复审） | 撞名后缀改由 `deduction_caps.suffixed_mutex_group` 生成并截到列宽 100，编译与追加同步共用；核对脚本的单档组含分档细则时算阻断。调用链不变 |
+| 2026-11-11 | AI 起草互斥组规整（#94 第二轮复审） | 撞名时的候选名改由 `deduction_caps.suffixed_mutex_groups` 生成（`原名-指纹`，放不下或被占用时 `原名-原名哈希-指纹`），都不超过列宽 100，编译与追加同步共用；核对脚本的单档组含分档细则时算阻断。调用链不变 |
 | 2026-11-11 | 邀请与重置：直接给链接 | 只改前端 `views/AccountView.vue`：创建邀请、签发重置后显示并复制完整链接（`secretLink`）；接口、模块边界与调用链不变 |
 | 2026-11-11 | 按模型能力表决定思考（复审修正） | `transport.post_with_retry` 新增 `output_limit_fallback`：表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次（只在辅助调用）；`errors.output_limit_rejected` 识别；L0 键加实际思考字段；Vertex 区域主机改整串匹配。调用链方向不变 |
 | 2026-11-11 | 按模型能力表决定思考 | 新增 `llm/hosts.py`（主机族，`auth_headers` 改用它）与 `llm/thinking_capabilities.py`（能力表与解析）；三个适配器构造时算出辅助计划与评分计划，请求合并计划的写法，思考开着时放开请求上限；`thinking_params` 只剩旧行为且名单改查表；运行身份读评分计划，强度与放开的上限写进 `model_version`；旧路径 L0 缓存键加思考身份与正式输出预算；起草器去掉 `isinstance`，改问适配器要实发上限。无迁移，见 §2026-11-11 小节 |
@@ -1917,7 +1917,7 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
   _compiled_deduction_points：这一行会不会生成细则（编译循环与规整共用这一个判断）
   deduction_caps.effective_mutex_groups：每行写进细则的互斥组
       同一次起草的同一组只剩 1 行会编译 → 空
-      同名已被投影里更早的组或人工行占用 → 原名-指纹前 8 位（suffixed_mutex_group，总长不超过列宽 100，超长截短原名）
+      同名已被投影里更早的组或人工行占用 → 原名-指纹前 8 位（suffixed_mutex_groups；放不下或已被占用 → 截短原名-原名哈希前 8 位-指纹前 8 位，总长不超过列宽 100）
 追加（导入的评分标准）atomic_recompile.prepare_atomic_ai_append
   _sync_ai_mutex_groups：已有 AI 细则改取这一行本次编译出的值，只改机器能产生的值（原名、空、原名加后缀）
       行上写的 rule_code 只用来找已有细则，编译结果按行的位置编号找

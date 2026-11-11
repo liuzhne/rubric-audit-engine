@@ -8,7 +8,7 @@ from backend.app.db import models
 from backend.app.services.rubric_import.deduction_caps import (
     ai_mutex_identity,
     normalize_ai_group_caps,
-    suffixed_mutex_group,
+    suffixed_mutex_groups,
 )
 from backend.app.services.rubric_import import pipeline
 from backend.app.services.rubrics import lifecycle
@@ -132,7 +132,7 @@ def _sync_ai_mutex_groups(existing, generated, command):
         if row is None or compiled_code not in generated_by_code:
             continue
         original, fingerprint = ai_mutex_identity(row)
-        if value.get("mutex_group") in {None, "", original, suffixed_mutex_group(original, fingerprint)}:
+        if value.get("mutex_group") in {None, "", original, *suffixed_mutex_groups(original, fingerprint)}:
             value["mutex_group"] = generated_by_code[compiled_code].get("mutex_group")
 
 

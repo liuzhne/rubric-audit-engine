@@ -2,21 +2,31 @@
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 from collections.abc import Mapping
+from hashlib import sha256
 
 
 # atomic_rules.mutex_group 的列宽（String(100)）。SQLite 不检查长度，Postgres 超长直接拒绝写入。
 MUTEX_GROUP_MAX_CHARS = 100
 
 
-def suffixed_mutex_group(mutex, fingerprint):
-    """撞名时写进细则的互斥组：``原名-指纹前 8 位``，总长不超过列宽。
+def suffixed_mutex_groups(mutex, fingerprint):
+    """撞名时可用的互斥组名，按优先顺序，每个都不超过列宽。
+
+    - ``原名-指纹前 8 位``：放得下时首选，页面上一眼看得出来自哪一组。
+    - ``原名-原名哈希前 8 位-指纹前 8 位``：原名太长要截短时只用它，首选已被占用时也
+      退到它。截短会让前缀相同的两个原名变成同一个名字，原名哈希把它们分开。
 
     起草生成的原名是 ``{评分项}-B{批}-G{组}-SEVERITY``，远短于列宽；接口直接写进来的
-    AI 行可以更长。超长时截短原名、保留完整后缀，同一次生成之内仍靠原名前缀区分。
-    编译规整与追加同步共用这一个写法，追加同步才认得出编译时加过后缀的名字。
+    AI 行可以更长。候选名只由原名和指纹决定、不看占用情况，所以追加同步不用重建整份
+    投影，就能认出编译时写进细则的是哪一个。
     """
-    suffix = f"-{fingerprint[:8]}"
-    return f"{mutex[:MUTEX_GROUP_MAX_CHARS - len(suffix)]}{suffix}"
+    fingerprint_tail = f"-{fingerprint[:8]}"
+    digest_tail = f"-{sha256(mutex.encode('utf-8')).hexdigest()[:8]}{fingerprint_tail}"
+    names = []
+    if len(mutex) + len(fingerprint_tail) <= MUTEX_GROUP_MAX_CHARS:
+        names.append(f"{mutex}{fingerprint_tail}")
+    names.append(f"{mutex[:MUTEX_GROUP_MAX_CHARS - len(digest_tail)]}{digest_tail}")
+    return tuple(names)
 
 
 def ai_mutex_identity(row):
@@ -47,8 +57,9 @@ def effective_mutex_groups(rows, *, compiled):
 
     - 同一次生成的同一组只剩 1 行会编译：不写互斥组。执行器本来就跳过单条互斥组，
       发布校验却会把它当成定义写错。
-    - 2 行以上、同名已被投影里更早的组或人工行占用：加 ``-指纹前 8 位``，不让两次
-      生成的不同问题并进同一个互斥组。先应用的那一代保持原名，已确认的细则不受影响。
+    - 2 行以上、同名已被投影里更早的组或人工行占用：改用 ``suffixed_mutex_groups`` 里
+      第一个没被占用的名字（通常是 ``原名-指纹前 8 位``），不让两次生成的不同问题并进
+      同一个互斥组。先应用的那一代保持原名，已确认的细则不受影响。
     - 人工和 Excel 行原样返回，写错了照旧由发布校验挡住。
     """
     result = [row.get("mutex_group") if isinstance(row, Mapping) else None for row in rows]
@@ -66,7 +77,10 @@ def effective_mutex_groups(rows, *, compiled):
         if len(members) < 2:
             name = None
         else:
-            name = mutex if mutex not in taken else suffixed_mutex_group(mutex, fingerprint)
+            name = mutex
+            if name in taken:
+                candidates = suffixed_mutex_groups(mutex, fingerprint)
+                name = next((item for item in candidates if item not in taken), candidates[-1])
             taken.add(name)
         for index in members:
             result[index] = name

@@ -10,7 +10,7 @@ from backend.app.scripts import inspect_ai_draft_rules as script
 from backend.app.services.rubric_import.compiler import point_range
 from backend.app.services.rubric_import.deduction_caps import MUTEX_GROUP_MAX_CHARS
 from backend.app.services.rubric_import.deduction_caps import effective_mutex_groups
-from backend.app.services.rubric_import.deduction_caps import suffixed_mutex_group
+from backend.app.services.rubric_import.deduction_caps import suffixed_mutex_groups
 from backend.app.services.rubrics.atomic_recompile import _sync_ai_mutex_groups
 from backend.app.tests.test_m8_web_rubric_lifecycle import _import_rubric
 from backend.app.tests.test_rubric_review_workspace import workspace
@@ -323,13 +323,44 @@ def test_suffixed_name_stays_within_the_column_width():
             ai_row(0, mutex=LONG_MUTEX, fingerprint=FP_B), ai_row(1, mutex=LONG_MUTEX, fingerprint=FP_B)]
     result = effective_mutex_groups(rows, compiled={0, 1, 2, 3})
     assert result[:2] == [LONG_MUTEX, LONG_MUTEX]
-    assert result[2] == result[3] == suffixed_mutex_group(LONG_MUTEX, FP_B)
-    assert len(result[2]) == MUTEX_GROUP_MAX_CHARS and result[2].endswith(f"-{FP_B[:8]}")
+    (name,) = suffixed_mutex_groups(LONG_MUTEX, FP_B)  # 放不下“原名-指纹”，只剩带原名哈希的写法
+    assert result[2] == result[3] == name
+    assert len(name) == MUTEX_GROUP_MAX_CHARS and name.endswith(f"-{FP_B[:8]}")
+
+
+def test_truncated_names_with_the_same_prefix_stay_apart():
+    # 两个超长原名前 91 个字相同、都被人工组占用：截短后不能并成同一个互斥组。
+    first, second = "长" * 95 + "甲", "长" * 95 + "乙"
+    rows = [manual_row(first), manual_row(first), manual_row(second), manual_row(second),
+            ai_row(0, mutex=first), ai_row(1, mutex=first),
+            ai_row(0, mutex=second, group="T04-B01-G02"), ai_row(1, mutex=second, group="T04-B01-G02")]
+    result = effective_mutex_groups(rows, compiled=set(range(8)))
+    assert result[4] == result[5] and result[6] == result[7]
+    assert result[4] != result[6]
+    assert {len(result[4]), len(result[6])} == {MUTEX_GROUP_MAX_CHARS}
+    assert not {result[4], result[6]} & {first, second}
+
+
+def test_suffixed_name_taken_by_a_manual_row_falls_back_to_the_hashed_name():
+    preferred, hashed = suffixed_mutex_groups(MUTEX, FP_B)
+    rows = [manual_row(MUTEX), manual_row(MUTEX), manual_row(preferred), manual_row(preferred),
+            ai_row(0, fingerprint=FP_B), ai_row(1, fingerprint=FP_B)]
+    assert effective_mutex_groups(rows, compiled=set(range(6)))[4:] == [hashed, hashed]
+
+
+@pytest.mark.parametrize("which", [0, -1])
+def test_append_sync_recognizes_every_machine_name(which):
+    row = ai_row(0, mutex=MUTEX)
+    existing = [{"rule_code": "manual.t04.deduct.1.v1", "mutex_group": suffixed_mutex_groups(MUTEX, FP_A)[which]}]
+    generated = [{"rule_code": "manual.t04.deduct.1.v1", "mutex_group": None}]
+    command = {"rubric": {"criteria": [{"code": "T04", "deduction_rules_structured": [row]}]}}
+    _sync_ai_mutex_groups(existing, generated, command)
+    assert existing[0]["mutex_group"] is None
 
 
 def test_append_sync_recognizes_a_truncated_suffixed_name():
     row = ai_row(0, mutex=LONG_MUTEX)
-    existing = [{"rule_code": "manual.t04.deduct.1.v1", "mutex_group": suffixed_mutex_group(LONG_MUTEX, FP_A)}]
+    existing = [{"rule_code": "manual.t04.deduct.1.v1", "mutex_group": suffixed_mutex_groups(LONG_MUTEX, FP_A)[0]}]
     generated = [{"rule_code": "manual.t04.deduct.1.v1", "mutex_group": None}]
     command = {"rubric": {"criteria": [{"code": "T04", "deduction_rules_structured": [row]}]}}
     _sync_ai_mutex_groups(existing, generated, command)
