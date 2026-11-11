@@ -105,11 +105,14 @@ def _run_item(view, item_input, scorer):
             exc, code="AI_PROVIDER_ERROR", message="AI 服务暂时不可用，请稍后重试失败的评分项。",
             hints=_PROVIDER_HINTS,
         ) from exc
-    if scopes is None:
+    # 没有 rules 数组，或给出的项全部不合格（编号不认识、范围不合格），都按输出不合格处理。
+    if scopes is None or (not scopes and discarded):
         if not repair:
-            raise AITaskItemError("SCOPE_OUTPUT_INVALID", "模型两次输出都缺少 rules 数组。", disposition="repair")
+            raise AITaskItemError(
+                "SCOPE_OUTPUT_INVALID", "模型输出缺少 rules 数组，或给出的范围全部不合格。", disposition="repair"
+            )
         # 修正后仍不合格：这一项的规则保持没有范围（按全文），其余评分项照常。
-        return {"code": code, "scopes": {}, "discarded": 0, "failed": True}
+        return {"code": code, "scopes": {}, "discarded": discarded, "failed": True}
     return {"code": code, "scopes": scopes, "discarded": discarded, "failed": False}
 
 

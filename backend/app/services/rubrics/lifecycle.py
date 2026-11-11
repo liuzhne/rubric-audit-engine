@@ -401,6 +401,21 @@ def _json_mapping(value, *, field: str) -> dict:
     return normalized
 
 
+def keep_existing_judge_scope(existing_policy, new_policy):
+    """修改证据要求时留下规则上已有的 judge_scope。
+
+    分期 A 不改评分：开关打开的部署里旧评分路径仍读它，只改别的证据要求时不能顺手删掉
+    （评分侧分期 B 起不再读它）。新指定或改动的值不保存，只认原来的。
+    """
+    if not isinstance(new_policy, dict):
+        return new_policy
+    existing = (existing_policy or {}).get("judge_scope") if isinstance(existing_policy, dict) else None
+    result = {key: value for key, value in new_policy.items() if key != "judge_scope"}
+    if existing is not None:
+        result["judge_scope"] = existing
+    return result
+
+
 def _normalize_rule_changes(rule_code: str, changes: dict) -> dict:
     normalized = {}
     for key, value in changes.items():
@@ -426,8 +441,8 @@ def _normalize_rule_changes(rule_code: str, changes: dict) -> dict:
             normalized[key] = number
         elif key in {"checker_params", "evidence_policy"}:
             normalized[key] = _json_mapping(value, field=key)
-            # 人工指定的判定范围已取消（docs/评分细则适用范围方案.md 第 7 节）：旧规则上
-            # 留着的 judge_scope 随这次修改去掉，新写的同样不保存。
+            # 人工指定的判定范围已取消（docs/评分细则适用范围方案.md 第 7 节）：修改里带的
+            # judge_scope 一律不保存；规则上已有的值由 keep_existing_judge_scope 原样留下。
             if key == "evidence_policy":
                 normalized[key].pop("judge_scope", None)
         elif key == "depends_on_rule_codes":
@@ -703,6 +718,10 @@ def edit_atomic_rule(
         )
         if rule.status != "draft":
             raise RubricLifecycleError("只有 draft 原子规则可以修改")
+        if "evidence_policy" in normalized_changes:
+            normalized_changes["evidence_policy"] = keep_existing_judge_scope(
+                rule.evidence_policy, normalized_changes["evidence_policy"]
+            )
         occurred_at = _publication_time(now)
         _require_not_before(
             occurred_at,

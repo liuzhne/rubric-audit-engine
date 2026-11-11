@@ -18,6 +18,7 @@ from backend.app.services.rubric_scope.vocabulary import scope_schema
 from backend.app.services.rubric_scope.vocabulary import stored_scope
 from backend.app.services.rubric_scope.vocabulary import vocabulary_payload
 from backend.app.services.rubrics import lifecycle
+from backend.app.services.rubrics.draft_graph import read_execution_draft
 from backend.app.services.rubrics.rule_status import participates
 
 
@@ -170,13 +171,19 @@ def apply_identified_scopes(session, *, rubric_id, version_id, profile_key, scop
     执行草稿必须还是建任务时那一版，否则抛 ``ScopeIdentificationError``，什么也不写。
     """
 
-    rubric = session.get(models.Rubric, rubric_id)
+    # 与提交审核、发布共用评分标准行锁：锁住后再读状态，锁一直持有到写回所在事务提交，
+    # 避免发布先算完哈希、范围随后写进已发布的版本。
+    rubric = session.scalar(select(models.Rubric).where(models.Rubric.id == rubric_id).with_for_update())
     if rubric is None or rubric.status != "draft":
         raise ScopeIdentificationError(
             "RUBRIC_NOT_DRAFT", "评分标准已提交审核或已发布，识别结果没有写入；请新建草稿后重新识别。"
         )
     version = session.get(models.RubricVersion, version_id)
-    if version is None or version.rubric_id != rubric_id:
+    active = (read_execution_draft(session=session, rubric_id=rubric_id).get("active_compilation") or {}).get(
+        "version"
+    ) or {}
+    # 识别期间重新编译过：旧版本还在、rubric_id 也没变，写进去等于写到已被替换的规则上。
+    if version is None or version.rubric_id != rubric_id or active.get("id") != version_id:
         raise ScopeIdentificationError("RUBRIC_VERSION_CHANGED", "执行草稿已经换了，识别结果没有写入；请重新识别。")
     compilation = session.get(models.RubricCompilation, version.compilation_id)
     rules = {
