@@ -22,16 +22,19 @@ Google（Vertex AI 与 Gemini API 的 OpenAI 兼容端点）不认这个字段�
 
 运行身份（决策账本、L0 缓存都按它区分）记的是这里换算后的值，所以改了写法，旧判定不会被
 当作同一请求复用。
+
+2026-11-10 起这里只是**旧行为**：``THINKING_CAPABILITY_SCOPE`` 不是 ``all`` 时评分路径照旧用它（``off`` 时
+所有调用都用它）。原来的 ``gemini-2.5-flash*`` 名单改为查能力表 ``thinking_capabilities``，表里 Google 族的
+记录与原名单等价；新的按模型决定思考见 ``thinking_capabilities.resolve_chat``。
 """
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit
+from copy import deepcopy
 
-from backend.app.services.llm.auth_headers import is_vertex_host
+from backend.app.services.llm import hosts
 
 
-_GEMINI_API_HOST = "generativelanguage.googleapis.com"
 _DISABLED = frozenset({"disabled", "none", "false", "off"})
 # Google 主机上关不掉思考、或没配置思考时的身份值：思考按模型默认开启。
 GOOGLE_PROVIDER_DEFAULT = "provider-default"
@@ -40,21 +43,21 @@ GOOGLE_PROVIDER_DEFAULT = "provider-default"
 def is_google_openai_host(base_url) -> bool:
     """Vertex AI（全局与区域端点）或 Gemini API 的 OpenAI 兼容端点。"""
 
-    if is_vertex_host(base_url):
-        return True
-    host = (urlsplit(str(base_url or "")).hostname or "").rstrip(".").casefold()
-    return host == _GEMINI_API_HOST
+    return hosts.is_google_host(base_url)
 
 
-def _model_id(model_name) -> str:
-    name = str(model_name or "").strip().casefold()
-    return name.rsplit("/", 1)[-1]  # google/gemini-2.5-flash、models/gemini-2.5-flash
+def _google_capability(base_url, model_name):
+    from backend.app.services.llm.thinking_capabilities import CHAT
+    from backend.app.services.llm.thinking_capabilities import lookup
+
+    return lookup(CHAT, base_url, model_name)
 
 
-def google_can_disable_thinking(model_name) -> bool:
-    """只有 Gemini 2.5 Flash 系列（含 Flash-Lite 与预览版）能用 ``reasoning_effort: none`` 关闭思考。"""
+def google_can_disable_thinking(model_name, base_url="https://aiplatform.googleapis.com") -> bool:
+    """能力表里 Google 族的记录能否关闭思考（原名单只有 Gemini 2.5 Flash 系列，含 Flash-Lite 与预览版）。"""
 
-    return _model_id(model_name).startswith("gemini-2.5-flash")
+    capability = _google_capability(base_url, model_name)
+    return bool(capability is not None and capability.can_disable)
 
 
 def effective_thinking_type(base_url, model_name, thinking_type):
@@ -68,7 +71,7 @@ def effective_thinking_type(base_url, model_name, thinking_type):
     value = str(thinking_type or "").strip()
     if not value or value.casefold() in _DISABLED:
         # 没配置与显式关闭一样：能关的发关闭参数，关不掉的如实记按模型默认。
-        return "none" if google_can_disable_thinking(model_name) else GOOGLE_PROVIDER_DEFAULT
+        return "none" if google_can_disable_thinking(model_name, base_url) else GOOGLE_PROVIDER_DEFAULT
     return value
 
 
@@ -79,10 +82,11 @@ def thinking_request_fields(base_url, model_name, thinking_type) -> dict:
     if not value:
         return {}
     if is_google_openai_host(base_url):
-        if value.casefold() in _DISABLED and google_can_disable_thinking(model_name):
-            if is_vertex_host(base_url):
-                return {"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}}
-            return {"reasoning_effort": "none"}
+        if value.casefold() in _DISABLED:
+            capability = _google_capability(base_url, model_name)
+            if capability is not None and capability.can_disable:
+                # Vertex：extra_body.google.thinking_config.thinking_budget=0；Gemini API：reasoning_effort none。
+                return deepcopy(dict(capability.off_request or {}))
         return {}
     return {"thinking": {"type": value}}
 

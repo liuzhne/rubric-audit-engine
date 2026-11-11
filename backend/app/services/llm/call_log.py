@@ -46,8 +46,16 @@ def _token(value) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def log_call_succeeded(provider, model, data, *, elapsed_ms, attempt, usage=None):
-    """HTTP 2xx。响应体里带 ``error`` 的（“成功状态中返回错误”）单独记成失败。"""
+def _optional_token(value) -> str:
+    return str(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else "-"
+
+
+def log_call_succeeded(provider, model, data, *, elapsed_ms, attempt, usage=None, context=None):
+    """HTTP 2xx。响应体里带 ``error`` 的（“成功状态中返回错误”）单独记成失败。
+
+    ``context`` 是这次调用的思考设置（``thinking_capabilities.call_context``）：思考开关、强度、
+    计划来源、命中的能力表记录、正式输出预算与实发上限。正式输出用量算不出来时记 ``-``。
+    """
 
     routed = data.get("model") if isinstance(data, dict) else None
     upstream = data.get("provider") if isinstance(data, dict) else None
@@ -61,13 +69,49 @@ def log_call_succeeded(provider, model, data, *, elapsed_ms, attempt, usage=None
         )
         return
     usage = usage if isinstance(usage, dict) else {}
+    context = context if isinstance(context, dict) else {}
     logger.info(
         "llm_call provider=%s model=%s routed_model=%s upstream=%s elapsed_ms=%d attempt=%d "
-        "finish_reason=%s prompt_tokens=%d completion_tokens=%d reasoning_tokens=%d reasoning=%s",
+        "finish_reason=%s prompt_tokens=%d completion_tokens=%d reasoning_tokens=%d reasoning=%s "
+        "answer_tokens=%s answer=%s thinking=%s effort=%s thinking_source=%s entry=%s "
+        "answer_budget=%s max_tokens=%s",
         _field(provider), _field(model), _field(routed), _field(upstream), elapsed_ms, attempt + 1,
         _field(usage.get("finish_reason")), _token(usage.get("prompt_tokens")),
         _token(usage.get("completion_tokens")), _token(usage.get("reasoning_tokens")),
         _field(usage.get("reasoning_source") or "none"),
+        _optional_token(usage.get("answer_tokens")), _field(usage.get("answer_source")),
+        _field(context.get("thinking")), _field(context.get("effort")), _field(context.get("source")),
+        _field(context.get("entry")), _optional_token(context.get("answer_budget")),
+        _optional_token(context.get("max_tokens")),
+    )
+
+
+def log_thinking_mismatch(provider, model, *, usage, context):
+    """能力表说这个模型能关思考（并且已经发了关闭写法），应答里却观测到了思考。
+
+    AI 任务不经一致性守卫，这一行是发现能力表误标的主要途径（docs/模型思考能力表方案.md 第 5.4 节）。
+    """
+
+    logger.warning(
+        "thinking_capability_mismatch provider=%s model=%s entry=%s thinking_source=%s "
+        "reasoning_tokens=%d reasoning=%s",
+        _field(provider), _field(model), _field(context.get("entry")), _field(context.get("source")),
+        _token(usage.get("reasoning_tokens")), _field(usage.get("reasoning_source")),
+    )
+
+
+def log_output_limit_fallback(provider, model, *, field, sent, fallback, context):
+    """厂商拒绝了按项目封顶放开的输出上限（模型最大输出更小），改用放开前的上限重发。
+
+    出现这一行说明能力表缺这个模型的记录（或记录没写最大输出）：补上记录后不再多花一次请求。
+    """
+
+    context = context if isinstance(context, dict) else {}
+    logger.warning(
+        "thinking_output_limit_fallback provider=%s model=%s field=%s sent=%s fallback=%s "
+        "thinking_source=%s entry=%s",
+        _field(provider), _field(model), _field(field), _field(sent), _field(fallback),
+        _field(context.get("source")), _field(context.get("entry")),
     )
 
 

@@ -5,8 +5,8 @@ import httpx
 
 from backend.app.core.config import settings
 from backend.app.services.llm.auth_headers import openai_auth_headers
-from backend.app.services.llm.thinking_params import effective_thinking_type
-from backend.app.services.llm.thinking_params import thinking_request_fields
+from backend.app.services.llm.thinking_capabilities import CHAT
+from backend.app.services.llm.thinking_capabilities import plans
 
 
 def _thinking_config(payload):
@@ -28,12 +28,12 @@ def main():
         "temperature": 0.2,
         "max_tokens": 200,
     }
-    # 与评分适配器同一套换算：Google 主机关闭思考发 reasoning_effort（Gemini API）或
-    # extra_body.google.thinking_config（Vertex），其余发 thinking 字段。
-    thinking_type = effective_thinking_type(
-        url, settings.OPENAI_COMPATIBLE_MODEL, settings.OPENAI_COMPATIBLE_THINKING_TYPE,
+    # 与 AI 任务同一份思考计划（模型能力表，docs/模型思考能力表方案.md）：能关的发各家的关闭写法，
+    # 关不掉的发最低强度。
+    plan, _scoring = plans(
+        CHAT, url, settings.OPENAI_COMPATIBLE_MODEL, thinking_type=settings.OPENAI_COMPATIBLE_THINKING_TYPE,
     )
-    payload.update(thinking_request_fields(url, settings.OPENAI_COMPATIBLE_MODEL, thinking_type))
+    payload.update(plan.fields())
     if settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON:
         payload["response_format"] = {"type": "json_object"}
 
@@ -76,6 +76,7 @@ def main():
         # extra_body.google.thinking_config，三者都报出来便于核对。
         "reasoning_effort": payload.get("reasoning_effort"),
         "thinking_config": _thinking_config(payload),
+        "thinking_plan": {"on": plan.thinking_on, "effort": plan.effort, "source": plan.source, "entry": plan.entry},
         "response_format": payload.get("response_format"),
         "status_code": response.status_code,
         "content_type": response.headers.get("content-type"),

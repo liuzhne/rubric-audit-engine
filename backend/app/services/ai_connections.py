@@ -607,18 +607,21 @@ def _claude_probe(runtime: ConnectionRuntime, base_url: str):
 
     from backend.app.services.llm.anthropic_messages_adapter import request_controls
     from backend.app.services.llm.anthropic_messages_adapter import resolve_structured_output
+    from backend.app.services.llm.anthropic_messages_adapter import thinking_plans
 
     options = runtime.provider_options
+    # 思考与强度按能力表（与 AI 任务发出的相同，docs/模型思考能力表方案.md）：Opus 5.5 这类关不掉思考的
+    # 模型不会被替它发 disabled。
+    plan, _scoring = thinking_plans(
+        base_url, runtime.model_name,
+        thinking_type=(options.get("thinking_type") or "").strip() or None,
+        effort=options.get("effort"),
+    )
     payload = {
         "model": runtime.model_name,
         "max_tokens": 32,
         "messages": [{"role": "user", "content": 'Reply with {"ok":true}.'}],
-        **request_controls(
-            temperature=options.get("temperature"),
-            top_p=options.get("top_p"),
-            thinking_type=(options.get("thinking_type") or "").strip() or None,
-            effort=options.get("effort"),
-        ),
+        **request_controls(temperature=options.get("temperature"), top_p=options.get("top_p"), plan=plan),
     }
     if resolve_structured_output(base_url, options) == "json_schema":
         payload.setdefault("output_config", {})["format"] = {

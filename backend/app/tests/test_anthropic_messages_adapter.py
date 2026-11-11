@@ -25,6 +25,7 @@ from backend.app.services.llm.core_view import build_core_request
 from backend.app.services.llm.debug_logging import log_llm_request
 from backend.app.services.llm.errors import project_provider_error
 from backend.app.services.llm.legacy_prompts import envelope_score_schema
+from backend.app.services.llm.thinking_capabilities import THINKING_ON_MAX_TOKENS_CAP
 from backend.app.services.rubric_import.ai_rule_drafter import _draft_output_schema
 from backend.app.services.scoring.profiles.thesis import ThesisLLMRuntime
 from backend.app.services.scoring.profiles.thesis import ThesisProfile
@@ -106,9 +107,11 @@ def test_default_request_sends_no_sampling_thinking_or_effort():
     assert "authorization" not in request.headers
     assert "anthropic-beta" not in request.headers
     payload = capture.payload
+    # Opus 5.5 关不掉思考（能力表）：Bedrock 是否接受 output_config.effort 待核实，所以不发强度、
+    # 也不发 thinking；只限制正式输出，请求上限放到封顶值（docs/模型思考能力表方案.md 第 5.2 节）。
     assert payload == {
         "model": "anthropic.claude-opus-5-5",
-        "max_tokens": settings.ANTHROPIC_MAX_TOKENS,
+        "max_tokens": THINKING_ON_MAX_TOKENS_CAP,
         "system": "系统指令",
         "messages": [{"role": "user", "content": '{"x": 1}'}],
     }

@@ -241,6 +241,22 @@ def rejected_without_reason(error: ProviderError) -> bool:
     return error.http_status == 400 and any(marker in message for marker in _REJECTED_WITHOUT_REASON_MARKERS)
 
 
+# 思考可能开着、能力表又不知道模型最大输出时，请求上限按项目封顶放开（docs/模型思考能力表方案.md
+# Q1/Q2）；实际最大输出更小的模型会以 400 拒绝这个上限，说明里点名输出上限参数：OpenAI「max_tokens
+# is too large」、Claude「max_tokens: 32768 > 8192」、Vertex「maxOutputTokens value of …」、DeepSeek 与
+# 百炼「range of max_tokens」。去掉标点、下划线与大小写后匹配参数名。
+_OUTPUT_LIMIT_PARAMETER_MARKERS = ("maxtokens", "maxoutputtokens", "maxcompletiontokens")
+
+
+def output_limit_rejected(error: ProviderError) -> bool:
+    """厂商拒绝的是请求里的输出上限（超过了这个模型的最大输出）。"""
+
+    if error.http_status not in (400, 422):
+        return False
+    message = re.sub(r"[^a-z]", "", str(error.message or "").casefold())
+    return any(marker in message for marker in _OUTPUT_LIMIT_PARAMETER_MARKERS)
+
+
 def raise_provider_call_error(provider: str, exc: BaseException):
     if isinstance(exc, ProviderCallError):
         raise exc
