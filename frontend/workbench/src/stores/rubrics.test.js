@@ -391,3 +391,27 @@ it("分项提交在后续失败时保留已提交的任务", async () => {
   expect(calls).toEqual(["T01", "T02"]);
   expect(store.draftTasks.T01.id).toBe("task-1");
 });
+
+describe("适用范围识别", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+  });
+
+  it("没有进行中的识别任务时一律重新识别，刷新页面后的第一次点击也不会复用旧的成功任务", async () => {
+    const bodies = [];
+    vi.stubGlobal("fetch", (_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return jsonResponse({ id: "t1", kind: "rule_scope", rubric_id: "r1", status: "queued" });
+    });
+    const store = useRubricsStore();
+    expect(store.scopeTask).toBeNull(); // 刷新后只找回进行中的任务
+
+    await store.startScopeIdentification("r1", { connectionId: "c1" });
+    expect(bodies[0]).toMatchObject({ kind: "rule_scope", regenerate: true });
+
+    // 有进行中的任务时不重新生成：命中同一个任务继续跟踪，不取消它。
+    await store.startScopeIdentification("r1", { connectionId: "c1" });
+    expect(bodies[1].regenerate).toBe(false);
+  });
+});

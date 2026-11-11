@@ -38,8 +38,6 @@ def rule_content(rule):
         "checker_key": rule.checker_key,
         "checker_params": rule.checker_params,
         "evidence_policy": rule.evidence_policy,
-        # 适用范围（0044）：模型给出，只读；空即全文。
-        "scope": read_scope(rule.scope),
         "strictness": rule.strictness,
         "judge_type": rule.judge_type,
         "positive_example": rule.positive_example,
@@ -81,7 +79,9 @@ def read_review_workspace(session, rubric_id):
         "rules": [{**rule_content(rule), "content_token": content_token(rule),
                    "status": rule.status, "reviewed_by": rule.reviewed_by,
                    "reviewed_at": rule.reviewed_at,
-                   # 派生展示，不进 content_token：适用范围的中文说明。
+                   # 适用范围（0044）：模型给出、只读，不进 content_token 与审查签名——它不是老师
+                   # 编辑的内容，识别补上范围不应让打开着的表单失效、让已确认的规则在重新编译时回到草稿。
+                   "scope": read_scope(rule.scope),
                    "scope_label": describe_scope(rule.scope)} for rule in rules],
         "template_links": [{"id": link.id, "rule_code": rule.rule_code,
                             "review_status": link.review_status,

@@ -464,13 +464,14 @@ const reviewTracker = aiTaskTracker("review", async (task) => {
 }, (message) => { parseError.value = message; });
 
 // 适用范围识别（docs/评分细则适用范围方案.md 第 6 节）：完成后重新读取草稿，规则上显示新范围。
-// 有未保存的修改时不重新读取：刷新会重建表单、丢掉修改（识别期间按钮本来就禁用，这里兜住
-// 识别开始后才动手改的情况）。
+// 有未保存的修改时不重新读取：刷新会重建表单、丢掉修改（有未保存修改时按钮禁用，这里兜住
+// 识别开始后才动手改的情况）。范围不进 content_token，这些修改照常可以保存。
 const scopeTracker = aiTaskTracker("scope", async (task) => {
   const id = selected.value;
   if (task.status !== "succeeded" || !id || task.rubric_id !== id) return;
   if (dirty.value) {
-    reviewNotice.value = "适用范围识别已完成。当前有未保存的修改，保存或放弃后刷新页面即可看到识别结果。";
+    // 范围不进 content_token，保存不会因为识别写了范围而被拒；保存后页面会重新读取。
+    reviewNotice.value = "适用范围识别已完成。当前有未保存的修改，保存后即可看到识别结果。";
     return;
   }
   await refreshDetail(id);
@@ -478,11 +479,7 @@ const scopeTracker = aiTaskTracker("scope", async (task) => {
 const unscopedRuleCount = computed(() => (workspace.value?.rules || []).filter((rule) =>
   rule.judge_type === "semantic" && rule.status !== "rejected" && !rule.scope).length);
 const runScopeIdentification = () => parseAction(async (id) => {
-  // 上一次识别已成功、仍有规则没有范围：再点一次表示明确要重新识别，否则同内容的任务会被直接复用。
-  const regenerate = store.scopeTask?.status === "succeeded" && store.scopeTask?.rubric_id === id;
-  await scopeTracker.track(await store.startScopeIdentification(id, {
-    connectionId: draftConnection.value || null, regenerate,
-  }));
+  await scopeTracker.track(await store.startScopeIdentification(id, { connectionId: draftConnection.value || null }));
 });
 /** @param {"cancel"|"retry"} action */
 const scopeAction = (action) => parseAction(async () => {
