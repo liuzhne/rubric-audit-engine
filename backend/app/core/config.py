@@ -162,6 +162,10 @@ class Settings(BaseSettings):
     # off = 提示词不变；cite = 要求每条语义判定给依据引文与一句理由（漏写不判失败；docs/评分证据与理由改造方案.md G5）。
     # 改提示词、进入判定身份，可能改分；统一评测后再打开。
     SCORING_DECISION_BASIS_MODE: Literal["off", "cite"] = "off"
+    # 按模型能力表决定思考（docs/模型思考能力表方案.md）：off = 全部旧行为（回滚用）；
+    # auxiliary = AI 任务与评分助手按能力表、评分路径旧行为；all = 评分路径也按能力表
+    # （会改分、改运行身份，QWK 留出集复核并经维护者批准后再切）。
+    THINKING_CAPABILITY_SCOPE: Literal["off", "auxiliary", "all"] = "auxiliary"
     SCORING_RULE_TASKS_ENABLED: bool = True
     # Rule-level decision ledger: reuse a validated semantic decision whose full
     # decision identity is unchanged, so retries only pay for failed rules.

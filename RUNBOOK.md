@@ -1313,8 +1313,10 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
-| 2026-11-09 | AI 起草互斥组规整（分期 A） | 新增排错“发布被 `mutex_definition_invalid` 挡住”（报错指向发布校验，真正原因在起草或采用时少了档）与 `inspect_ai_draft_rules` 只读核对命令 |
+| 2026-11-11 | 按模型能力表决定思考（复审修正） | 表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次，新增日志 `thinking_output_limit_fallback` 与对应排错；写明只有严格 Schema 才是正式输出的硬上界 |
+| 2026-11-11 | 按模型能力表决定思考 | 新环境变量 `THINKING_CAPABILITY_SCOPE`（off / auxiliary / all，默认 auxiliary，经仓库变量进生产）；无迁移；`llm_call` 日志新增思考与正式输出字段，新增 `thinking_capability_mismatch`、`thinking_explicit_adjusted`；能力表维护步骤；排错：守卫报思考没关、起草截断、思考模型超时、表外模型上限变大 |
 | 2026-11-10 | AI 起草互斥组规整（#94 复审） | 核对脚本加 `invalid_mutex_groups`（跨评分项或含分档的组），与单档组合起来覆盖 `mutex_definition_invalid` 的全部情况 |
+| 2026-11-09 | AI 起草互斥组规整（分期 A） | 新增排错“发布被 `mutex_definition_invalid` 挡住”（报错指向发布校验，真正原因在起草或采用时少了档）与 `inspect_ai_draft_rules` 只读核对命令 |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 3.0 新增“供应链与安全扫描”；新增 `.github/dependabot.yml`；排错补“action 没固定 SHA 的测试失败”与“Dependabot 升级 PR 让任务失败”（不要直接关 PR，改动推到它的分支上） |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 3.0 第 5 条改为 `release-gates-passed` 绿即可合并，说明为何不开 strict 与热修后手动重跑门禁；排错补“发布 PR 显示落后于 main、不要点 Update branch” |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 3.0 补：线上版本看 `/opt/pgs/RELEASE`、从预演起冻结 develop 并核对提交、守卫不是安全边界；部署文档标明 Vercel 链路已停用，上线清单改核对 Lightsail 部署与 `RELEASE`；部署文档标题与开头、§2A、上线清单的线上验证项改为 Lightsail 现状（Vercel 项只在恢复 Vercel 时适用），9.4 标题去掉“迁移中”，开头补现状说明（数据在实例上，见 9.4.1），原 Supabase 段标为历史 |
@@ -3202,3 +3204,56 @@ cd frontend/workbench && npx vitest run src/stores/assistant.test.js
 测试：`.venv/bin/python -m pytest -q backend/app/tests/test_ai_mutex_normalization.py`
 
 维护记录：2026-11-09 · AI 起草互斥组规整：新增 `mutex_definition_invalid` 排错与核对脚本命令。
+
+### 2026-11-11 按模型能力表决定思考
+
+方案见 `docs/模型思考能力表方案.md`。规则：能关闭思考的模型直接关闭，输出上限沿用现有值；关不掉的发最低强度，请求上限放到 `min(模型最大输出, 32768)`，真正的上限是超时。正式输出的长度靠输出结构约束，只有用严格 Schema 时才是硬上界：起草回退到精简 Schema 时没有上界，审查只有提示词约束（方案 5.3）。写法来自 `backend/app/services/llm/thinking_capabilities.py` 的能力表，按「协议 + 主机族 + 模型名前缀」匹配；连接的显式配置优先，表外模型不发参数、按可能在思考处理。
+
+开关 `THINKING_CAPABILITY_SCOPE`（经仓库变量进生产，`scripts/production_env.py` 已放行；没设即默认值）：
+
+| 取值 | AI 任务与评分助手 | 评分路径（Core、旧兼容路径、语义一致性） |
+|---|---|---|
+| `auxiliary`（默认） | 按能力表 | 与改动前逐字节相同 |
+| `off` | 改动前的行为 | 改动前的行为 |
+| `all` | 按能力表 | 按能力表：会改分、改运行身份，决策账本与缓存对受影响的连接失效一次 |
+
+- 回滚：仓库变量设 `THINKING_CAPABILITY_SCOPE=off` 后重新部署，不用发版。
+- 切 `all` 之前：按 §15 用 QWK 留出集重新锚定（真实调用，需维护者授权预算）；核实 OpenAI 推理模型、Kimi 部分型号对 `temperature` 的限制（放开后它们才进评分路径）。
+- 无迁移、无新表；AI 任务的缺省等待在思考开着时是 240 秒（连接显式超时仍优先，最多 300）。
+
+新增或修改一条记录：
+
+1. 只依据厂商官方文档或生产日志，`sources` 写链接，`verified_on` 写核实日期；查不到的不进表（落到未知模型策略，不出错，只是不关思考）。
+2. 前缀写规整后的模型名（小写、去掉 `/` 前缀）；前缀后紧跟版本号（数字、`.数字`、`-一两位数字`）的不算命中，日期快照与变体后缀算命中——给新版本单独加一条，不要靠前缀碰运气。
+3. 改了已有记录的请求写法，必须同时换它的身份值（强度名）或升 `CORE_PROVIDER_PROMPT_VERSION`；然后更新 `test_thinking_capabilities.py` 的 `WIRE_SNAPSHOT`（测试失败时会打印新值）。只新增记录也要更新快照。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_thinking_capabilities.py
+```
+
+日志（都不含内容）：
+- 每次调用的 `llm_call` 行尾多了 `answer_tokens=` / `answer=`（`reported` 是厂商报告的准确值，`estimated` 是按可见文字估算，`-` 是算不出来）、`thinking=on|off`、`effort=`、`thinking_source=`（`explicit` / `explicit_adjusted` / `table` / `family_default` / `unknown` / `legacy`）、`entry=`（命中的记录）、`answer_budget=`（正式输出预算）、`max_tokens=`（实发上限）。
+- `thinking_capability_mismatch`：能力表说能关、也发了关闭写法，应答里却有思考。
+- `thinking_explicit_adjusted`：连接显式配置了“关闭”，表里记着这个模型关不掉，改发了最低强度。
+- `thinking_output_limit_fallback`：表里不知道这个模型的最大输出、上限放到了 32768，厂商以 400 拒绝；已按放开前的上限重发一次（`sent=` 原上限，`fallback=` 重发的上限）。
+
+排错：
+- **现象**：评分失败，错误码 `PROVIDER_THINKING_NOT_DISABLED`。
+  - 报错指向：一致性守卫，像是连接配置错了。
+  - 真正原因：也可能是能力表把这个模型误标成了可以关闭思考（连接没配置思考时，关不关由表决定）。查这次调用的 `llm_call` 行：`thinking_source=table` 且同一时间有 `thinking_capability_mismatch`，就按 `entry=` 去改那条记录（改写法要换身份或升版本）。
+- **现象**：起草报“模型输出达到长度上限”。
+  - 报错指向：输出上限太小。
+  - 真正原因：多半是思考把额度用光（11-10 的 glm-5.3 就是这样）。看日志 `thinking=` 与 `reasoning_tokens=`：`thinking=on` 时上限已经放到封顶值，先查连接是不是显式设了较小的 `max_tokens`；`thinking=off` 却有推理 token，就是能力表误标或厂商静默忽略了关闭写法。
+- **现象**：AI 任务超时，提示“这个模型关不掉思考……仍在时限内没有返回”。
+  - 报错指向：网络或厂商慢。
+  - 真正原因：关不掉思考的模型在最低强度下也想得太久。可以在连接里把超时调到 300 秒，或换能关闭思考的模型；不要调大输出上限，那不解决时间。
+- **现象**：表外模型（`thinking_source=unknown`）的 AI 任务请求上限是 32768、等待 240 秒。
+  - 报错指向：像是配置被改了。
+  - 真正原因：未知模型按可能在思考处理（方案 Q1）。确认它能关思考后按上面的步骤补一条记录，或在连接里显式配置思考设置。
+- **现象**：AI 任务或评分助手的一次调用发了两次请求，第一次 400。
+  - 报错指向：像是重试策略错了（这些调用的超时与 5xx 只试 1 次）。
+  - 真正原因：看同一时间有没有 `thinking_output_limit_fallback`：表外模型的最大输出比 32768 小（GPT-4o mini、旧 Claude、Gemini 2.0 等），厂商拒绝了猜的上限，传输层按放开前的上限重发，不占重试次数。按模型官方页补一条带 `max_output` 的记录（或在连接里显式写 `max_tokens`），以后就不再多发一次。重发后若又报截断，说明这个模型其实在思考，最大输出又小，只能换模型或请厂商调整。
+
+维护记录：2026-11-11 · 按模型能力表决定思考：新增开关、能力表维护步骤、日志字段与四条排错。2026-11-11 · 复审修正：写明严格 Schema 之外没有硬上界；新增 `thinking_output_limit_fallback` 日志与“一次调用发了两次请求”的排错。

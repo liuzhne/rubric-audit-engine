@@ -29,10 +29,7 @@ from backend.app.services.llm.errors import rejected_without_reason
 from backend.app.services.llm.errors import schema_too_complex
 from backend.app.services.llm.factory import scorer_concurrency
 from backend.app.services.llm.rate_limit import CircuitOpenError
-from backend.app.services.llm.anthropic_messages_adapter import AnthropicMessagesScorer
 from backend.app.services.llm.errors import ProviderJSONOutputError
-from backend.app.services.llm.openai_compatible_adapter import OpenAICompatibleChatScorer
-from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
 
 logger = logging.getLogger(__name__)
 
@@ -620,12 +617,27 @@ def _source_ref_shape(refs: list[str]) -> str:
 
 
 def _draft_timeout_seconds(scorer) -> float:
-    """与适配器的取值一致：连接显式超时优先，否则不低于起草缺省等待。"""
+    """与适配器的取值一致：连接显式超时优先，否则不低于起草缺省等待；思考开着时按能力表放宽。"""
 
     configured = float(getattr(scorer, "timeout_seconds", 0) or 0)
+    resolve = getattr(scorer, "request_timeout_seconds", None)
+    if callable(resolve):
+        timeout = resolve(AI_RULE_DRAFT_TIMEOUT_SECONDS)
+        return float(configured if timeout is None else timeout)
     if getattr(scorer, "timeout_seconds_explicit", False):
         return configured
     return max(configured, float(AI_RULE_DRAFT_TIMEOUT_SECONDS))
+
+
+def _thinking_on(scorer) -> bool:
+    """这条连接在 AI 任务里是否可能在思考（能力表解析的辅助计划；拿不到时按否）。"""
+
+    plan = getattr(scorer, "thinking_plan", None)
+    return bool(getattr(plan, "thinking_on", False)) and not bool(getattr(plan, "legacy", True))
+
+
+def _thinking_effort(scorer):
+    return getattr(getattr(scorer, "thinking_plan", None), "effort", None)
 
 
 def _draft_deduction_rules_once(
@@ -694,16 +706,19 @@ def _draft_deduction_rules_once(
             maximum=float(criterion_value.get("max_score") or 0),
             allowed_source_refs=allowed_refs,
         )
-        if isinstance(scorer, (OpenAICompatibleChatScorer, OpenAIResponsesScorer, AnthropicMessagesScorer)):
-            explicit = bool(getattr(scorer, "max_tokens_explicit", False) or
-                            getattr(scorer, "max_output_tokens_explicit", False))
-            configured = int(getattr(scorer, "max_tokens", getattr(scorer, "max_output_tokens", 0)) or 0)
-            budget = configured if explicit else max(configured, AI_RULE_DRAFT_MAX_OUTPUT_TOKENS)
+        output_tokens = getattr(scorer, "request_output_tokens", None)
+        if callable(output_tokens):
+            # 真实适配器：实发上限由适配器按模型能力表决定（docs/模型思考能力表方案.md 第 5.2 节）。
+            # 6144 是正式输出预算：思考关闭时照旧取 max(连接上限, 6144)；关不掉思考时放到封顶值，
+            # 正式输出靠严格 Schema 的条数与字数上界约束。连接显式上限仍然优先。
+            budget = int(output_tokens(AI_RULE_DRAFT_MAX_OUTPUT_TOKENS))
             request_budget = budget
             logger.info(
-                "rubric_ai_draft_request batch=%s/%s max_output_tokens=%s timeout_seconds=%s",
+                "rubric_ai_draft_request batch=%s/%s max_output_tokens=%s timeout_seconds=%s "
+                "answer_budget=%s thinking=%s effort=%s",
                 analysis.get("batch_index", 1), analysis.get("batch_count", 1), budget,
-                _draft_timeout_seconds(scorer),
+                _draft_timeout_seconds(scorer), AI_RULE_DRAFT_MAX_OUTPUT_TOKENS,
+                "on" if _thinking_on(scorer) else "off", _thinking_effort(scorer) or "-",
             )
             # 每批只发一次：本层已有一次格式修正，传输层再重试会把一次超时放大成
             # 三次等待，并连续计入同一连接的熔断计数（Responses 适配器默认会重试）。
@@ -757,15 +772,27 @@ def _draft_deduction_rules_once(
                 "请检查评分项与上传文字是否包含会触发模型安全策略的内容，调整后重试；原有条款未改变。",
             ) from exc
         truncated = exc.reason == "output_truncated"
-        raise AIRuleDraftValidationError(
-            "AI_DRAFT_OUTPUT_TRUNCATED" if truncated else "AI_DRAFT_OUTPUT_INVALID",
-            "模型输出达到长度上限，规则未生成完整。" if truncated else "模型未返回有效的规则 JSON。",
-            (
+        if truncated and _thinking_on(scorer):
+            # 关不掉思考的模型：上限已放到封顶值，思考与正式输出合计仍超过它。
+            effort = _thinking_effort(scorer)
+            action = (
+                "这个模型关不掉思考，系统已按"
+                + (f"最低强度 {effort} " if effort else "模型默认强度")
+                + f"请求，并把输出上限放到 {request_budget}，思考与规则 JSON 合计仍超过了它。"
+                "请检查当前连接是否显式设置了较小的输出 token 上限；或换一个能关闭思考的模型。原有条款未改变。"
+            )
+        elif truncated:
+            action = (
                 "系统已按有界 JSON Schema 分批生成；请检查当前连接是否显式把输出 token 上限设置为"
                 f"低于 {AI_RULE_DRAFT_MAX_OUTPUT_TOKENS}，调高后重试，或更换支持严格 JSON Schema 的模型；"
                 "原有条款未改变。"
-            ) if truncated
-            else "请检查模型是否支持 JSON 输出或重新生成；原有条款未改变。",
+            )
+        else:
+            action = "请检查模型是否支持 JSON 输出或重新生成；原有条款未改变。"
+        raise AIRuleDraftValidationError(
+            "AI_DRAFT_OUTPUT_TRUNCATED" if truncated else "AI_DRAFT_OUTPUT_INVALID",
+            "模型输出达到长度上限，规则未生成完整。" if truncated else "模型未返回有效的规则 JSON。",
+            action,
         ) from exc
     except CircuitOpenError as exc:
         logger.warning("rubric_ai_draft_failed reason=circuit_open")
@@ -786,10 +813,20 @@ def _draft_deduction_rules_once(
             exc.error.code, exc.error.http_status, exc.error.provider_error_code or "-", waited,
         )
         if exc.error.code == "request_timeout":
+            if _thinking_on(scorer):
+                effort = _thinking_effort(scorer)
+                action = (
+                    "这个模型关不掉思考，系统已按"
+                    + (f"最低强度 {effort} " if effort else "模型默认强度")
+                    + "请求，仍在时限内没有返回；可以在「账户与连接」把该连接的超时调到最多 300 秒，"
+                    "或换一个能关闭思考的模型。原有条款未改变。"
+                )
+            else:
+                action = "请稍后重试；如果该连接经常超时，可在「账户与连接」为它设置更长的超时（最多 300 秒）。原有条款未改变。"
             raise AIRuleDraftValidationError(
                 "AI_DRAFT_PROVIDER_ERROR",
                 f"AI 模型在 {_draft_timeout_seconds(scorer):g} 秒内没有返回起草结果。",
-                "请稍后重试；如果该连接经常超时，可在「账户与连接」为它设置更长的超时（最多 300 秒）。原有条款未改变。",
+                action,
             ) from exc
         rejection = _provider_rejection(exc.error)
         if rejection is not None:
