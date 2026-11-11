@@ -22,6 +22,7 @@ from backend.app.db.models import Paper
 from backend.app.db.models import Rubric
 from backend.app.db.models import RubricCompilation
 from backend.app.db.models import RubricVersion
+from backend.app.db.models import User
 from backend.app.db.session import get_db
 from backend.app.schemas.batch import BatchCreate
 from backend.app.schemas.batch import BatchOverviewRead
@@ -87,7 +88,7 @@ def create_batch(payload: BatchCreate, db: Session = Depends(get_db), user_id: s
     return actions.create_batch(db, principal, user_id, payload)
 
 
-def _batch_with_rubric(batch: GradingBatch, name, version, profile_key=None) -> dict:
+def _batch_with_rubric(batch: GradingBatch, name, version, profile_key=None, owner_name=None) -> dict:
     """把批次投影成带标准标签的字典。
 
     直接改 ORM 对象的属性会把 `rubric_name` 当成待持久化的列；这里返回字典，
@@ -100,6 +101,7 @@ def _batch_with_rubric(batch: GradingBatch, name, version, profile_key=None) -> 
     payload["rubric_name"] = name
     payload["rubric_version_label"] = version
     payload["business_profile_key"] = profile_key or batch.business_profile_key
+    payload["owner_name"] = owner_name
     return payload
 
 
@@ -138,18 +140,20 @@ def list_batches(
             Rubric.name,
             Rubric.version,
             func.coalesce(RubricVersion.business_profile_key, LEGACY_PROFILE_KEY),
+            User.display_name,
         )
         .outerjoin(Rubric, Rubric.id == GradingBatch.rubric_id)
         .outerjoin(RubricVersion, RubricVersion.id == GradingBatch.rubric_version_id)
+        # 创建人：管理员看得到全组织的任务，没有这一列就分不清哪个是谁的。
+        .outerjoin(User, User.id == GradingBatch.owner_id)
         .order_by(GradingBatch.created_at.desc())
     )
-    if principal.organization_id is not None:
-        query = query.where(GradingBatch.organization_id == principal.organization_id)
+    query = query.where(*guards.batch_scope(principal))
     if status:
         query = query.where(GradingBatch.status.in_(status))
     return [
-        _batch_with_rubric(batch, name, version, profile_key)
-        for batch, name, version, profile_key in db.execute(query).all()
+        _batch_with_rubric(batch, name, version, profile_key, owner_name)
+        for batch, name, version, profile_key, owner_name in db.execute(query).all()
     ]
 
 
@@ -163,9 +167,7 @@ def batches_overview(
     材料计数经结果选择器，与评分任务页、复核页同源——否则各页面会给出互相
     矛盾的数字。已归档批次不计入待办口径，否则待评数永远降不下去。
     """
-    query = select(GradingBatch)
-    if principal.organization_id is not None:
-        query = query.where(GradingBatch.organization_id == principal.organization_id)
+    query = select(GradingBatch).where(*guards.batch_scope(principal))
     batches = db.scalars(query).all()
 
     stage_counts = {stage: 0 for stage in state.BATCH_STAGES}
@@ -754,8 +756,10 @@ def get_batch(
     batch = _visible_batch(db, batch_id, principal)
     # 与列表同一形状：详情页也要显示绑定的是哪个标准版本。
     rubric = db.get(Rubric, batch.rubric_id) if batch.rubric_id else None
+    owner = db.get(User, batch.owner_id) if batch.owner_id else None
     return _batch_with_rubric(
         batch,
         rubric.name if rubric else None,
         rubric.version if rubric else None,
+        owner_name=owner.display_name if owner else None,
     )

@@ -4,9 +4,13 @@ import { RouterLink } from "vue-router";
 import { useRouter } from "vue-router";
 
 import { useBatchesStore } from "@/stores/batches.js";
+import { useSessionStore } from "@/stores/session.js";
 import { STAGES, STAGE_ORDER, stageLabel, stageTone } from "@/stores/stages.js";
 
 const store = useBatchesStore();
+const session = useSessionStore();
+// 教师只看得到自己的任务，这一列对他们每行都是自己；管理员看得到全组织的任务才需要它。
+const showOwner = computed(() => session.isOrgAdmin);
 const router = useRouter();
 
 const activeJobStatuses = new Set(["queued", "running", "cancel_requested"]);
@@ -132,6 +136,7 @@ onMounted(async () => {
             <tr>
               <th>批次名称</th>
               <th>评分标准</th>
+              <th v-if="showOwner">创建人</th>
               <th>材料</th>
               <th>进度</th>
               <th>阶段</th>
@@ -162,6 +167,7 @@ onMounted(async () => {
                 <!-- 找不到时留空：一串 UUID 对读的人没有意义，还会被当成标准名。 -->
                 <span v-else class="faint">—</span>
               </td>
+              <td v-if="showOwner" class="owner-cell">{{ batch.owner_name || "—" }}</td>
               <td class="num">{{ store.progressFor(batch.id)?.counts.total ?? "—" }}</td>
               <td>
                 <RouterLink
@@ -241,7 +247,7 @@ onMounted(async () => {
               </td>
             </tr>
             <tr v-if="!store.visible.length && !store.loading">
-              <td class="table-empty" colspan="7">
+              <td class="table-empty" :colspan="showOwner ? 8 : 7">
                 {{ store.stageFilter ? "该阶段暂无批次。" : "还没有评分任务。" }}
               </td>
             </tr>

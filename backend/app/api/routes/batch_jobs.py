@@ -77,7 +77,9 @@ def list_attention_jobs(
     principal: CurrentPrincipal = Depends(current_principal),
 ):
     return list_attention_batch_scoring_jobs(
-        db, organization_id=principal.organization_id
+        db,
+        organization_id=principal.organization_id,
+        owner_id=guards.personal_owner_id(principal),
     )
 
 
