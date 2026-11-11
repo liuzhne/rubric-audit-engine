@@ -1,5 +1,6 @@
 // @ts-check
 import { defineStore } from "pinia";
+import { isActiveAiTask } from "@/lib/ai-tasks.js";
 import { ref } from "vue";
 
 import { api, StaleContextError } from "@/api/client.js";
@@ -439,16 +440,20 @@ export const useRubricsStore = defineStore("rubrics", () => {
 
   /**
    * 适用范围识别（docs/评分细则适用范围方案.md 第 6 节）：老师发起任务，不填写范围。
+   *
+   * 能点这个按钮说明还有规则没有范围；同内容的任务（例如刷新页面前那次成功、但模型没给出
+   * 可用范围的任务）会被后端直接复用、不再调用模型，所以没有进行中的任务时一律重新识别。
    * @param {string} rubricId
-   * @param {{connectionId: string|null, regenerate?: boolean}} input
+   * @param {{connectionId: string|null}} input
    */
   async function startScopeIdentification(rubricId, input) {
     requireConnection(input.connectionId);
+    const running = isActiveAiTask(scopeTask.value) && scopeTask.value?.rubric_id === rubricId;
     scopeTask.value = await api.post(`/rubrics/${rubricId}/ai-tasks`, {
       kind: "rule_scope",
       params: {},
       ai_connection_id: input.connectionId,
-      regenerate: Boolean(input.regenerate),
+      regenerate: !running,
     });
     return scopeTask.value;
   }

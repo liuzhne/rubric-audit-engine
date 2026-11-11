@@ -3,6 +3,7 @@
 确认（``approved``）与排除（``rejected``）都是老师的核对结论，重新编译时同样
 沿用；内容或评分上下文变了的回到草稿重新核对（评分细则排除落库改造方案 §7）。
 """
+from copy import deepcopy
 import json
 from decimal import Decimal
 
@@ -44,6 +45,30 @@ def snapshot_confirmed_rows(session, predecessor):
     )).all()
     return {rule.rule_code: (signature(rule), rule.id, rule.status)
             for rule in rules if signature(rule)}
+
+
+def snapshot_rule_scopes(session, predecessor):
+    """前序编译里已有的适用范围：``{规则编号: (签名, 范围)}``。签名不含范围（它不是老师编辑的内容）。"""
+
+    if predecessor is None:
+        return {}
+    rules = session.scalars(select(models.AtomicRule).join(models.RubricVersion).where(
+        models.RubricVersion.compilation_id == predecessor.id,
+        models.AtomicRule.scope.is_not(None),
+    )).all()
+    return {rule.rule_code: (signature(rule), rule.scope) for rule in rules}
+
+
+def carry_rule_scopes(rules, previous):
+    """重新编译时把内容未变的规则的范围带过去（docs/评分细则适用范围方案.md 第 4 节）。
+
+    人工与 Excel 行每次从评分项投影重新编译，编译本身不会给它们范围；不带过去的话，范围识别
+    补上的范围在下一次保存后就没了。内容或评分上下文变了的不带，留给下一次识别。
+    """
+    for rule in rules:
+        entry = previous.get(rule.rule_code)
+        if rule.scope is None and entry is not None and signature(rule) == entry[0]:
+            rule.scope = deepcopy(entry[1])
 
 
 def carry_confirmed_rows(session, rubric_id, rules, previous, predecessor_id, actor_id):

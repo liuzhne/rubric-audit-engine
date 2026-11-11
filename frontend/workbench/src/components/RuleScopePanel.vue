@@ -33,7 +33,7 @@ const progress = computed(() => scopeTaskProgress(props.task));
       其余规则可在这里识别，只看评分项与规则文字，不看论文。
     </p>
     <p class="notice" data-test="rule-scope-not-applied">
-      目前范围只保存和显示，暂不影响评分：评分时按范围取证据的功能上线并打开后才生效，在此之前所有规则都按全文评分。
+      目前范围只保存和显示，暂不影响评分：评分时按范围取证据的功能上线并打开后才生效，在此之前评分沿用现有的取证逻辑。
     </p>
     <p data-test="rule-scope-pending">{{ pending ? `${pending} 条规则还没有适用范围。` : '所有语义规则都已有适用范围。' }}</p>
     <p v-if="progress" class="faint" data-test="rule-scope-progress">{{ progress }}</p>

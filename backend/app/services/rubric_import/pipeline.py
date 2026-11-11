@@ -1918,9 +1918,10 @@ def persist_prepared_import(
             )
 
             from backend.app.services.rubrics.review_carry import (
-                snapshot_confirmed_rows, carry_confirmed_rows,
+                snapshot_confirmed_rows, carry_confirmed_rows, snapshot_rule_scopes, carry_rule_scopes,
             )
             previous_reviews = snapshot_confirmed_rows(session, predecessor) if same_rubric_context else {}
+            previous_scopes = snapshot_rule_scopes(session, predecessor) if same_rubric_context else {}
             if graph.get("expected_rule_tokens"):
                 from backend.app.services.rubrics.review_workspace import content_token
                 current_rules = session.scalars(select(models.AtomicRule).join(models.RubricVersion).where(
@@ -2149,6 +2150,9 @@ def persist_prepared_import(
                 )
                 session.add(link)
             session.flush()
+            if previous_scopes:
+                carry_rule_scopes(rule_by_code.values(), previous_scopes)
+                session.flush()
             if previous_reviews:
                 carry_confirmed_rows(session, rubric.id, rule_by_code.values(),
                                      previous_reviews, predecessor.id, actor_id)

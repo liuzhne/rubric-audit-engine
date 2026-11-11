@@ -329,3 +329,43 @@ def test_editing_the_evidence_policy_keeps_an_existing_judge_scope(client):
         rule = session.scalars(select(models.AtomicRule).where(models.AtomicRule.rule_code == code,
             models.AtomicRule.criterion.has(models.RubricCriterion.rubric_id == rubric["id"]))).one()
         assert rule.evidence_policy["judge_scope"] == "document"  # 已有的保留，新指定的不保存
+
+
+def _recompile_same(client, rubric_id, *, version, edit=None):
+    workspace = client.get(f"/api/rubrics/{rubric_id}/review-workspace").json()
+    criteria = client.get(f"/api/rubrics/{rubric_id}").json()["criteria"]
+    if edit is not None:
+        edit(criteria)
+    saved = client.post(f"/api/rubrics/{rubric_id}/recompile", json={
+        "supersedes_compilation_id": workspace["compilation_id"], "version": version, "criteria": criteria})
+    assert saved.status_code == 200, saved.text
+
+
+def _current_scopes(client, rubric_id):
+    workspace = client.get(f"/api/rubrics/{rubric_id}/review-workspace").json()
+    return {rule["rule_code"]: rule["scope"] for rule in workspace["rules"]}
+
+
+def test_identified_scope_survives_a_recompile_of_unchanged_rules(client):
+    from backend.app.services.rubrics.review_workspace import content_token
+
+    rubric = _create_rubric(client, [_manual_row(0), _manual_row(1)], name="合成范围随重新编译保留")
+    identified = {"type": "section", "sections": ["绪论"], "source": "ai_identified", "vocabulary": "section-roles@1"}
+    with client.session_factory() as session:
+        rules = {rule.rule_code: rule for rule in session.scalars(select(models.AtomicRule).where(
+            models.AtomicRule.criterion.has(models.RubricCriterion.rubric_id == rubric["id"])))}
+        before = content_token(rules["manual.t04.deduct.1.v1"])
+        for rule in rules.values():
+            rule.scope = dict(identified)
+        session.flush()
+        # 范围不是老师编辑的内容：写上范围不让打开着的表单失效。
+        assert content_token(rules["manual.t04.deduct.1.v1"]) == before
+        session.commit()
+
+    def change_second(criteria):
+        criteria[0]["deduction_rules_structured"][1]["reason"] = "改过的合成条款"
+
+    _recompile_same(client, rubric["id"], version="v2", edit=change_second)
+    scopes = _current_scopes(client, rubric["id"])
+    assert scopes["manual.t04.deduct.1.v1"]["sections"] == ["绪论"]  # 内容未变：范围带过去
+    assert scopes["manual.t04.deduct.2.v1"] is None  # 内容改了：留给下一次识别
