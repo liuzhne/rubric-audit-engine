@@ -97,6 +97,7 @@ function applyOne(row) {
             <td>
               <div>{{ row.issue }}</div>
               <div class="faint mono code">{{ row.criterionCode }} · {{ row.groupCode }}</div>
+              <div class="faint" data-test="draft-scope">适用范围：{{ row.scopeLabel }}</div>
             </td>
             <td><span class="chip" :class="row.severity === 'severe' ? 'chip-danger' : row.severity === 'moderate' ? 'chip-warn' : ''">{{ row.severityLabel }}</span></td>
             <td class="num">{{ row.points }}</td>

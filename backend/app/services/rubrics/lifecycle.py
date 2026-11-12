@@ -248,8 +248,12 @@ def _canonical_version_hash(
                         # 计入会改变 0036 之前已发布版本重算出的 hash。
                         "ai_origin",
                         "ai_model",
+                        # 0044 的适用范围非空时在下面单独加入；为空时不出现，
+                        # 0044 之前已发布版本重算出的 hash 逐字节不变。
+                        "scope",
                     },
-                ),
+                )
+                | ({} if rule.scope is None else {"scope": _canonical_value(rule.scope)}),
                 "levels": _stable_rows(levels_by_rule[rule.id]),
                 "source_rules": _stable_rows(source_links_by_rule[rule.id]),
                 "template_links": _stable_rows(links_by_rule[rule.id]),
@@ -363,7 +367,8 @@ _EDITABLE_RULE_FIELDS = frozenset(
         "negative_example",
         "boundary_example",
         "strictness",
-        "applies_to",
+        # 适用范围（applies_to、evidence_policy.judge_scope）不再由人指定：范围由模型
+        # 在起草或范围识别时给出（docs/评分细则适用范围方案.md 第 7 节）。
         "mutex_group",
         "depends_on_rule_codes",
     }
@@ -396,6 +401,21 @@ def _json_mapping(value, *, field: str) -> dict:
     return normalized
 
 
+def keep_existing_judge_scope(existing_policy, new_policy):
+    """修改证据要求时留下规则上已有的 judge_scope。
+
+    分期 A 不改评分：开关打开的部署里旧评分路径仍读它，只改别的证据要求时不能顺手删掉
+    （评分侧分期 B 起不再读它）。新指定或改动的值不保存，只认原来的。
+    """
+    if not isinstance(new_policy, dict):
+        return new_policy
+    existing = (existing_policy or {}).get("judge_scope") if isinstance(existing_policy, dict) else None
+    result = {key: value for key, value in new_policy.items() if key != "judge_scope"}
+    if existing is not None:
+        result["judge_scope"] = existing
+    return result
+
+
 def _normalize_rule_changes(rule_code: str, changes: dict) -> dict:
     normalized = {}
     for key, value in changes.items():
@@ -421,15 +441,10 @@ def _normalize_rule_changes(rule_code: str, changes: dict) -> dict:
             normalized[key] = number
         elif key in {"checker_params", "evidence_policy"}:
             normalized[key] = _json_mapping(value, field=key)
-            # 判定范围（docs/论文评分第二阶段改造方案.md 第 13 节）：不填即自动推断。
-            if key == "evidence_policy" and "judge_scope" in normalized[key]:
-                scope = normalized[key]["judge_scope"]
-                if scope is None:
-                    normalized[key].pop("judge_scope")
-                elif not isinstance(scope, str) or scope not in {"section", "cross_section", "document"}:
-                    raise RubricLifecycleError(
-                        "evidence_policy.judge_scope 只能是 section、cross_section 或 document"
-                    )
+            # 人工指定的判定范围已取消（docs/评分细则适用范围方案.md 第 7 节）：修改里带的
+            # judge_scope 一律不保存；规则上已有的值由 keep_existing_judge_scope 原样留下。
+            if key == "evidence_policy":
+                normalized[key].pop("judge_scope", None)
         elif key == "depends_on_rule_codes":
             if not isinstance(value, list):
                 raise RubricLifecycleError("depends_on_rule_codes 必须是字符串列表")
@@ -455,7 +470,7 @@ def _normalize_rule_changes(rule_code: str, changes: dict) -> dict:
             ):
                 raise RubricLifecycleError(f"{key} 必须是非空字符串或 null")
             normalized[key] = value.strip() if isinstance(value, str) else None
-        elif key in {"name", "rule_text", "applies_to"}:
+        elif key in {"name", "rule_text"}:
             if not isinstance(value, str) or not value.strip():
                 raise RubricLifecycleError(f"{key} 必须是非空字符串")
             normalized[key] = value.strip()
@@ -703,6 +718,10 @@ def edit_atomic_rule(
         )
         if rule.status != "draft":
             raise RubricLifecycleError("只有 draft 原子规则可以修改")
+        if "evidence_policy" in normalized_changes:
+            normalized_changes["evidence_policy"] = keep_existing_judge_scope(
+                rule.evidence_policy, normalized_changes["evidence_policy"]
+            )
         occurred_at = _publication_time(now)
         _require_not_before(
             occurred_at,
@@ -1569,6 +1588,7 @@ def clone_published_rubric(
             creation_method=original.creation_method,
             ai_origin=bool(original.ai_origin),
             ai_model=original.ai_model,
+            scope=deepcopy(original.scope),
             reviewed_by=None,
             reviewed_at=None,
         )

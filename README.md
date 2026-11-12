@@ -76,7 +76,7 @@ docker compose --env-file .env.intranet up -d --build
 
 ## 项目状态
 
-Python 3.10+（CI 以 3.12 锁文件验证）· PostgreSQL 16 · Alembic head `0043_batch_owner_isolation`。
+Python 3.10+（CI 以 3.12 锁文件验证）· PostgreSQL 16 · Alembic head `0044_atomic_rule_scope`。
 `SCORING_ENGINE_MODE` 默认 `legacy`，只影响未版本化的旧标准；改为默认 Core 须先通过 GATE-03 并取得维护者批准。
 
 ```bash
