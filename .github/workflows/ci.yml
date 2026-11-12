@@ -636,6 +636,27 @@ jobs:
           docker save "$IMAGE" | gzip -1 | ssh pgs 'gunzip | docker load'
           tar -C deploy/production -czf - compose.yml deploy.sh ops.sh caddy \
             | ssh pgs 'tar -xzf - -C /opt/pgs && chmod 0755 /opt/pgs/deploy.sh /opt/pgs/ops.sh'
+      # 切换前的门：数据库版本与本镜像迁移目录的 head 不一致就停在这里，线上继续跑原来的版本。
+      # 迁移由手动的 pgs-production-migrate 执行（运行角色没有 DDL），部署不会替它做；2026-11-12
+      # 发布漏了迁移，新代码上线后读不存在的列（RUNBOOK 11.12）。只读一行版本号，用运行角色：
+      # production_env.py 渲染出的两条连接串里只把 RUNTIME_DATABASE_URL 交给容器。
+      - name: Refuse to deploy ahead of the database migrations
+        env:
+          DATA_PLANE: ${{ steps.plane.outputs.plane }}
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+          RUNTIME_DATABASE_URL: ${{ secrets.RUNTIME_DATABASE_URL }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          PGS_APP_PASSWORD: ${{ secrets.PGS_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ops_file="$RUNNER_TEMP/ops.env"
+          check_file="$RUNNER_TEMP/check.env"
+          trap 'rm -f "$ops_file" "$check_file"' EXIT
+          python3 scripts/production_env.py --from-environment --kind ops --data-plane "$DATA_PLANE" \
+            --output "$ops_file"
+          grep '^RUNTIME_DATABASE_URL=' "$ops_file" > "$check_file"
+          ssh pgs "/opt/pgs/ops.sh ${GITHUB_SHA} python -m backend.app.scripts.production_migrate check" < "$check_file"
       # 实例上的 .env 每次部署都由这里重新生成：生产密钥只存在 GitHub production 环境里，
       # 改密钥就是改 GitHub 上的值再部署一次。经 SSH 的标准输入写入，不落在命令行里。
       - name: Write the runtime environment
