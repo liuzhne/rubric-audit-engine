@@ -27,6 +27,21 @@ const SOURCE_LABEL = {
   ai_inferred: "AI 起草",
 };
 
+/** @type {Record<string, string>} */
+const SCOPE_TYPE_LABEL = { section: "章节内", cross_section: "跨章节" };
+
+/**
+ * 适用范围的中文说明（docs/评分细则适用范围方案.md）。没有范围或类型未知一律是“全文”。
+ *
+ * @param {any} scope 规则组或细则上的 `{type, sections}`
+ * @returns {string}
+ */
+export function scopeLabel(scope) {
+  const label = SCOPE_TYPE_LABEL[scope?.type];
+  if (!label) return "全文";
+  return `${label}：${(scope.sections || []).join("、")}`;
+}
+
 /**
  * 把嵌套的规则组摊平成表格行。
  *
@@ -45,6 +60,9 @@ export function draftRows(draft) {
         issue: group?.issue || group?.group_code || "",
         mutexGroup: group?.mutex_group ?? null,
         capPoints: group?.cap_points ?? null,
+        // 适用范围在组上，同组各档共用；模型返回，老师不填写。
+        scope: group?.scope ?? null,
+        scopeLabel: scopeLabel(group?.scope),
         index: rule?.draft_index ?? index,
         severity: rule?.severity || "",
         // 未知的严重程度原样透出：显示成空白等于把一条真实存在的规则藏起来。
@@ -96,6 +114,8 @@ export function confirmedStructuredRules(draft, excluded) {
       group_cap_points: row.capPoints,
       cap_points: null,
       mutex_group: row.mutexGroup,
+      // 编译时只认可归属的 AI 行上的范围（来源 ai_*、带指纹与行键）。
+      scope: row.scope,
       source: row.source,
       source_refs: row.sourceRefs,
       generation_fingerprint: row.fingerprint,

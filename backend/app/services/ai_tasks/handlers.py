@@ -62,6 +62,7 @@ _HANDLER_MODULES = (
     "backend.app.services.ai_tasks.unit_classification",
     "backend.app.services.ai_tasks.rule_review",
     "backend.app.services.ai_tasks.structure_suggestion",
+    "backend.app.services.ai_tasks.rule_scope",
 )
 
 

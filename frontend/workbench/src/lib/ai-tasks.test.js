@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   canRetryAiTask, classificationTaskProgress, draftTaskProgress, isActiveAiTask, isWaitingForRateLimit,
-  reviewTaskProgress, structureTaskProgress,
+  reviewTaskProgress, scopeTaskProgress, structureTaskProgress,
 } from "./ai-tasks.js";
 
 describe("AI 任务呈现", () => {
@@ -76,5 +76,15 @@ describe("表格结构识别任务进度", () => {
     expect(structureTaskProgress(waiting, now)).toContain("模型限流");
     expect(structureTaskProgress({ status: "failed", error_message: "模型两次输出的结构都未通过校验。" }))
       .toBe("识别失败：模型两次输出的结构都未通过校验。");
+  });
+});
+
+describe("适用范围识别任务", () => {
+  it("进行中与完成时的说明", () => {
+    expect(scopeTaskProgress({ status: "running", total_items: 3, succeeded_count: 1, items: [] }))
+      .toBe("正在识别适用范围：已完成 1/3 项（关闭页面不会中断）");
+    expect(scopeTaskProgress({ status: "succeeded", result: { status: "identified", identified: 4, failed: ["T02"], missing: ["a"] } }))
+      .toBe("识别完成：4 条规则写入了适用范围；T02 识别失败，按全文处理；1 条没有给出可用范围，按全文处理。");
+    expect(scopeTaskProgress({ status: "succeeded", result: { status: "nothing_to_identify" } })).toBe("没有需要识别的规则。");
   });
 });

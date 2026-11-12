@@ -34,7 +34,7 @@ from backend.app.services.scoring.core.rule_context import derive_context_needs
 from backend.app.services.scoring.retrieval.compression import COMPRESSOR_VERSION
 from backend.app.services.scoring.retrieval.compression import compress_evidence
 from backend.app.services.scoring.retrieval.judge_scope import scope_view
-from backend.app.services.scoring.retrieval.judge_scope import unit_target
+from backend.app.services.scoring.retrieval.section_roles import RoleResolver
 from backend.app.services.scoring.retrieval.selection import TokenBudgetError
 from backend.app.services.scoring.retrieval.selection import conservative_token_estimate
 
@@ -72,9 +72,16 @@ _GROUP_INSTRUCTIONS = _COMMON_INSTRUCTIONS + (
 
 # 第二阶段改造（docs/论文评分第二阶段改造方案.md）：开关关闭时提示词与上面完全相同。
 _EVIDENCE_SENTENCE = "text 由原文连续片段组成，“…”表示省略。"
+# 适用范围（docs/评分细则适用范围方案.md 第 8.4 节）：范围由代码执行，提示词只告知。按类型写死、
+# 不随规则变化，便于厂商的提示词缓存。
 _SCOPE_SENTENCE = (
-    "evidence 的 section 是该段落的完整标题路径；有 scope 时，scope.targets 列出规则要对照的章节及证据中"
-    "来自该章节的段落数，为 0 表示论文中没有找到该章节的段落，对应证据项的 target 标明所属章节。"
+    "evidence 的 section 是该段落的完整标题路径，section_role 是它所属的章节角色。"
+    "scope 说明本规则评价论文的哪一部分，由系统确定，你不得更改：type=document 时 evidence 是从全文按相关度"
+    "选出的段落，不是全文；type=section 时 evidence 只来自 scope.sections 列出的章节，coverage=complete 表示"
+    "给出了该章节的全部段落，partial 表示只给出了部分；type=cross_section 时规则要求对照多个章节。"
+    "只依据 evidence 判断，不得推测范围外或未给出段落的内容。规则要求的内容在 evidence 里找不到时："
+    "coverage=complete 可以判 triggered；coverage=partial 或 type=document 时判 insufficient_evidence，不能判缺失。"
+    "cross_section 判 triggered 时，occurrences 必须分别引用至少两个不同章节的证据。"
 )
 _NOT_TRIGGERED_SENTENCE = "not_triggered 表示证据显示不存在该缺陷，或现有证据不足以证明缺陷存在；"
 _REVIEW_STATUS_SENTENCE = (
@@ -108,9 +115,13 @@ def _judge_scope_enabled() -> bool:
 
 
 def _insufficient_evidence_enabled() -> bool:
+    """开了适用范围也允许“证据不足”：“整章 / 部分”的区分离不开它（方案第 8.4 节）。"""
+
     from backend.app.core.config import settings
 
-    return settings.SCORING_INSUFFICIENT_EVIDENCE_MODE == "review"
+    return settings.SCORING_INSUFFICIENT_EVIDENCE_MODE == "review" or bool(
+        settings.SCORING_JUDGE_SCOPE_ENABLED
+    )
 
 
 def basis_enabled() -> bool:
@@ -159,7 +170,7 @@ def provider_prompt_suffix() -> str:
 
     parts = []
     if _judge_scope_enabled():
-        parts.append("+judge-scope@1")
+        parts.append("+rule-scope@1")
     if _insufficient_evidence_enabled():
         parts.append("+insufficient@1")
     if basis_enabled():
@@ -269,18 +280,17 @@ def _view(value, rules, *, group_code=None):
     )
     alias_to_unit = {}
     evidence = []
-    full_path = _judge_scope_enabled()
-    scope = scope_view(rules, value.get("coverage_mode", ""), value["evidence_units"])
-    targets = [item["name"] for item in scope["targets"]] if scope else []
+    scoped = _judge_scope_enabled()
+    scope = scope_view(rules, value) if scoped else None
+    resolver = RoleResolver.from_envelope(value) if scoped else None
     for index, (unit, text) in enumerate(shown, start=1):
         alias = "E%d" % index
         alias_to_unit[alias] = unit["evidence_unit_id"]
         path = list(unit.get("section_path") or ())
-        section = " › ".join(path) if full_path else (path[-1] if path else "")
+        section = " › ".join(path) if scoped else (path[-1] if path else "")
         item = {"ref": alias, "section": section, "text": text}
-        target = unit_target(unit, targets) if targets else None
-        if target is not None:
-            item["target"] = target
+        if resolver is not None:
+            item["section_role"] = resolver.unit_role(unit)
         evidence.append(item)
 
     view = {}

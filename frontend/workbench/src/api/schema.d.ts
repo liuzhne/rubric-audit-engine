@@ -3219,7 +3219,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "rule_draft" | "unit_classification" | "rule_review" | "structure_suggestion";
+            kind: "rule_draft" | "unit_classification" | "rule_review" | "structure_suggestion" | "rule_scope";
             /** Params */
             params?: {
                 [key: string]: unknown;

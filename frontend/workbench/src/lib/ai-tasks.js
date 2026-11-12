@@ -107,6 +107,33 @@ export function reviewTaskProgress(task, now = Date.now()) {
 }
 
 /**
+ * 适用范围识别任务的进度说明（docs/评分细则适用范围方案.md 第 6 节）。
+ * @param {any} task
+ * @param {number} [now]
+ * @returns {string}
+ */
+export function scopeTaskProgress(task, now = Date.now()) {
+  if (!task) return "";
+  const total = task.total_items || 0;
+  const done = task.succeeded_count || 0;
+  if (task.status === "queued") return `适用范围识别排队中：共 ${total} 项（关闭页面不会中断）`;
+  if (task.status === "running") {
+    const suffix = isWaitingForRateLimit(task, now) ? "（模型限流，稍后自动继续）" : "";
+    return `正在识别适用范围：已完成 ${done}/${total} 项${suffix}（关闭页面不会中断）`;
+  }
+  if (task.status === "failed") return `适用范围识别未完成（已完成 ${done}/${total} 项）：${task.error_message || task.error_code || "未知原因"}`;
+  if (task.status === "canceled") return "已停止识别；本轮结果不会写入。";
+  if (task.status === "succeeded") {
+    const result = task.result || {};
+    if (result.status === "nothing_to_identify") return "没有需要识别的规则。";
+    const failed = (result.failed || []).length ? `；${result.failed.join("、")} 识别失败，按全文处理` : "";
+    const missing = (result.missing || []).length ? `；${result.missing.length} 条没有给出可用范围，按全文处理` : "";
+    return `识别完成：${result.identified || 0} 条规则写入了适用范围${failed}${missing}。`;
+  }
+  return "";
+}
+
+/**
  * 表格结构识别任务（草稿或导入前）的进度说明。
  * @param {any} task
  * @param {number} [now]

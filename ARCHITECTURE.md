@@ -592,6 +592,11 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | 新增 `scoring/retrieval/section_roles.py`（标题对到章节角色）与 `scope_policy.py`（Profile 注入 Core 的三个判断）；`judge_scope.py` 改为只读 `@5` 的 `scope`；规则快照 `@4` 删除、`@5` 新增；执行器加缺章短路与多章引用检查。开关默认关，见 §2026-11-11 小节 |
+| 2026-11-11 | 评分细则适用范围（#99 第三轮复审） | 识别完成只重读审查工作区、不重建编辑表单；规则编辑器的范围显示改取工作区（`ruleScopes`），不放进编辑表单 |
+| 2026-11-11 | 评分细则适用范围（#99 第二轮复审） | 范围移出 `rule_content`（不进 `content_token` 与审查签名），审查工作区单独给出；重新编译时 `review_carry.carry_rule_scopes` 把内容未变的规则的范围带过去；前端没有进行中的识别任务时一律重新识别 |
+| 2026-11-11 | 评分细则适用范围（#99 复审） | 范围识别写回时锁评分标准行并核对当前执行草稿；全部不合格的输出按不合格处理；已有 `judge_scope` 修改时保留；前端卸载时停止跟踪、有未保存修改时不能识别、成功后再点按重新识别。调用链不变 |
+| 2026-11-11 | 评分细则适用范围（分期 A：评分标准侧） | 新增 `services/rubric_scope/`（`vocabulary` 章节角色词表与校验、`identification` 范围识别）与 AI 任务种类 `rule_scope`；起草组带 `scope` 经前端复制到行、编译写进 `atomic_rules.scope`（0044）；审查工作区只读显示范围，不再给判定范围推断。评分调用链不变，见 §2026-11-11 小节 |
 | 2026-11-11 | AI 起草互斥组规整（#94 第二轮复审） | 撞名时的候选名改由 `deduction_caps.suffixed_mutex_groups` 生成（`原名-指纹`，放不下或被占用时 `原名-原名哈希-指纹`），都不超过列宽 100，编译与追加同步共用，候选名都被占用时编译报错、不并组；核对脚本的单档组含分档细则时算阻断。调用链不变 |
 | 2026-11-11 | 邀请与重置：直接给链接 | 只改前端 `views/AccountView.vue`：创建邀请、签发重置后显示并复制完整链接（`secretLink`）；接口、模块边界与调用链不变 |
 | 2026-11-11 | 按模型能力表决定思考（复审修正） | `transport.post_with_retry` 新增 `output_limit_fallback`：表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次（只在辅助调用）；`errors.output_limit_rejected` 识别；L0 键加实际思考字段；Vertex 区域主机改整串匹配。调用链方向不变 |
@@ -1999,3 +2004,58 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 “账户与连接”页创建邀请或签发密码重置后，显示的是可以直接打开的链接（`/register?token=…`、`/reset-password?token=…`），由前端 `AccountView.vue` 的 `secretLink` 用当前页面的来源加转义后的令牌拼出。后端接口不变，仍只返回令牌、不代发邮件。
 
 维护记录：2026-11-11 · 邀请与重置：直接给链接：记录链接在前端拼出、接口不变。
+
+### 2026-11-11 评分细则适用范围（分期 A：评分标准侧）
+
+方案见 [docs/评分细则适用范围方案.md](docs/评分细则适用范围方案.md)。每条细则评分时看论文的哪一部分，由模型在起草细则时返回，或由范围识别任务补上，不由人指定；本分期只到“存进细则、页面只读显示”，评分怎么用见分期 B。
+
+```
+词表 rubric_scope.vocabulary（section-roles@1，按 Profile：thesis / general_document / technical_proposal）
+起草 ai_rule_drafter（rubric-rule-draft@10）
+  payload.scope_vocabulary → 模型每组返回 scope {type, sections}（严格 Schema 枚举；精简 Schema 只枚举类型）
+  validate_ai_rule_draft：按词表校验并写回规整值；@10 起漏写按全文补上
+采用 ai-draft.js：组上的 scope 复制到每一行结构化扣分
+编译 pipeline._ai_row_scope：只认可归属的 AI 行（ai_* 来源 + 指纹 + 行键）→ stored_scope(source=ai_draft) → atomic_rules.scope
+范围识别 AI 任务 rule_scope（rubric_scope.identification + ai_tasks.rule_scope）
+  对象：草稿状态、参与评分、语义判断、scope 为空的规则；每个评分项一个条目（最多 20 条规则）
+  on_task_success → apply_identified_scopes：锁评分标准行（与发布共用）、核对仍是建任务时的执行草稿，
+      只写仍为空的规则，source=ai_identified，追加审计事件 scope，不改规则状态；全部不合格的输出修正一次后记失败
+复制已有细则：atomic_recompile._fields、lifecycle.clone_published_rubric 都带上 scope
+```
+
+- 持久化：0044 给 `atomic_rules` 加可空 JSON 列 `scope`，`ck_ai_tasks_kind` 加 `rule_scope`；不建表。版本内容哈希只在 `scope` 非空时含它；审查签名不含它。
+- 审查工作区规则带 `scope`（只读）与 `scope_label`，两者都不在 `rule_content` 里，不进 `content_token` 与审查签名；原来的 `judge_scope` / `judge_scope_hint` 推断展示删除。
+- 重新编译（`pipeline` 持久化）：`review_carry.snapshot_rule_scopes` / `carry_rule_scopes` 把内容与评分上下文未变的规则的范围带到新版本；人工与 Excel 行的范围因此不会在下一次保存后丢失。
+- 不再由人指定：`lifecycle` 可编辑字段去掉 `applies_to`，`evidence_policy.judge_scope` 随修改去掉；规则编辑器只读显示范围。Excel“适用范围”列仍写进 `applies_to`，只用来给 Word 批注找对应规则。
+- 前端：第 3 步 `RuleScopePanel` 发起识别；`stores/rubrics.scopeTask` 与其它 AI 任务一样轮询、可停止与重试。完成时只重读审查工作区，不重建编辑表单；`AtomicRuleEditor` 的范围显示取自工作区（`ruleScopes`），不在编辑表单里，所以识别期间或读取途中的修改不会被覆盖。
+- 评分：本分期不读 `scope`，`SCORING_JUDGE_SCOPE_ENABLED` 打开时仍按旧的 `judge_scope.py` 推断（生产没开），分期 B 改写。
+
+维护记录：2026-11-11 · 评分细则适用范围（分期 A）：新增模块、AI 任务种类与编译落库；迁移 head 升为 `0044_atomic_rule_scope`。
+
+### 2026-11-11 评分细则适用范围（分期 B：评分侧）
+
+方案见 [docs/评分细则适用范围方案.md](docs/评分细则适用范围方案.md) 第 8 节。`SCORING_JUDGE_SCOPE_ENABLED`（默认关）打开时，评分按细则的适用范围取证据；关闭时与之前逐字相同（规则快照 `@3`、全部按全文）。
+
+```
+快照 rubric_snapshot：开关开 → atomic-rule-snapshot@5 = @3 + scope {type, sections}（库里为空记为 document）
+                      旧的 @4（applies_to + evidence_policy.judge_scope）删除，evidence_policy 里的 judge_scope 一律不进快照
+执行器 rule_executor.execute_rule_plan（Core，只认 Profile 注入的 rule_scope_policy）
+  一篇一次 policy.section_role_map：有语义规则要看章节时，词表对不上的一级标题交给
+      ThesisLLMRuntime.classify_section_headings 归类一次（只发标题）→ profile_prompt_extensions.section_roles
+  共用证据（SCORING_EVIDENCE_SCOPE=criterion）只限范围相同的规则（_same_scope_rules）
+  每条 / 每个互斥组：建信封 → policy.missing_sections 非空 → 不调用模型，not_triggered + RULE_SCOPE_SECTION_MISSING
+                     模型返回 → policy.citations_cover_targets 为假 → not_triggered + RULE_SCOPE_CITATION_INCOMPLETE
+  两种问题与 RULE_EVIDENCE_INSUFFICIENT 一样让评分项 review_required
+取证据 selection.build_v4_envelope(judge_scope=True)
+  judge_scope.rule_scope：范围只来自 @5 的 scope（judge-scope@2）
+  select_scoped_units：按 section_roles.RoleResolver 的角色取目标章节；整章放得下就全部给（上限 max(top_k, 60)），
+      多章交替取；section_coverage 列出全文每个标题路径（含一段没选的），用来判断整章与缺章
+提示词 core_view：+rule-scope@1；scope {type, sections:[{role, headings, coverage}]}，每条证据带 section_role；
+      开了范围时非分档规则允许 insufficient_evidence
+```
+
+- Core 包不依赖检索与词表（`test_m2_import_boundary`）：三个判断放在 `scoring/retrieval/scope_policy.py`，由 `ThesisProfile`（含通用文档）与 `TechnicalProposalProfile` 的 `rule_scope_policy` 注入；没有它的 Profile 不应用范围。
+- 持久化与身份：章节角色归类写在信封扩展里，进入判定身份；没有新列、没有迁移。两种新复核原因进 `review_reasons`（`scope_section_missing` / `scope_citation_incomplete`）。
+- 不变的：v1 兼容路径按 `applies_to` 取章节文本块的逻辑；开关关闭时的提示词、快照与判定身份。
+
+维护记录：2026-11-11 · 评分细则适用范围（分期 B）：新增两个检索模块、执行器的两处检查与快照 @5；无迁移，head 仍为 `0044_atomic_rule_scope`。
