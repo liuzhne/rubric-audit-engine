@@ -597,11 +597,14 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 | 2026-11-11 | 评分细则适用范围（#99 第二轮复审） | 范围移出 `rule_content`（不进 `content_token` 与审查签名），审查工作区单独给出；重新编译时 `review_carry.carry_rule_scopes` 把内容未变的规则的范围带过去；前端没有进行中的识别任务时一律重新识别 |
 | 2026-11-11 | 评分细则适用范围（#99 复审） | 范围识别写回时锁评分标准行并核对当前执行草稿；全部不合格的输出按不合格处理；已有 `judge_scope` 修改时保留；前端卸载时停止跟踪、有未保存修改时不能识别、成功后再点按重新识别。调用链不变 |
 | 2026-11-11 | 评分细则适用范围（分期 A：评分标准侧） | 新增 `services/rubric_scope/`（`vocabulary` 章节角色词表与校验、`identification` 范围识别）与 AI 任务种类 `rule_scope`；起草组带 `scope` 经前端复制到行、编译写进 `atomic_rules.scope`（0044）；审查工作区只读显示范围，不再给判定范围推断。评分调用链不变，见 §2026-11-11 小节 |
+| 2026-11-11 | AI 起草互斥组规整（#94 第二轮复审） | 撞名时的候选名改由 `deduction_caps.suffixed_mutex_groups` 生成（`原名-指纹`，放不下或被占用时 `原名-原名哈希-指纹`），都不超过列宽 100，编译与追加同步共用，候选名都被占用时编译报错、不并组；核对脚本的单档组含分档细则时算阻断。调用链不变 |
 | 2026-11-11 | 邀请与重置：直接给链接 | 只改前端 `views/AccountView.vue`：创建邀请、签发重置后显示并复制完整链接（`secretLink`）；接口、模块边界与调用链不变 |
 | 2026-11-11 | 按模型能力表决定思考（复审修正） | `transport.post_with_retry` 新增 `output_limit_fallback`：表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次（只在辅助调用）；`errors.output_limit_rejected` 识别；L0 键加实际思考字段；Vertex 区域主机改整串匹配。调用链方向不变 |
 | 2026-11-11 | 按模型能力表决定思考 | 新增 `llm/hosts.py`（主机族，`auth_headers` 改用它）与 `llm/thinking_capabilities.py`（能力表与解析）；三个适配器构造时算出辅助计划与评分计划，请求合并计划的写法，思考开着时放开请求上限；`thinking_params` 只剩旧行为且名单改查表；运行身份读评分计划，强度与放开的上限写进 `model_version`；旧路径 L0 缓存键加思考身份与正式输出预算；起草器去掉 `isinstance`，改问适配器要实发上限。无迁移，见 §2026-11-11 小节 |
 | 2026-11-10 | 评分任务个人隔离：#95 复审修正 | 前端 `stores/batches.js` 的 `applyStageResult` 不再用阶段动作响应里的空值覆盖列表连表取来的标签（评分标准名与版本、创建人）；模块边界与调用链不变 |
 | 2026-11-10 | 评分任务个人隔离 | 新增 `services/ownership.py`（归属条件）；`api/guards.py` 的四个守卫与三个列表条件改为“组织 + 教师本人”；`exports.py`、`submissions_v2.py` 改调共享守卫；人工复核任务服务加 `owner_id` 参数；迁移 `0043_batch_owner_isolation`；`BatchRead.owner_name` |
+| 2026-11-10 | AI 起草互斥组规整（#94 复审） | 编译与追加同步共用 `deduction_caps.ai_mutex_identity` 识别 AI 行；追加同步按行的位置编号取编译结果；核对脚本加 `invalid_mutex_groups` |
+| 2026-11-09 | AI 起草互斥组规整（分期 A） | 新增 `deduction_caps.effective_mutex_groups`（编译写细则时规整互斥组，投影不变）、`atomic_recompile._sync_ai_mutex_groups` 与 `scripts/inspect_ai_draft_rules.py`；发布校验与执行器不变，见 2026-11-09 一节 |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 只改工作流与仓库安全设置；应用模块、调用链与数据流不变 |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 只改仓库规则集与发布规则；流水线、模块与调用链不变 |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | §6 改为“部署成功后线上是 main 的最新提交，实际版本以 `/opt/pgs/RELEASE` 为准”；分片收集规则与 pytest 默认一致；调用链不变 |
@@ -1907,6 +1910,31 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
 - 流式回放没有进度事件，只有 `accepted` 与 `done`。
 
 维护记录：2026-11-06 · 评分助手：发送去重：记录请求编号的生成、回放与唯一索引兜底的调用链；迁移 head 升为 `0042_assistant_message_client_id`。
+
+### 2026-11-09 AI 起草互斥组在编译时规整（分期 A）
+
+方案见 [docs/AI起草互斥组规整与区间拆档方案.md](docs/AI起草互斥组规整与区间拆档方案.md) §4.1。规整只发生在“结构化扣分 → AtomicRule”这一步，评分项投影（`deduction_rules_structured`）仍是起草时的原名：
+
+```
+起草合并 ai_rule_drafter.merge_draft_batches：每组写 {评分项}-B{批}-G{组}-SEVERITY（不变）
+采用 ai-draft.mergeConfirmedDrafts：追加到 deduction_rules_structured（不变）
+编译 pipeline（扣分制评分项的结构化扣分）
+  _compiled_deduction_points：这一行会不会生成细则（编译循环与规整共用这一个判断）
+  deduction_caps.effective_mutex_groups：每行写进细则的互斥组
+      同一次起草的同一组只剩 1 行会编译 → 空
+      同名已被投影里更早的组或人工行占用 → 原名-指纹前 8 位（suffixed_mutex_groups；放不下或已被占用 → 截短原名-原名哈希前 8 位-指纹前 8 位，总长不超过列宽 100；都已被占用 → ValueError，建评分标准返回 400、重新编译返回 422，不落库）
+追加（导入的评分标准）atomic_recompile.prepare_atomic_ai_append
+  _sync_ai_mutex_groups：已有 AI 细则改取这一行本次编译出的值，只改机器能产生的值（原名、空、原名加后缀）
+      行上写的 rule_code 只用来找已有细则，编译结果按行的位置编号找
+发布 executable_validator：不变，人工写错的单条互斥组照旧报 mutex_definition_invalid
+```
+
+- 识别 AI 行用 `deduction_caps.ai_mutex_identity`（来源 `ai_*`、互斥组、生成指纹、草稿行键），编译与追加同步共用；它是 `normalize_ai_group_caps` 口径里的归属部分，后者另外核验组上限的条件。`normalize_ai_group_caps` 读的是投影，不用改。
+- 只读核对脚本 `scripts/inspect_ai_draft_rules.py`：单档互斥组、跨评分项或含分档的互斥组、撞名互斥组、引用区间原文却只有一档的 AI 组；只输出编号和数字。
+- `compiler.point_range`（区间后必须紧跟“分”）先只供核对脚本使用；`analyze_rule_input` 仍用旧的 `_POINT_RANGE_RE`，分期 B 再切换。
+- 前端 `RubricsView.structuralMessages` 加上 `mutex_definition_invalid` 的中文说明。
+
+维护记录：2026-11-09 · AI 起草互斥组规整（分期 A）：新增规整函数、追加同步与核对脚本；无迁移，head 仍为 `0042_assistant_message_client_id`。
 
 ### 2026-11-10 评分任务个人隔离
 

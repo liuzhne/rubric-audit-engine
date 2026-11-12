@@ -815,6 +815,7 @@ const structuralMessages = {
   weight_policy_invalid: '评分项满分或权重与总分不一致，请在第 1 步核对。',
   rule_rejection_audit_missing: '已排除的细则缺少排除记录，请恢复后重新排除。',
   rule_rejection_audit_mismatch: '已排除的细则与排除记录不一致，请恢复后重新排除。',
+  mutex_definition_invalid: '互斥组里参与评分的细则不足 2 条（或跨评分项、含分档细则）。请在原子规则编辑里清空这条细则的互斥组，或补齐同组的其他档。',
 };
 const activeIssues = computed(() => [...(draft.value?.active_compilation?.blockers || []),
   ...(workspace.value?.structural_blockers || []).map(issue => ({ ...issue, message: structuralMessages[issue.code] || issue.message, criterion_code: issue.identity?.criterion_code }))]);

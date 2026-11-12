@@ -5,7 +5,11 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy import select
 
 from backend.app.db import models
-from backend.app.services.rubric_import.deduction_caps import normalize_ai_group_caps
+from backend.app.services.rubric_import.deduction_caps import (
+    ai_mutex_identity,
+    normalize_ai_group_caps,
+    suffixed_mutex_groups,
+)
 from backend.app.services.rubric_import import pipeline
 from backend.app.services.rubrics import lifecycle
 from backend.app.services.rubrics.review_workspace import content_token, number_text
@@ -107,6 +111,35 @@ def prepare_atomic_recompile(session, version, command, edits):
     return pipeline.PreparedRubricGraph.from_mapping(graph)
 
 
+def _sync_ai_mutex_groups(existing, generated, command):
+    """已有的 AI 细则改取本次编译规整后的互斥组（方案 §4.1(2)）。
+
+    追加路径从库里原样取已有细则，只追加新编号；不同步的话，先“仅应用此条”写入的
+    单档细则在其余档追加后仍游离在组外，存量的单档阻断和撞组也永远修不好。
+
+    只改机器能产生的值：起草原名、空、原名加指纹后缀。老师在原子规则编辑里改成别的
+    名字的保持不动。改了的细则内容签名会变，回到待确认——判分语义确实变了。
+    """
+    generated_by_code = {rule["rule_code"]: rule for rule in generated}
+    drafted = {}
+    for criterion in command["rubric"]["criteria"]:
+        for index, row in enumerate(criterion.get("deduction_rules_structured") or [], 1):
+            # 只认编译时会规整的行：带指纹和行键、来源却不是 ai_ 的行编译时原样保留，
+            # 这里也不能把老师清空的互斥组改回去。
+            if ai_mutex_identity(row) is None:
+                continue
+            # 编译总按位置编号；行上写了编号时，它指的是库里已有的那条细则。
+            compiled_code = f"manual.{criterion['code'].lower()}.deduct.{index}.v1"
+            drafted[row.get("rule_code") or compiled_code] = (row, compiled_code)
+    for value in existing:
+        row, compiled_code = drafted.get(value["rule_code"], (None, None))
+        if row is None or compiled_code not in generated_by_code:
+            continue
+        original, fingerprint = ai_mutex_identity(row)
+        if value.get("mutex_group") in {None, "", original, *suffixed_mutex_groups(original, fingerprint)}:
+            value["mutex_group"] = generated_by_code[compiled_code].get("mutex_group")
+
+
 def prepare_atomic_ai_append(session, version, command):
     """Append explicitly fingerprinted suggestions without replacing imported rules."""
     rules = session.scalars(select(models.AtomicRule).where(models.AtomicRule.rubric_version_id == version.id)).all()
@@ -122,6 +155,7 @@ def prepare_atomic_ai_append(session, version, command):
     additions = [rule for rule in generated["atomic_rules"] if rule["rule_code"] in eligible - codes]
     if not additions:
         raise ValueError("导入原子规则必须使用完整原子规则编辑，不能由评分项投影重新编译")
+    _sync_ai_mutex_groups(graph["atomic_rules"], generated["atomic_rules"], command)
     graph["atomic_rules"].extend(additions)
     graph["artifacts"].extend(generated["artifacts"])
     graph["source_rules"].extend(generated["source_rules"])
