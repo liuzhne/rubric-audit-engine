@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | `failures.OUTPUT_REPAIR_CHECKS` / `safe_output_check`：内核只认登记过的校验标识；运行时新增 `supports_group_repair`；`core_view.request_input_estimate` 计入重问提示；Responses 的 `_parse_json_output` 改抛带 `reason` 的 `ResponsesJSONOutputError` |
 | 2026-11-12 | 评分模型回答不合格的重问与报错 | 规则执行器在回答不合格时带固定修正提示重问 1 次（`_RepairBudget`，上限来自运行时的 `output_repair_limit`）；适配器的回答校验改抛 `CoreResponseInvalidError`（带 `check`）；`failures` 新增 `PROVIDER_OUTPUT_INVALID` 与出错位置 `where`；无迁移 |
 | 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | 新增 `scoring/retrieval/section_roles.py`（标题对到章节角色）与 `scope_policy.py`（Profile 注入 Core 的三个判断）；`judge_scope.py` 改为只读 `@5` 的 `scope`；规则快照 `@4` 删除、`@5` 新增；执行器加缺章短路与多章引用检查。开关默认关，见 §2026-11-11 小节 |
 | 2026-11-11 | 评分细则适用范围（#99 第三轮复审） | 识别完成只重读审查工作区、不重建编辑表单；规则编辑器的范围显示改取工作区（`ruleScopes`），不放进编辑表单 |
@@ -2085,3 +2086,13 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - `batch_scoring/jobs._incomplete_scoring_error` 把这 6 个码统一报成 `PROVIDER_OUTPUT_INVALID`（类别 `llm`）；`assistant/views.DIAGNOSES` 有对应的卡片文案。
 
 维护记录：2026-11-12 · 评分模型回答不合格的重问与报错：执行器增加重问一步，新增异常类型、错误码与出错位置；无迁移。
+
+### 2026-11-13 评分模型回答不合格的重问与报错（#103 复审）
+
+- `scoring/core/failures.OUTPUT_REPAIR_CHECKS` 是全部校验标识，`safe_output_check` 把不在其中的值归为 `fields`。执行器（重问、日志）与失败投影都经过它；它与 `llm/core_adapter.OUTPUT_REPAIR_HINTS` 的键一致由测试保证。
+- 论文运行时新增 `supports_group_repair`（看评分器 `score_core_group` 的签名）；执行器在重问互斥组前检查它，没有这个属性的运行时按支持处理。
+- `core_view.request_input_estimate` 把 `repair_hint` 与一条消息的封装余量算进去，`preflight_core_request` 因此量的是重问时实际发出的大小。
+- `core_view._map_evidence_refs` 只遍历数组类型的 `occurrences` / `evidence`，其它类型原样交给归一化拒绝；`core_adapter.normalize_core_provider_response` 对 `status`、`level_code`、`finding_code`、证据编号先查类型再查集合。
+- `llm/openai_adapter._parse_json_output` 改抛 `ResponsesJSONOutputError`（`invalid_json` / `empty_content`，消息不变）。
+
+维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 复审）：校验标识集合、整组重问的签名检查、输入估算与两处类型检查。

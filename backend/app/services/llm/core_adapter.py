@@ -412,7 +412,7 @@ def normalize_core_provider_response(
     allowed_statuses = {"triggered", "not_triggered", "not_applicable"}
     if allow_insufficient:
         allowed_statuses.add("insufficient_evidence")
-    if status not in allowed_statuses:
+    if not isinstance(status, str) or status not in allowed_statuses:
         raise _invalid("status", "Core provider response status is invalid")
 
     raw_occurrences = response["occurrences"]
@@ -437,7 +437,7 @@ def normalize_core_provider_response(
         allowed_levels = {
             item["level_code"] for item in rule.get("levels", ()) or ()
         }
-        if level_code not in allowed_levels:
+        if not isinstance(level_code, str) or level_code not in allowed_levels:
             raise _invalid("level", "Core provider response selected an unauthorized level")
     elif level_code is not None:
         raise _invalid("level", "non-band Core response must not select a level")
@@ -451,7 +451,8 @@ def normalize_core_provider_response(
         }:
             raise _invalid("fields", "Core provider occurrence has invalid fields")
         finding_code = occurrence["finding_code"]
-        if finding_code not in allowed_codes:
+        # 先看类型：数组等不可哈希的值查集合会抛 TypeError，应当按回答不合格拒绝。
+        if not isinstance(finding_code, str) or finding_code not in allowed_codes:
             raise _invalid("finding_code", "Core provider response named an unauthorized finding")
         raw_evidence = occurrence["evidence"]
         if not isinstance(raw_evidence, list) or not raw_evidence:
@@ -467,7 +468,8 @@ def normalize_core_provider_response(
                 raise _invalid("evidence", "Core provider evidence has invalid fields")
             if item["type"] != "source_quote":
                 raise _invalid("evidence", "Core provider evidence type is invalid")
-            unit = units.get(item["evidence_unit_id"])
+            unit_id = item["evidence_unit_id"]
+            unit = units.get(unit_id) if isinstance(unit_id, str) else None
             quote = item["quote"]
             if (
                 unit is None

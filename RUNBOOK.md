@@ -1313,6 +1313,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | 材料级说明不再写「已自动重问」，排错条目改为按 `attempt_count` 判断有没有重问过；无新命令 |
 | 2026-11-12 | 评分模型回答不合格的重问与报错 | 新环境变量 `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER`（默认 5，0 关闭）；新日志 `rule_output_repair`，`rule_execution_failed` 多了 `check` 与 `where`；两条排错；无迁移 |
 | 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | `SCORING_JUDGE_SCOPE_ENABLED` 含义改为按细则适用范围取证据（仍默认关，QWK 后再开）；排错补两种新的复核原因与“开了范围后转人工变多” |
 | 2026-11-11 | 评分细则适用范围（#99 第三轮复审） | 无新命令与排错；页面行为见 ARCHITECTURE 同日条目 |
@@ -3388,9 +3389,9 @@ ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h wor
 
 排错：
 
-- **材料失败，说明是「模型对部分规则的回答不符合要求的格式，系统已自动重问仍不合格」（`PROVIDER_OUTPUT_INVALID`）**
+- **材料失败，说明是「模型对部分规则的回答没有通过格式校验」（`PROVIDER_OUTPUT_INVALID`）**
   - 报错指向：模型回答。这次指向是对的，但容易去查连接或限流。
-  - 真正原因：同一条规则连续两次回答没过校验。先点「重试失败项」（已成功的规则复用，只重判失败的）。同一条规则反复失败时看 `rule_output_repair` 的 `check`：总是 `evidence` 多半是模型在改写引文而不是逐字摘录，总是 `fields` / `status` 多半是这个模型不守 JSON 结构，换模型比调参数有效。一篇里 `skipped_cap` 很多说明是系统性的，不要靠调大上限解决。
+  - 真正原因：模型的回答没过校验。说明里不写有没有重问过，要看规则任务：`attempt_count=2` 是重问后仍不合格，`attempt_count=1` 是没有重问（上限设成了 0、本篇名额用完即日志里的 `skipped_cap`，或评分器不接受 `repair`）。先点「重试失败项」（已成功的规则复用，只重判失败的）。同一条规则反复失败时看 `rule_output_repair` 的 `check`：总是 `evidence` 多半是模型在改写引文而不是逐字摘录，总是 `fields` / `status` 多半是这个模型不守 JSON 结构，换模型比调参数有效。一篇里 `skipped_cap` 很多说明是系统性的，不要靠调大上限解决。
 - **`RULE_EXECUTION_FAILED`，页面说「评分规则执行失败」**
   - 报错指向：让人去查模型或 Worker。
   - 真正原因：2026-11-12 之后这个码只剩代码异常。`rule_execution_failed` 日志行的 `where=<模块>:<行号>` 就是抛出的位置，规则任务的复核说明里也有同一个位置。2026-11-12 之前的版本里，模型回答不合格也报这个码（当天 `t03.v1` 那次就是），那时日志只有 `exception_type=ValueError`，定位不到校验。
@@ -3401,3 +3402,5 @@ ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h wor
 测试：`.venv/bin/python -m pytest -q backend/app/tests/test_scoring_output_repair.py`
 
 维护记录：2026-11-12 · 评分模型回答不合格的重问与报错：新增环境变量、日志字段与三条排错。
+
+维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 复审）：说明文案与排错条目按“是否重问过看 `attempt_count`”修正。

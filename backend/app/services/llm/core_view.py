@@ -495,11 +495,15 @@ def build_core_group_request(envelopes, *, group_code: str) -> CoreProviderReque
 def request_input_estimate(request: CoreProviderRequest) -> int:
     """Conservative size of exactly what is sent (system + view + framing)."""
 
-    return (
+    estimate = (
         conservative_token_estimate(request.user)
         + conservative_token_estimate(request.system)
         + _FRAMING_ALLOWANCE
     )
+    if request.repair_hint:
+        # 重问多出的那条提示也算进去（另加一条消息的封装余量），预检量的才是实际发出的大小。
+        estimate += conservative_token_estimate(request.repair_hint) + _FRAMING_ALLOWANCE
+    return estimate
 
 
 def estimate_view_input_tokens(value, rules) -> int:
@@ -540,10 +544,14 @@ def _map_evidence_refs(response, alias_to_unit):
     if not isinstance(response, Mapping):
         return response
     mapped = deepcopy(dict(response))
-    for occurrence in mapped.get("occurrences") or ():
+    # 容器类型不对（occurrences 是数字、evidence 是字符串等）时不在这里遍历：原样交给
+    # 归一化，由它按「回答不合格」拒绝，而不是在这里抛 TypeError。
+    occurrences = mapped.get("occurrences")
+    for occurrence in occurrences if isinstance(occurrences, list) else ():
         if not isinstance(occurrence, dict):
             continue
-        for item in occurrence.get("evidence") or ():
+        evidence = occurrence.get("evidence")
+        for item in evidence if isinstance(evidence, list) else ():
             if isinstance(item, dict) and "evidence_ref" in item:
                 ref = item.pop("evidence_ref")
                 unit_id = alias_to_unit.get(ref) if isinstance(ref, str) else None

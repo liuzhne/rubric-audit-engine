@@ -798,7 +798,7 @@ def _incomplete_scoring_error(rule_tasks):
             )
         elif code == OUTPUT_INVALID_CODE:
             message = (
-                "模型对部分规则的回答不符合要求的格式，系统已自动重问仍不合格。"
+                "模型对部分规则的回答没有通过格式校验。"
                 "可以直接重试失败项，已成功的规则会复用；反复出现请换一个模型。"
             )
         elif code == "PROVIDER_OUTPUT_REFUSED":

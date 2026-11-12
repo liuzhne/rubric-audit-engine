@@ -444,7 +444,9 @@ def test_the_paper_level_error_names_the_model_output(code):
     )
 
     assert error.code == "PROVIDER_OUTPUT_INVALID"
-    assert "回答不符合要求的格式" in str(error) and "重试失败项" in str(error)
+    assert "没有通过格式校验" in str(error) and "重试失败项" in str(error)
+    # 说明不声称重问过：上限为 0 或名额用完时并没有重问。
+    assert "已自动重问" not in str(error)
     assert jobs._classify_failure(error) == ("PROVIDER_OUTPUT_INVALID", "llm")
     title, _text = assistant_views.DIAGNOSES[assistant_views.normalize_error_code(error.code)]
     assert title == "模型回答不合格"
@@ -536,3 +538,142 @@ def test_a_rule_that_stays_invalid_records_the_model_output_as_the_cause(
         assert run.final_total_score is None
         error = jobs._incomplete_scoring_error(tasks)
         assert (error.code, jobs._classify_failure(error)[1]) == ("PROVIDER_OUTPUT_INVALID", "llm")
+
+
+# ---------------------------------------------------------------- #103 复审
+
+
+def test_the_core_and_the_adapter_agree_on_the_checks():
+    from backend.app.services.scoring.core.failures import OUTPUT_REPAIR_CHECKS
+
+    assert set(OUTPUT_REPAIR_HINTS) == set(OUTPUT_REPAIR_CHECKS)
+    assert set(OUTPUT_INVALID_CHECKS.values()) <= set(OUTPUT_REPAIR_CHECKS)
+
+
+def test_an_unregistered_check_is_neither_logged_nor_used_for_the_retry(caplog):
+    request = _request("R1")
+    # 外来评分器给了一个格式合法、但没有登记的标识，以及一段任意文字。
+    for foreign in ("no_such_check", MARKER):
+        runtime = _ScriptedRuntime(
+            {"R1": [CoreResponseInvalidError(foreign), CoreResponseInvalidError(foreign)]}
+        )
+        with caplog.at_level(logging.WARNING):
+            result, _journal = _execute(request, runtime)
+
+        assert runtime.calls == [("R1", None), ("R1", "fields")]
+        issue = next(item for item in result["review_issues"] if item.get("rule_code") == "R1")
+        assert issue["message"].endswith("(check=fields)")
+    assert "no_such_check" not in caplog.text and MARKER not in caplog.text
+
+
+def _chat_scorer():
+    client = adapter_tests._CompatibleCoreClient()
+    scorer = OpenAICompatibleChatScorer(
+        api_key="test-key", base_url="https://provider.example/v1", model_name="repair-test",
+        client=client, temperature=0, max_tokens=700, response_format_json=True, thinking_type="",
+    )
+    return scorer, client
+
+
+@pytest.mark.parametrize(
+    "change, check",
+    [
+        ({"occurrences": 7}, "fields"),
+        ({"occurrences": "none"}, "fields"),
+        ({"status": ["triggered"]}, "status"),
+        ({"level_code": []}, "level"),
+    ],
+)
+def test_wrongly_typed_fields_are_invalid_answers_not_crashes(change, check):
+    scorer, client = _chat_scorer()
+    envelope = adapter_tests._core_envelope(scorer)
+    client.output = {**adapter_tests._provider_response(envelope), **change}
+
+    with pytest.raises(CoreResponseInvalidError) as caught:
+        scorer.score_core_envelope(envelope=envelope)
+
+    assert caught.value.check == check
+
+
+@pytest.mark.parametrize(
+    "path, value, check",
+    [
+        (("finding_code",), ["GAP"], "finding_code"),
+        (("evidence",), "E1", "triggered_without_evidence"),
+        (("evidence", 0, "evidence_unit_id"), ["E1"], "evidence"),
+    ],
+)
+def test_wrongly_typed_occurrence_fields_are_invalid_answers(path, value, check):
+    scorer, client = _chat_scorer()
+    envelope = adapter_tests._core_envelope(scorer)
+    answer = adapter_tests._provider_response(envelope)
+    target = answer["occurrences"][0]
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    client.output = answer
+
+    with pytest.raises(CoreResponseInvalidError) as caught:
+        scorer.score_core_envelope(envelope=envelope)
+
+    assert caught.value.check == check
+
+
+@pytest.mark.parametrize(
+    "body, reason",
+    [
+        ({"id": "r", "output_text": "{not json"}, "invalid_json"),
+        ({"id": "r", "output": []}, "empty_content"),
+    ],
+)
+def test_responses_parse_failures_carry_a_reason_so_they_can_be_asked_again(body, reason):
+    from backend.app.services.llm.openai_adapter import _parse_json_output
+    from backend.app.services.scoring.core.rule_executor import _output_invalid_check
+
+    with pytest.raises(ProviderJSONOutputError) as caught:
+        _parse_json_output(body)
+
+    assert caught.value.reason == reason and isinstance(caught.value, ValueError)
+    assert _output_invalid_check(caught.value) == "json"
+    assert project_rule_execution_failure(caught.value)[0] == "PROVIDER_OUTPUT_INVALID"
+
+
+def test_the_repair_hint_is_counted_in_the_input_estimate():
+    from backend.app.services.llm.core_view import request_input_estimate
+    from backend.app.services.llm.core_view import with_repair
+    from backend.app.services.scoring.retrieval.selection import conservative_token_estimate
+
+    scorer, _client = _chat_scorer()
+    request = build_core_request(adapter_tests._core_envelope(scorer))
+    repaired = with_repair(request, "evidence")
+
+    extra = request_input_estimate(repaired) - request_input_estimate(request)
+    assert extra > conservative_token_estimate(_hint("evidence"))
+    assert request_input_estimate(with_repair(request, None)) == request_input_estimate(request)
+
+
+def test_a_group_is_not_asked_again_when_the_runtime_cannot_repair_groups():
+    request = _group_request()
+    runtime = _GroupScriptedRuntime({"G": [_invalid("status")]})
+    runtime.supports_group_repair = False
+
+    result, _journal = _execute(request, runtime)
+
+    assert runtime.calls == [("G", None)]
+    assert _issue_codes(result) == {code: "PROVIDER_OUTPUT_INVALID" for code in ("T.1", "T.2", "T.3")}
+
+
+def test_the_paper_runtime_checks_the_group_entry_separately():
+    class _GroupWithoutRepair(_RepairableScorer):
+        def score_core_group(self, *, envelopes, group_code):
+            return {}
+
+    class _GroupWithRepair(_RepairableScorer):
+        def score_core_group(self, *, envelopes, group_code, repair=None):
+            return {}
+
+    assert ThesisLLMRuntime(_GroupWithoutRepair()).supports_group_repair is False
+    assert ThesisLLMRuntime(_GroupWithRepair()).supports_group_repair is True
+    assert ThesisLLMRuntime(_RepairableScorer()).supports_group_repair is False
+    # 单条规则的判断不受整组入口影响。
+    assert ThesisLLMRuntime(_GroupWithoutRepair()).output_repair_limit > 0

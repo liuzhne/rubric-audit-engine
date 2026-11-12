@@ -27,8 +27,8 @@ from backend.app.services.llm.usage import observed_usage
 class ResponsesJSONOutputError(ProviderJSONOutputError):
     """Safe completion metadata; never include model content or credentials."""
 
-    def __init__(self, reason):
-        super().__init__(reason, "Responses JSON output: " + reason)
+    def __init__(self, reason, message=None):
+        super().__init__(reason, message or "Responses JSON output: " + reason)
 
 
 class OpenAIResponsesScorer(LLMScorer):
@@ -476,13 +476,18 @@ def _parse_json_output(data):
     if not text:
         text = _extract_output_text(data.get("output") or [])
     if not text:
-        raise ValueError("OpenAI response did not contain text output")
+        # 带 reason：规则执行器据此认出「答了但不能用」，可以重问（与 Chat、Messages 一致）。
+        raise ResponsesJSONOutputError(
+            "empty_content", "OpenAI response did not contain text output"
+        )
 
     cleaned = _strip_json_fence(text)
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        raise ValueError("OpenAI response was not valid JSON: %s" % exc) from exc
+        raise ResponsesJSONOutputError(
+            "invalid_json", "OpenAI response was not valid JSON: %s" % exc
+        ) from exc
 
 
 def _extract_output_text(output_items):

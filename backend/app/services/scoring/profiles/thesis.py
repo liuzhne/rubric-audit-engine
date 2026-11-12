@@ -540,6 +540,18 @@ class ThesisLLMRuntime:
             lambda: classify_headings(self.scorer, headings, profile_key), envelope=None
         )
 
+    @property
+    def supports_group_repair(self) -> bool:
+        """评分器的整组入口接不接受 ``repair``；不接受时执行器不重问互斥组（单条规则不受影响）。"""
+
+        import inspect
+
+        explicit = getattr(self.scorer, "score_core_group", None)
+        try:
+            return callable(explicit) and "repair" in inspect.signature(explicit).parameters
+        except (TypeError, ValueError):
+            return False
+
     def score_group(self, *, envelopes, group_code, repair=None):
         """One provider call for every tier of a mutex group.
 

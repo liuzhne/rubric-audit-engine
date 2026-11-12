@@ -24,6 +24,7 @@ from backend.app.services.scoring.core.contracts import (
 from backend.app.services.scoring.core.results import RuleExecutionResult
 from backend.app.services.scoring.core.failures import OUTPUT_INVALID_CHECKS
 from backend.app.services.scoring.core.failures import failure_site
+from backend.app.services.scoring.core.failures import safe_output_check
 from backend.app.services.scoring.core.failures import project_rule_execution_failure
 from backend.app.services.scoring.core.decision_identity import rule_decision_identity
 
@@ -590,11 +591,17 @@ def _output_invalid_check(exc):
 
     reason = getattr(exc, "reason", None)
     if reason == "output_invalid":
-        check = getattr(exc, "check", None)
-        return check if isinstance(check, str) and check else "fields"
+        # 只认已登记的标识：外来评分器给的任意文字不进日志，也不会被拿去重问。
+        return safe_output_check(getattr(exc, "check", None))
     if reason in _REPAIRABLE_JSON_REASONS:
         return "json"
     return None
+
+
+def _logged_check(exc) -> str:
+    """日志里的校验标识：只有「回答不合格」的异常才有，且只取已登记的值。"""
+
+    return _output_invalid_check(exc) or "-"
 
 
 class _RepairBudget:
@@ -941,7 +948,7 @@ def _judge_semantic_group(
             group_code,
             error,
             type(exc).__name__,
-            getattr(exc, "check", None) or "-",
+            _logged_check(exc),
             failure_site(exc),
         )
         return {
@@ -960,7 +967,12 @@ def _judge_semantic_group(
         return None
 
     def take(check):
-        return repair_budget is not None and repair_budget.take(group_code, check)
+        # 评分器的整组入口不接受 repair 时不重问整组（否则重问会以 TypeError 收场，盖住真正的原因）。
+        return (
+            repair_budget is not None
+            and getattr(llm_runtime, "supports_group_repair", True)
+            and repair_budget.take(group_code, check)
+        )
 
     # 第一次：请求与以往相同。整组答了但不合格时，带固定修正提示把整组重问 1 次；仍不合格
     # 各档照旧无效，不拆成逐条调用。
@@ -1647,7 +1659,7 @@ def execute_rule_plan(
                 code,
                 error,
                 type(exc).__name__,
-                getattr(exc, "check", None) or "-",
+                _logged_check(exc),
                 failure_site(exc),
             )
         insufficient = bool(decision.pop(_EVIDENCE_INSUFFICIENT_MARK, False))

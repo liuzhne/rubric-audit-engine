@@ -6,8 +6,27 @@ import re
 
 
 _SAFE_EXCEPTION_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,79}$")
-_SAFE_CHECK = re.compile(r"^[a-z][a-z0-9_]{0,59}$")
 _PROJECT_MARKER = "backend/app/"
+
+#: 全部校验标识。与适配器的修正提示清单（``llm/core_adapter.OUTPUT_REPAIR_HINTS``）一一对应，
+#: 由测试保证；内核不导入适配器，所以在这里再列一遍。异常带来的 ``check`` 不在其中时一律
+#: 当作 ``fields``：既不会把任意文字写进日志，也不会拿一个没有提示的标识去重问。
+OUTPUT_REPAIR_CHECKS = frozenset({
+    "json",
+    "fields",
+    "status",
+    "non_triggered_has_decision",
+    "triggered_without_evidence",
+    "evidence",
+    "level",
+    "finding_code",
+    "rule_code",
+})
+
+
+def safe_output_check(value) -> str:
+    return value if isinstance(value, str) and value in OUTPUT_REPAIR_CHECKS else "fields"
+
 
 #: 材料级统一报告的「模型回答不合格」根因码。
 OUTPUT_INVALID_CODE = "PROVIDER_OUTPUT_INVALID"
@@ -79,9 +98,7 @@ def project_rule_execution_failure(exc: Exception) -> tuple[str, str]:
     # 模型答了但没通过回答校验（或不是可用的 JSON）：是模型输出问题，不是系统错误。
     reason = getattr(exc, "reason", None)
     if reason in ("output_invalid", "invalid_json", "empty_content"):
-        check = getattr(exc, "check", None) if reason == "output_invalid" else "json"
-        if not isinstance(check, str) or not _SAFE_CHECK.fullmatch(check):
-            check = "fields"
+        check = safe_output_check(getattr(exc, "check", None)) if reason == "output_invalid" else "json"
         return (
             OUTPUT_INVALID_CODE,
             "semantic provider output failed validation (check=%s)" % check,
@@ -103,6 +120,8 @@ def project_rule_execution_failure(exc: Exception) -> tuple[str, str]:
 
 __all__ = [
     "OUTPUT_INVALID_CHECKS",
+    "OUTPUT_REPAIR_CHECKS",
+    "safe_output_check",
     "OUTPUT_INVALID_CODE",
     "failure_site",
     "project_rule_execution_failure",
