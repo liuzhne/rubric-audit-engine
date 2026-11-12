@@ -13,6 +13,7 @@ from backend.app.services.llm.core_view import build_core_request
 from backend.app.services.llm.core_view import compression_summary
 from backend.app.services.llm.core_view import decode_core_group_response
 from backend.app.services.llm.core_view import decode_core_response
+from backend.app.services.llm.core_view import with_repair
 from backend.app.services.llm.core_view import preflight_core_request
 from backend.app.services.llm.errors import ProviderJSONOutputError
 from backend.app.services.llm.legacy_prompts import envelope_score_schema as _envelope_score_schema
@@ -166,7 +167,11 @@ class OpenAIResponsesScorer(LLMScorer):
             "model": provider["model"],
             **_sampling_controls(sampling),
             "instructions": request.system,
-            "input": request.user,
+            # 重问：原输入一字不改，修正提示另起一条用户消息。
+            "input": request.user if not request.repair_hint else [
+                {"role": "user", "content": request.user},
+                {"role": "user", "content": request.repair_hint},
+            ],
             "max_output_tokens": self._scoring_max_tokens(sampling["max_tokens"]),
             **self.scoring_thinking_plan.fields(),
             "text": {
@@ -185,22 +190,22 @@ class OpenAIResponsesScorer(LLMScorer):
         _raise_if_incomplete(data)
         return _parse_json_output(data)
 
-    def score_core_envelope(self, *, envelope):
+    def score_core_envelope(self, *, envelope, repair=None):
         """Score one immutable PromptEnvelopeV3/V4 semantic rule via its view."""
 
         envelope, provider = self._validated_core(envelope)
-        request = build_core_request(envelope)
+        request = with_repair(build_core_request(envelope), repair)
         raw = self._post_core_request(
             envelope, provider, request, schema_name="semantic_rule_response"
         )
         return decode_core_response(envelope, raw, request)
 
-    def score_core_group(self, *, envelopes, group_code):
+    def score_core_group(self, *, envelopes, group_code, repair=None):
         """Judge every tier of one mutex group in a single request."""
 
         validated = [self._validated_core(envelope) for envelope in envelopes]
         envelopes = [envelope for envelope, _provider in validated]
-        request = build_core_group_request(envelopes, group_code=group_code)
+        request = with_repair(build_core_group_request(envelopes, group_code=group_code), repair)
         raw = self._post_core_request(
             envelopes[0], validated[0][1], request, schema_name="semantic_group_response"
         )

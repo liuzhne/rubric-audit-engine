@@ -12,6 +12,7 @@ from backend.app.services.llm.core_view import build_core_request
 from backend.app.services.llm.core_view import compression_summary
 from backend.app.services.llm.core_view import decode_core_group_response
 from backend.app.services.llm.core_view import decode_core_response
+from backend.app.services.llm.core_view import with_repair
 from backend.app.services.llm.core_view import preflight_core_request
 from backend.app.services.llm.errors import ProviderJSONOutputError
 from backend.app.services.llm.legacy_prompts import chat_envelope_instructions as _envelope_instructions
@@ -186,6 +187,9 @@ class OpenAICompatibleChatScorer(LLMScorer):
             # 信封记正式输出预算（Core 证据预算按它扣）；思考开着时实发上限放到封顶值，写在 model_version 里。
             "max_tokens": self._envelope_max_tokens(provider),
         }
+        if request.repair_hint:
+            # 重问：原来的两条消息一字不改，修正提示另起一条。
+            payload["messages"].append({"role": "user", "content": request.repair_hint})
         if sampling["seed"] is not None:
             payload["seed"] = sampling["seed"]
         payload.update(self._envelope_thinking_fields(provider))
@@ -199,20 +203,20 @@ class OpenAICompatibleChatScorer(LLMScorer):
         response.raise_for_status()
         return _parse_chat_json_output(response.json())
 
-    def score_core_envelope(self, *, envelope):
+    def score_core_envelope(self, *, envelope, repair=None):
         """Score one immutable PromptEnvelopeV3/V4 semantic rule via its view."""
 
         envelope, provider = self._validated_core(envelope)
-        request = build_core_request(envelope)
+        request = with_repair(build_core_request(envelope), repair)
         raw = self._post_core_request(envelope, provider, request)
         return decode_core_response(envelope, raw, request)
 
-    def score_core_group(self, *, envelopes, group_code):
+    def score_core_group(self, *, envelopes, group_code, repair=None):
         """Judge every tier of one mutex group in a single request."""
 
         validated = [self._validated_core(envelope) for envelope in envelopes]
         envelopes = [envelope for envelope, _provider in validated]
-        request = build_core_group_request(envelopes, group_code=group_code)
+        request = with_repair(build_core_group_request(envelopes, group_code=group_code), repair)
         raw = self._post_core_request(envelopes[0], validated[0][1], request)
         return decode_core_group_response(envelopes, raw, request)
 

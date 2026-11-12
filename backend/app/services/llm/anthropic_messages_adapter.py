@@ -35,6 +35,7 @@ from backend.app.services.llm.core_view import build_core_request
 from backend.app.services.llm.core_view import compression_summary
 from backend.app.services.llm.core_view import decode_core_group_response
 from backend.app.services.llm.core_view import decode_core_response
+from backend.app.services.llm.core_view import with_repair
 from backend.app.services.llm.core_view import preflight_core_request
 from backend.app.services.llm.errors import ProviderJSONOutputError
 from backend.app.services.llm.legacy_prompts import chat_envelope_instructions
@@ -476,25 +477,32 @@ class AnthropicMessagesScorer(LLMScorer):
             # 信封记正式输出预算（Core 证据预算按它扣）；思考开着时实发上限放到封顶值，写在 model_version 里。
             max_tokens=self._scoring_max_tokens(provider["sampling"]["max_tokens"]),
         )
+        if request.repair_hint:
+            # 重问：原文一字不改，修正提示作为同一条用户消息里的第二个文本块（Messages 协议
+            # 要求用户与助手交替，不连发两条用户消息）。
+            body["messages"] = [{"role": "user", "content": [
+                {"type": "text", "text": request.user},
+                {"type": "text", "text": request.repair_hint},
+            ]}]
         self.last_view_summary = compression_summary(request)
         return parse_messages_json(
             self._send(body, call_context=self._context(body, self.scoring_thinking_plan, self.max_tokens))
         )
 
-    def score_core_envelope(self, *, envelope):
+    def score_core_envelope(self, *, envelope, repair=None):
         """Score one immutable PromptEnvelopeV3/V4 semantic rule via its view."""
 
         envelope, provider = validated_core_envelope_provider(self, envelope)
-        request = build_core_request(envelope)
+        request = with_repair(build_core_request(envelope), repair)
         raw = self._post_core_request(envelope, provider, request)
         return decode_core_response(envelope, raw, request)
 
-    def score_core_group(self, *, envelopes, group_code):
+    def score_core_group(self, *, envelopes, group_code, repair=None):
         """Judge every tier of one mutex group in a single request."""
 
         validated = [validated_core_envelope_provider(self, envelope) for envelope in envelopes]
         envelopes = [envelope for envelope, _provider in validated]
-        request = build_core_group_request(envelopes, group_code=group_code)
+        request = with_repair(build_core_group_request(envelopes, group_code=group_code), repair)
         raw = self._post_core_request(envelopes[0], validated[0][1], request)
         return decode_core_group_response(envelopes, raw, request)
 

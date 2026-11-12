@@ -36,6 +36,7 @@ from backend.app.services.scoring.core.contracts import (
     DocumentSnapshot,
     ScoringRequest,
 )
+from backend.app.services.scoring.core.failures import OUTPUT_INVALID_CHECKS
 from backend.app.services.scoring.core.results import ScoringOutcome
 from backend.app.services.scoring.review_reasons import from_core_issues
 from backend.app.services.scoring.review_reasons import to_display_text as review_reason_text
@@ -567,16 +568,6 @@ def _persist_rule_task_checkpoints(
             status = "review_required"
         else:
             status = "succeeded"
-        provider_issue = next(
-            (
-                issue
-                for issue in task_issues
-                if str(issue.get("code") or "").startswith(
-                    ("PROVIDER_", "TOKEN_BUDGET_")
-                )
-            ),
-            None,
-        )
         decision_reused = (
             node["rule_code"] in reused_rule_codes and status != "failed_exhausted"
         )
@@ -587,6 +578,20 @@ def _persist_rule_task_checkpoints(
         else:
             # 没有计量（Mock）时：复用的判定、跳过的规则都没有发请求，其余按发过一次记。
             attempt_count = 0 if decision_reused or status == "skipped" else 1
+        # 模型答了但回答没过执行器校验的那几个码，也记进 provider_error，材料级才看得到根因；
+        # 只限语义规则且确实发过请求（「规则类型不支持」这类没有调用模型的不算）。
+        answered = rule["judge_type"] == "semantic" and attempt_count >= 1
+        provider_issue = next(
+            (
+                issue
+                for issue in task_issues
+                if str(issue.get("code") or "").startswith(
+                    ("PROVIDER_", "TOKEN_BUDGET_")
+                )
+                or (answered and issue.get("code") in OUTPUT_INVALID_CHECKS)
+            ),
+            None,
+        )
         task = RuleScoringTask(
             organization_id=organization_id,
             scoring_run_id=run.id,
@@ -599,10 +604,10 @@ def _persist_rule_task_checkpoints(
             blocking_final_total=blocking,
             decision_reused=decision_reused,
             group_call_id=(group_call_ids or {}).get(node["rule_code"]),
-            # 规则级的真实尝试：0 = 复用或请求没发出，1 = 发出过一次。规则级还没有
-            # 自动重试（截断恢复属于方案 P2），上限如实记 1；HTTP 层的重试另见调用日志。
+            # 规则级的真实尝试：0 = 复用或请求没发出，1 = 发出过一次，2 = 回答不合格后重问过
+            # 一次（上限随之记 2）。截断恢复属于方案 P2；HTTP 层的重试另见调用日志。
             attempt_count=attempt_count,
-            max_attempts=1,
+            max_attempts=max(1, attempt_count),
             provider_error=(
                 None
                 if provider_issue is None

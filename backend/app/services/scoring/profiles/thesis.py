@@ -452,7 +452,7 @@ class ThesisLLMRuntime:
         # 一篇论文一个守卫：身份声明不思考、模型却在思考时，本篇其余调用不再发出。
         self.thinking_guard = ThinkingConsistencyGuard()
 
-    def score(self, *, envelope):
+    def score(self, *, envelope, repair=None):
         from backend.app.services.llm_observability import observation
 
         value = envelope.to_mapping()
@@ -476,7 +476,26 @@ class ThesisLLMRuntime:
                 ).get("policy_hash"),
             },
         ):
-            return self._score(envelope=envelope, value=value, rule=rule)
+            return self._score(envelope=envelope, value=value, rule=rule, repair=repair)
+
+    @property
+    def output_repair_limit(self) -> int:
+        """本篇最多重问几次（回答不合格后带固定修正提示再问）；0 表示不重问。
+
+        评分器的 Core 入口不接受 ``repair``（Mock、旧评分器）时为 0。执行器只读这个数，
+        不直接读配置。
+        """
+
+        import inspect
+
+        from backend.app.core.config import settings
+
+        explicit = getattr(self.scorer, "score_core_envelope", None)
+        try:
+            supported = callable(explicit) and "repair" in inspect.signature(explicit).parameters
+        except (TypeError, ValueError):
+            supported = False
+        return max(0, int(settings.SCORING_OUTPUT_REPAIR_MAX_PER_PAPER)) if supported else 0
 
     def _metered(self, call, *, envelope):
         """Enforce the paper input cap and the thinking check, then attribute usage."""
@@ -521,7 +540,7 @@ class ThesisLLMRuntime:
             lambda: classify_headings(self.scorer, headings, profile_key), envelope=None
         )
 
-    def score_group(self, *, envelopes, group_code):
+    def score_group(self, *, envelopes, group_code, repair=None):
         """One provider call for every tier of a mutex group.
 
         Returns ``None`` when the scorer cannot judge groups (e.g. the Mock), so
@@ -532,16 +551,18 @@ class ThesisLLMRuntime:
         self.last_call_usage = None
         if not callable(explicit):
             return None
+        extra = {"repair": repair} if repair else {}
         return self._metered(
-            lambda: explicit(envelopes=envelopes, group_code=group_code),
+            lambda: explicit(envelopes=envelopes, group_code=group_code, **extra),
             envelope=envelopes[0] if envelopes else None,
         )
 
-    def _score(self, *, envelope, value, rule):
+    def _score(self, *, envelope, value, rule, repair=None):
         self.last_call_usage = None
         explicit = getattr(self.scorer, "score_core_envelope", None)
         if callable(explicit):
-            return self._metered(lambda: explicit(envelope=envelope), envelope=value)
+            extra = {"repair": repair} if repair else {}
+            return self._metered(lambda: explicit(envelope=envelope, **extra), envelope=value)
         if getattr(self.scorer, "provider", None) != "mock":
             raise LLMScoringError(
                 "selected provider does not implement PromptEnvelopeV3 Core scoring"

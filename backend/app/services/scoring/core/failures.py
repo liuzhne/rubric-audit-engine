@@ -6,6 +6,40 @@ import re
 
 
 _SAFE_EXCEPTION_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,79}$")
+_SAFE_CHECK = re.compile(r"^[a-z][a-z0-9_]{0,59}$")
+_PROJECT_MARKER = "backend/app/"
+
+#: 材料级统一报告的「模型回答不合格」根因码。
+OUTPUT_INVALID_CODE = "PROVIDER_OUTPUT_INVALID"
+#: 执行器校验返回的、同样表示「模型答了但回答不合格」的错误码 -> 校验标识。错误码本身
+#: 不改（已保存的结果、人工复核任务与回放校验都在用）；校验标识决定重问时用哪条固定提示。
+OUTPUT_INVALID_CHECKS = {
+    "RULE_DECISION_INVALID": "fields",
+    "REQUIRED_EVIDENCE_INVALID": "evidence",
+    "BAND_SELECTION_INVALID": "level",
+    "FINDING_CODE_NOT_AUTHORIZED": "finding_code",
+    "UNKNOWN_RULE": "rule_code",
+}
+
+
+def failure_site(exc: BaseException) -> str:
+    """异常出在本项目的哪一行：``模块路径:行号``，取调用栈里最靠内的本项目代码帧。
+
+    只有位置，没有异常消息和变量值，所以不会带出材料内容；找不到时返回 ``-``。
+    """
+
+    site = "-"
+    traceback = getattr(exc, "__traceback__", None)
+    while traceback is not None:
+        filename = traceback.tb_frame.f_code.co_filename.replace("\\", "/")
+        index = filename.rfind(_PROJECT_MARKER)
+        if index >= 0:
+            module = filename[index + len(_PROJECT_MARKER):]
+            if module.endswith(".py"):
+                module = module[:-3]
+            site = "%s:%d" % (module, traceback.tb_lineno)
+        traceback = traceback.tb_next
+    return site
 
 
 def project_rule_execution_failure(exc: Exception) -> tuple[str, str]:
@@ -42,6 +76,16 @@ def project_rule_execution_failure(exc: Exception) -> tuple[str, str]:
             "PROVIDER_OUTPUT_TRUNCATED",
             "semantic provider output hit the max output token limit",
         )
+    # 模型答了但没通过回答校验（或不是可用的 JSON）：是模型输出问题，不是系统错误。
+    reason = getattr(exc, "reason", None)
+    if reason in ("output_invalid", "invalid_json", "empty_content"):
+        check = getattr(exc, "check", None) if reason == "output_invalid" else "json"
+        if not isinstance(check, str) or not _SAFE_CHECK.fullmatch(check):
+            check = "fields"
+        return (
+            OUTPUT_INVALID_CODE,
+            "semantic provider output failed validation (check=%s)" % check,
+        )
     # Claude 的安全策略拒答（HTTP 200，stop_reason=refusal）：不是输入问题，也不是截断。
     if getattr(exc, "reason", None) == "refused":
         return (
@@ -53,8 +97,13 @@ def project_rule_execution_failure(exc: Exception) -> tuple[str, str]:
         exception_type = "Exception"
     return (
         "RULE_EXECUTION_FAILED",
-        f"rule execution failed (exception_type={exception_type})",
+        f"rule execution failed (exception_type={exception_type}, where={failure_site(exc)})",
     )
 
 
-__all__ = ["project_rule_execution_failure"]
+__all__ = [
+    "OUTPUT_INVALID_CHECKS",
+    "OUTPUT_INVALID_CODE",
+    "failure_site",
+    "project_rule_execution_failure",
+]
