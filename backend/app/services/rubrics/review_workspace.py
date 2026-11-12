@@ -12,6 +12,8 @@ from backend.app.db import models
 from backend.app.services.rubrics.draft_graph import read_execution_draft
 from backend.app.services.rubrics import lifecycle
 from backend.app.services.rubrics.rule_origin import rule_origin
+from backend.app.services.rubric_scope import describe_scope
+from backend.app.services.rubric_scope import read_scope
 from backend.app.services.rubrics.executable_validator import validate_publishable_rubric
 
 
@@ -36,7 +38,6 @@ def rule_content(rule):
         "checker_key": rule.checker_key,
         "checker_params": rule.checker_params,
         "evidence_policy": rule.evidence_policy,
-        "applies_to": rule.applies_to,
         "strictness": rule.strictness,
         "judge_type": rule.judge_type,
         "positive_example": rule.positive_example,
@@ -54,22 +55,6 @@ def rule_content(rule):
                      "locator": source.cell_locator, "text": source.raw_text}
                     for source in sorted(rule.source_rules, key=lambda item: item.id)],
     }
-
-
-def judge_scope_display(rule):
-    """规则审查页显示的判定范围（docs/论文评分第二阶段改造方案.md 13.3），由评分同一套推断给出。"""
-
-    from backend.app.services.scoring.retrieval.judge_scope import explain_judge_scope
-    from backend.app.services.scoring.retrieval.judge_scope import review_hint
-
-    value = {
-        "judge_type": rule.judge_type,
-        "applies_to": rule.applies_to,
-        "name": rule.name,
-        "rule_text": rule.rule_text,
-        "evidence_policy": rule.evidence_policy or {},
-    }
-    return {"judge_scope": explain_judge_scope(value), "judge_scope_hint": review_hint(value)}
 
 
 def content_token(rule):
@@ -94,8 +79,10 @@ def read_review_workspace(session, rubric_id):
         "rules": [{**rule_content(rule), "content_token": content_token(rule),
                    "status": rule.status, "reviewed_by": rule.reviewed_by,
                    "reviewed_at": rule.reviewed_at,
-                   # 派生展示，不进 content_token：推断出的判定范围与缺失类提示。
-                   **judge_scope_display(rule)} for rule in rules],
+                   # 适用范围（0044）：模型给出、只读，不进 content_token 与审查签名——它不是老师
+                   # 编辑的内容，识别补上范围不应让打开着的表单失效、让已确认的规则在重新编译时回到草稿。
+                   "scope": read_scope(rule.scope),
+                   "scope_label": describe_scope(rule.scope)} for rule in rules],
         "template_links": [{"id": link.id, "rule_code": rule.rule_code,
                             "review_status": link.review_status,
                             "text": link.template_item.raw_text,

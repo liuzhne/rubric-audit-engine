@@ -7,10 +7,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.api import guards
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
 from backend.app.api.deps import require_organization_role
-from backend.app.db.models import GradingBatch
 from backend.app.db.models import Paper
 from backend.app.db.models import ScoringRun
 from backend.app.db.models import SpreadsheetWriteLog
@@ -31,12 +31,7 @@ def _legacy_thesis_run(
     run_id: str,
     principal: CurrentPrincipal,
 ) -> ScoringRun:
-    run = db.get(ScoringRun, run_id)
-    if run is None or (
-        principal.organization_id is not None
-        and run.organization_id != principal.organization_id
-    ):
-        raise HTTPException(status_code=404, detail="scoring run not found")
+    run = guards.visible_run(db, run_id, principal)
     if run.submission_id is not None:
         raise HTTPException(
             status_code=400,
@@ -60,8 +55,7 @@ def list_export_logs(
         .join(ScoringRun)
         .order_by(SpreadsheetWriteLog.created_at.desc())
     )
-    if principal.organization_id is not None:
-        query = query.where(ScoringRun.organization_id == principal.organization_id)
+    query = query.where(*guards.run_scope(principal))
     if run_id:
         query = query.where(SpreadsheetWriteLog.scoring_run_id == run_id)
     if batch_id:
@@ -75,12 +69,7 @@ def export_batch(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    batch = db.get(GradingBatch, batch_id)
-    if batch is None or (
-        principal.organization_id is not None
-        and batch.organization_id != principal.organization_id
-    ):
-        raise HTTPException(status_code=404, detail="batch not found")
+    guards.visible_batch(db, batch_id, principal)
     # 导出是成绩数据离开系统的地方。组织归属只回答「是不是本组织的数据」，
     # 不回答「这个人该不该把它导出去」。
     require_organization_role(principal, "org_admin", "teacher")

@@ -6,6 +6,7 @@ import {
   confirmedStructuredRules,
   mergeConfirmedDrafts,
   rowKey,
+  scopeLabel,
 } from "./ai-draft.js";
 
 /**
@@ -182,5 +183,27 @@ describe("合并进评分项", () => {
     mergeConfirmedDrafts(CRITERIA, [{ criterion_code: "T02", draft: DRAFT }], new Set());
 
     expect(JSON.stringify(CRITERIA)).toBe(before);
+  });
+});
+
+describe("适用范围（docs/评分细则适用范围方案.md）", () => {
+  it("组上的范围复制到每一行，并原样交给编译", () => {
+    const scoped = {
+      ...DRAFT,
+      generation_metadata: { fingerprint: "f".repeat(64) },
+      rule_groups: DRAFT.rule_groups.map((group) => ({ ...group, scope: { type: "cross_section", sections: ["绪论", "结论"] } })),
+    };
+    const rows = draftRows(scoped);
+    expect(rows.every((row) => row.scopeLabel === "跨章节：绪论、结论")).toBe(true);
+    const rules = confirmedStructuredRules(scoped, new Set());
+    expect(rules.every((rule) => rule.scope?.type === "cross_section")).toBe(true);
+  });
+
+  it("没有范围或类型未知一律显示全文", () => {
+    expect(scopeLabel(null)).toBe("全文");
+    expect(scopeLabel({ type: "document", sections: [] })).toBe("全文");
+    expect(scopeLabel({ type: "bogus", sections: ["绪论"] })).toBe("全文");
+    expect(scopeLabel({ type: "section", sections: ["绪论"] })).toBe("章节内：绪论");
+    expect(draftRows(DRAFT)[0].scope).toBeNull();
   });
 });

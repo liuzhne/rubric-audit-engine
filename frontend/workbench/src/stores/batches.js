@@ -19,6 +19,8 @@ import { STAGE_ORDER } from "@/stores/stages.js";
  * 的结果选择集合给出，前端**不自行按阶段猜百分比**——同一批次在工作台与
  * 评分任务页必须显示同一组数字（计划 §5-B）。
  */
+const JOINED_LABELS = ["rubric_name", "rubric_version_label", "owner_name"];
+
 export const useBatchesStore = defineStore("batches", () => {
   /** @type {import('vue').Ref<Batch[]>} */
   const batches = ref([]);
@@ -142,8 +144,14 @@ export const useBatchesStore = defineStore("batches", () => {
    * @param {Partial<Batch>} updated
    */
   function applyStageResult(batchId, updated) {
+    // 阶段动作的响应是批次本身，不带列表接口连表取来的标签（评分标准名与版本、创建人）。
+    // 直接覆盖会把这几列抹成“—”，要等下次刷新列表才回来。
+    const kept = /** @type {Record<string, unknown>} */ ({ ...updated });
+    for (const key of JOINED_LABELS) {
+      if (kept[key] == null) delete kept[key];
+    }
     batches.value = batches.value.map((item) =>
-      item.id === batchId ? { ...item, ...updated } : item,
+      item.id === batchId ? { ...item, ...kept } : item,
     );
     return updated;
   }

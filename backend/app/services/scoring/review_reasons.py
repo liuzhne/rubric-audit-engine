@@ -33,6 +33,8 @@ _PRIORITY = {
     "prompt_injection_suspected": 0,
     "evidence_verification_failed": 1,
     "evidence_insufficient": 2,
+    "scope_section_missing": 2,
+    "scope_citation_incomplete": 2,
     "rule_requires_review": 3,
     "confidence_unavailable": 3,
     "low_confidence": 4,
@@ -144,6 +146,15 @@ _CORE_ISSUE_MESSAGES = {
         "规则「%s」：给出的证据没有覆盖它要检查的内容，需人工核对原文。",
     ),
     "REVIEW_REQUIRED": ("rule_requires_review", "规则「%s」要求人工复核。"),
+    # 适用范围（docs/评分细则适用范围方案.md 第 8.3、8.5 节）
+    "RULE_SCOPE_SECTION_MISSING": (
+        "scope_section_missing",
+        "规则「%s」：要看的章节在论文里没有找到，系统没有让模型判断，需人工核对。",
+    ),
+    "RULE_SCOPE_CITATION_INCOMPLETE": (
+        "scope_citation_incomplete",
+        "规则「%s」：需要对照两章，模型判定有问题却没引用到两章的原文，结果未采用，需人工核对。",
+    ),
 }
 
 

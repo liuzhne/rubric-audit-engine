@@ -209,11 +209,13 @@ def _provider_contract(scorer):
     # 冻结的是 score_envelope 真正要发的参数，所以必须取本实例的值：BYOK/平台
     # 连接在工厂里各自传入 max_tokens、temperature、thinking_type 等，全局设置
     # 只是没传时的默认值（构造函数已经回落过）。读全局会让连接配置静默失效。
+    plan = getattr(scorer, "scoring_thinking_plan", None)
     if is_openai:
         temperature = getattr(scorer, "temperature", settings.OPENAI_TEMPERATURE)
         max_tokens = getattr(scorer, "max_output_tokens", settings.OPENAI_MAX_OUTPUT_TOKENS)
-        thinking_type = None
-        thinking_enabled = False
+        # 评分计划不是旧行为时（THINKING_CAPABILITY_SCOPE=all）按能力表记；旧行为是不发思考参数。
+        thinking_type = plan.identity_type if plan is not None else None
+        thinking_enabled = bool(plan.thinking_on) if plan is not None else False
         response_format = "json_schema"
     else:
         temperature = getattr(scorer, "temperature", settings.OPENAI_COMPATIBLE_TEMPERATURE)

@@ -866,6 +866,9 @@ class AtomicRule(Base):
         Boolean, nullable=False, default=False, server_default=false()
     )
     ai_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 0044：适用范围 {type, sections, source, vocabulary}，起草时模型返回或范围识别任务补上；
+    # 空即全文（docs/评分细则适用范围方案.md 第 4 节）。旧的 applies_to 不再被读取。
+    scope: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     reviewed_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
     reviewed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
@@ -1712,7 +1715,7 @@ class EvaluationBatch(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     organization_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("organizations.id"),
@@ -1925,7 +1928,8 @@ class GradingBatch(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    owner_id: Mapped[str] = mapped_column(String(36), nullable=True)  # P4.3 预留（单租户暂不强隔离）
+    # 评分任务按个人隔离的依据：教师只看得到 owner_id 是自己的任务（docs/评分任务个人隔离方案.md）。
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=True, index=True)
     organization_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("organizations.id"), nullable=True, index=True, deferred=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     department: Mapped[str] = mapped_column(String(100), nullable=True)
@@ -2222,7 +2226,7 @@ class BatchScoringItem(Base):
     )
 
 
-AI_TASK_KINDS = ("rule_draft", "unit_classification", "rule_review", "structure_suggestion")
+AI_TASK_KINDS = ("rule_draft", "unit_classification", "rule_review", "structure_suggestion", "rule_scope")
 AI_TASK_LIVE_STATUSES = ("queued", "running", "succeeded")
 
 

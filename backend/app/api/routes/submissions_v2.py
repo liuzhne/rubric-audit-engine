@@ -10,6 +10,7 @@ from fastapi import UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from backend.app.api import guards
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
 from backend.app.api.deps import current_user_id
@@ -89,13 +90,7 @@ def _visible_evaluation_batch(
     batch_id: str,
     principal: CurrentPrincipal,
 ) -> models.EvaluationBatch:
-    batch = db.get(models.EvaluationBatch, batch_id)
-    if batch is None or (
-        principal.organization_id is not None
-        and batch.organization_id != principal.organization_id
-    ):
-        raise HTTPException(status_code=404, detail="evaluation batch not found")
-    return batch
+    return guards.visible_evaluation_batch(db, batch_id, principal)
 
 
 def _visible_submission(
@@ -107,10 +102,7 @@ def _visible_submission(
         submission = get_submission(db, submission_id)
     except (LookupError, ValueError) as exc:
         _raise_http(exc)
-    if (
-        principal.organization_id is not None
-        and submission.organization_id != principal.organization_id
-    ):
+    if guards.submission_hidden(db, submission, principal):
         raise HTTPException(status_code=404, detail="submission not found")
     return submission
 
@@ -124,10 +116,7 @@ def _visible_scoring_run(
         run = get_scoring_run(db, run_id)
     except (LookupError, ValueError) as exc:
         _raise_http(exc)
-    if (
-        principal.organization_id is not None
-        and run.organization_id != principal.organization_id
-    ):
+    if guards.run_hidden(db, run, principal):
         raise HTTPException(status_code=404, detail="v2 scoring run not found")
     return run
 
@@ -327,6 +316,7 @@ def read_manual_review_tasks(
         for task in list_manual_tasks(
             db,
             organization_id=principal.organization_id,
+            owner_id=guards.personal_owner_id(principal),
             status=status,
             batch_id=batch_id,
             scoring_run_id=scoring_run_id,
@@ -351,6 +341,7 @@ def read_manual_review_task(
             db,
             task_id=task_id,
             organization_id=principal.organization_id,
+            owner_id=guards.personal_owner_id(principal),
         )
     except (LookupError, ValueError) as exc:
         _raise_http(exc)
@@ -374,6 +365,7 @@ def post_claim_manual_review_task(
             db,
             task_id=task_id,
             organization_id=principal.organization_id,
+            owner_id=guards.personal_owner_id(principal),
             reviewer_id=user_id,
             version=payload.version,
         )
@@ -399,6 +391,7 @@ def post_release_manual_review_task(
             db,
             task_id=task_id,
             organization_id=principal.organization_id,
+            owner_id=guards.personal_owner_id(principal),
             reviewer_id=user_id,
             version=payload.version,
         )
@@ -424,6 +417,7 @@ def post_resolve_manual_review_task(
             db,
             task_id=task_id,
             organization_id=principal.organization_id,
+            owner_id=guards.personal_owner_id(principal),
             reviewer_id=user_id,
             version=payload.version,
             final_score=payload.final_score,

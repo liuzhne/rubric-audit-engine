@@ -70,7 +70,7 @@ flowchart LR
 | `services/calibration/`、`eval/`、`services/release_gates.py` | 锚点、QWK/MAE/漂移、候选和人工批准记录 | 把 Mock/test-only 演练声明为生产门禁通过 |
 | `services/report/`、`services/spreadsheet/` | v1/v2 HTML、JSON、Excel、在线写表适配 | 修改历史评分结果 |
 | `services/deployment/`、`backend/app/scripts/ops_backup.py` | inventory、OPS readiness、Postgres 验证、带 manifest 的备份/校验/恢复 | 以 OPS 绿色替代评分质量发布批准 |
-| `services/ai_connections.py`、`services/llm/`、`services/cache/` | 私有 BYOK 加密/快照、三种协议适配（Chat Completions / Responses / Claude Messages，共用 `llm/transport`）、重试、诊断、L0 缓存、按连接的进程内并发与熔断 | 把部署级旧 Key 复制成用户私有连接；在 Core 外改变已冻结策略；把进程内额度误当成跨实例全局额度 |
+| `services/ai_connections.py`、`services/llm/`、`services/cache/` | 私有 BYOK 加密/快照、三种协议适配（Chat Completions / Responses / Claude Messages，共用 `llm/transport`）、按模型能力表决定思考（`llm/thinking_capabilities`，主机族在 `llm/hosts`）、重试、诊断、L0 缓存、按连接的进程内并发与熔断 | 把部署级旧 Key 复制成用户私有连接；在 Core 外改变已冻结策略；把进程内额度误当成跨实例全局额度 |
 | `services/llm_observability.py` | 以 Langfuse v4/OpenTelemetry 建立 `scoring_run -> rule_scoring_task -> llm_generation -> retry_attempt` Trace，从应用源头脱敏和采样 | 保存权威分数/任务状态；默认上传完整 Prompt/论文；让 Exporter 失败传播到评分主链 |
 
 ## 4. 核心调用链
@@ -592,6 +592,19 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | 新增 `scoring/retrieval/section_roles.py`（标题对到章节角色）与 `scope_policy.py`（Profile 注入 Core 的三个判断）；`judge_scope.py` 改为只读 `@5` 的 `scope`；规则快照 `@4` 删除、`@5` 新增；执行器加缺章短路与多章引用检查。开关默认关，见 §2026-11-11 小节 |
+| 2026-11-11 | 评分细则适用范围（#99 第三轮复审） | 识别完成只重读审查工作区、不重建编辑表单；规则编辑器的范围显示改取工作区（`ruleScopes`），不放进编辑表单 |
+| 2026-11-11 | 评分细则适用范围（#99 第二轮复审） | 范围移出 `rule_content`（不进 `content_token` 与审查签名），审查工作区单独给出；重新编译时 `review_carry.carry_rule_scopes` 把内容未变的规则的范围带过去；前端没有进行中的识别任务时一律重新识别 |
+| 2026-11-11 | 评分细则适用范围（#99 复审） | 范围识别写回时锁评分标准行并核对当前执行草稿；全部不合格的输出按不合格处理；已有 `judge_scope` 修改时保留；前端卸载时停止跟踪、有未保存修改时不能识别、成功后再点按重新识别。调用链不变 |
+| 2026-11-11 | 评分细则适用范围（分期 A：评分标准侧） | 新增 `services/rubric_scope/`（`vocabulary` 章节角色词表与校验、`identification` 范围识别）与 AI 任务种类 `rule_scope`；起草组带 `scope` 经前端复制到行、编译写进 `atomic_rules.scope`（0044）；审查工作区只读显示范围，不再给判定范围推断。评分调用链不变，见 §2026-11-11 小节 |
+| 2026-11-11 | AI 起草互斥组规整（#94 第二轮复审） | 撞名时的候选名改由 `deduction_caps.suffixed_mutex_groups` 生成（`原名-指纹`，放不下或被占用时 `原名-原名哈希-指纹`），都不超过列宽 100，编译与追加同步共用，候选名都被占用时编译报错、不并组；核对脚本的单档组含分档细则时算阻断。调用链不变 |
+| 2026-11-11 | 邀请与重置：直接给链接 | 只改前端 `views/AccountView.vue`：创建邀请、签发重置后显示并复制完整链接（`secretLink`）；接口、模块边界与调用链不变 |
+| 2026-11-11 | 按模型能力表决定思考（复审修正） | `transport.post_with_retry` 新增 `output_limit_fallback`：表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次（只在辅助调用）；`errors.output_limit_rejected` 识别；L0 键加实际思考字段；Vertex 区域主机改整串匹配。调用链方向不变 |
+| 2026-11-11 | 按模型能力表决定思考 | 新增 `llm/hosts.py`（主机族，`auth_headers` 改用它）与 `llm/thinking_capabilities.py`（能力表与解析）；三个适配器构造时算出辅助计划与评分计划，请求合并计划的写法，思考开着时放开请求上限；`thinking_params` 只剩旧行为且名单改查表；运行身份读评分计划，强度与放开的上限写进 `model_version`；旧路径 L0 缓存键加思考身份与正式输出预算；起草器去掉 `isinstance`，改问适配器要实发上限。无迁移，见 §2026-11-11 小节 |
+| 2026-11-10 | 评分任务个人隔离：#95 复审修正 | 前端 `stores/batches.js` 的 `applyStageResult` 不再用阶段动作响应里的空值覆盖列表连表取来的标签（评分标准名与版本、创建人）；模块边界与调用链不变 |
+| 2026-11-10 | 评分任务个人隔离 | 新增 `services/ownership.py`（归属条件）；`api/guards.py` 的四个守卫与三个列表条件改为“组织 + 教师本人”；`exports.py`、`submissions_v2.py` 改调共享守卫；人工复核任务服务加 `owner_id` 参数；迁移 `0043_batch_owner_isolation`；`BatchRead.owner_name` |
+| 2026-11-10 | AI 起草互斥组规整（#94 复审） | 编译与追加同步共用 `deduction_caps.ai_mutex_identity` 识别 AI 行；追加同步按行的位置编号取编译结果；核对脚本加 `invalid_mutex_groups` |
+| 2026-11-09 | AI 起草互斥组规整（分期 A） | 新增 `deduction_caps.effective_mutex_groups`（编译写细则时规整互斥组，投影不变）、`atomic_recompile._sync_ai_mutex_groups` 与 `scripts/inspect_ai_draft_rules.py`；发布校验与执行器不变，见 2026-11-09 一节 |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 只改工作流与仓库安全设置；应用模块、调用链与数据流不变 |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 只改仓库规则集与发布规则；流水线、模块与调用链不变 |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | §6 改为“部署成功后线上是 main 的最新提交，实际版本以 `/opt/pgs/RELEASE` 为准”；分片收集规则与 pytest 默认一致；调用链不变 |
@@ -1897,3 +1910,152 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
 - 流式回放没有进度事件，只有 `accepted` 与 `done`。
 
 维护记录：2026-11-06 · 评分助手：发送去重：记录请求编号的生成、回放与唯一索引兜底的调用链；迁移 head 升为 `0042_assistant_message_client_id`。
+
+### 2026-11-09 AI 起草互斥组在编译时规整（分期 A）
+
+方案见 [docs/AI起草互斥组规整与区间拆档方案.md](docs/AI起草互斥组规整与区间拆档方案.md) §4.1。规整只发生在“结构化扣分 → AtomicRule”这一步，评分项投影（`deduction_rules_structured`）仍是起草时的原名：
+
+```
+起草合并 ai_rule_drafter.merge_draft_batches：每组写 {评分项}-B{批}-G{组}-SEVERITY（不变）
+采用 ai-draft.mergeConfirmedDrafts：追加到 deduction_rules_structured（不变）
+编译 pipeline（扣分制评分项的结构化扣分）
+  _compiled_deduction_points：这一行会不会生成细则（编译循环与规整共用这一个判断）
+  deduction_caps.effective_mutex_groups：每行写进细则的互斥组
+      同一次起草的同一组只剩 1 行会编译 → 空
+      同名已被投影里更早的组或人工行占用 → 原名-指纹前 8 位（suffixed_mutex_groups；放不下或已被占用 → 截短原名-原名哈希前 8 位-指纹前 8 位，总长不超过列宽 100；都已被占用 → ValueError，建评分标准返回 400、重新编译返回 422，不落库）
+追加（导入的评分标准）atomic_recompile.prepare_atomic_ai_append
+  _sync_ai_mutex_groups：已有 AI 细则改取这一行本次编译出的值，只改机器能产生的值（原名、空、原名加后缀）
+      行上写的 rule_code 只用来找已有细则，编译结果按行的位置编号找
+发布 executable_validator：不变，人工写错的单条互斥组照旧报 mutex_definition_invalid
+```
+
+- 识别 AI 行用 `deduction_caps.ai_mutex_identity`（来源 `ai_*`、互斥组、生成指纹、草稿行键），编译与追加同步共用；它是 `normalize_ai_group_caps` 口径里的归属部分，后者另外核验组上限的条件。`normalize_ai_group_caps` 读的是投影，不用改。
+- 只读核对脚本 `scripts/inspect_ai_draft_rules.py`：单档互斥组、跨评分项或含分档的互斥组、撞名互斥组、引用区间原文却只有一档的 AI 组；只输出编号和数字。
+- `compiler.point_range`（区间后必须紧跟“分”）先只供核对脚本使用；`analyze_rule_input` 仍用旧的 `_POINT_RANGE_RE`，分期 B 再切换。
+- 前端 `RubricsView.structuralMessages` 加上 `mutex_definition_invalid` 的中文说明。
+
+维护记录：2026-11-09 · AI 起草互斥组规整（分期 A）：新增规整函数、追加同步与核对脚本；无迁移，head 仍为 `0042_assistant_message_client_id`。
+
+### 2026-11-10 评分任务个人隔离
+
+方案见 [docs/评分任务个人隔离方案.md](docs/评分任务个人隔离方案.md)。评分任务及其下的文件、评分结果、作业、人工复核任务与导出，从“同组织可见”收窄为“教师只看自己建的，组织管理员与平台管理员看本组织全部”。
+
+```
+请求 ─▶ api/guards.py
+          personal_owner_id(principal)   未开鉴权 / 平台管理员 / 组织管理员 → None（不收窄）；其余 → 用户 id
+          visible_batch / visible_paper / visible_run / visible_job / visible_evaluation_batch   单个对象，看不到一律 404
+          batch_scope / paper_scope / run_scope                                              列表的查询条件，与上面同一口径
+        ─▶ services/ownership.py   “归属于谁”的条件：文件、评分结果一律按所属任务的 owner_id 判断
+```
+
+- **归属只看任务**：`papers.owner_id`、`scoring_runs.owner_id` 仍在写，但可见性不读它们；v1 的结果经 文件 → `grading_batches.owner_id`，v2 的结果经 提交 → `evaluation_batches.owner_id`。两头都挂不上的旧结果行才退回它自己的 `owner_id`。
+- **入口**：`routes/batches.py`（列表、概览）、`papers.py`、`scoring.py`、`exports.py`、`batch_jobs.py`、`submissions_v2.py`，以及评分助手的 `list_recent_batches`。助手的其余读写本来就走同一组守卫，没有单独的判断。
+- **服务层**：`batch_scoring.jobs.list_attention_batch_scoring_jobs` 与 `submissions.review_tasks` 的五个函数多一个 `owner_id` 参数，由路由传 `guards.personal_owner_id(principal)`；不传即不收窄（worker、脚本照旧）。
+- **持久化**：迁移 0043 把空的 `owner_id` 回填为 `created_by`，并给 `grading_batches` / `evaluation_batches` 的 `owner_id` 建索引。数据库 RLS 仍只按组织，个人这一层只在应用里。
+- **没有变的**：评分标准的可见性（私有 / 组织）、校准锚点、L0 缓存与规则级决策账本（组织内共用的缓存，没有接口能读出别人的内容）、worker 领取任务（不分用户）。
+- **前端**：任务列表对管理员多一列“创建人”（`BatchRead.owner_name`）；教师不显示。
+
+维护记录：2026-11-10 · 评分任务个人隔离：记录归属判断的位置、各入口与没有变的边界；迁移 head 升为 `0043_batch_owner_isolation`。
+
+#95 复审补充：归档、重新打开等阶段动作的响应是批次本身，不带列表接口连表取来的 `rubric_name` / `rubric_version_label` / `owner_name`。前端 `applyStageResult` 合并时跳过这三项的空值，列表里的评分标准与创建人不会被抹成“—”。
+
+维护记录：2026-11-10 · 评分任务个人隔离：#95 复审修正：记录阶段动作结果的合并方式。
+
+### 2026-11-11 按模型能力表决定思考
+
+方案见 `docs/模型思考能力表方案.md`。同一协议下各厂商关思考、调强度的写法不同，原来散落在 `thinking_params` 的 Google 名单、Chat 适配器里 OpenRouter 的特判、Claude 的“只发显式配置”和 Responses 的“什么都不发”里；现在集中到一张能力表。
+
+模块：
+- `llm/hosts.py`：`host_family(base_url)` 把主机归成 `vertex`、`gemini_api`、`zhipu`、`openrouter`、`dashscope`、`deepseek`、`moonshot`、`openai`、`anthropic`、`bedrock`、`other`。`auth_headers.is_vertex_host` 与 `thinking_params.is_google_openai_host` 都改为调用它。
+- `llm/thinking_capabilities.py`：能力表 `CAPABILITIES`（每条：协议、主机族、模型名前缀、能否关闭、关闭写法、最低强度与写法、最大输出、来源、核实日期）；`lookup` 按规整后的模型名取最长前缀，前缀必须落在版本号边界上；`resolve_chat` / `resolve_messages` / `resolve_responses` 按“显式配置 → 表 → 未知模型”得到不可变的 `ThinkingPlan`；`legacy_*_plan` 复现改动前的行为；`plans()` 按 `THINKING_CAPABILITY_SCOPE` 返回 `(辅助计划, 评分计划)`。
+- `llm/thinking_params.py`：只剩旧行为（评分路径在 scope 不是 `all` 时用），`google_can_disable_thinking` 改查表。
+
+调用链：
+
+```
+get_llm_scorer → 适配器构造
+  └─ thinking.plans(协议, base_url, 模型, 显式配置) → thinking_plan（辅助）、scoring_thinking_plan（评分）
+       ├─ thinking_type / provider_controls().thinking ← 评分计划的身份（开关）
+       └─ model_version ← 协议版本 + ;effort=… + ;max_tokens=…（思考开着、连接没写上限时）
+complete_json / complete_with_tools（AI 任务、评分助手）
+  └─ 合并 thinking_plan.fields()；实发上限 request_output_tokens(正式输出预算)；超时 request_timeout_seconds
+score_core_* / score_envelope / score_criterion（评分路径）
+  └─ 合并 scoring_thinking_plan.fields()（v1 信封与计划不一致时按信封冻结的设置旧换算）；实发上限 _scoring_max_tokens
+post_with_retry(call_context=…, output_limit_fallback=…)
+  ├─ llm_call 日志记思考开关、强度、来源、命中记录、正式输出预算与实发上限、正式输出用量；
+  │  表说能关却观测到思考 → thinking_capability_mismatch
+  └─ 猜的上限被 400 拒绝（errors.output_limit_rejected）→ 按放开前的上限立即重发一次，
+     记 thinking_output_limit_fallback（只在 AI 任务与评分助手传入）
+```
+
+数据流与持久化：
+- 运行身份不改封闭结构：`thinking.type` 只记开关，`sampling.max_tokens` 记正式输出预算（Core 证据预算按它扣，不受放开的请求上限影响），强度与放开的上限在 `model_version` 里。scope 不是 `all` 时评分路径的身份与请求和改动前逐字节相同。
+- 能力表不进连接快照：改表不会让在跑的任务报“连接配置已变更”。
+- 旧兼容路径的 L0 缓存键加 `thinking`（评分计划的身份与实际发出的思考字段）与 `max_tokens`（正式输出预算），`llm_cache.PROMPT_VERSION=2026-11-11-1`。
+- 正式输出用量只进日志（`usage.observed_usage` 的 `answer_tokens` / `answer_source`），不加列、无迁移。
+- 语义一致性检查走 `complete_json(scoring=True)`，用评分计划。
+- `ai_rule_drafter` 不再按类型判断适配器：有 `request_output_tokens` 的就是真实适配器，6144 作为正式输出预算交给它；截断与超时提示按辅助计划区分“关不掉思考”。
+- “测试连接”里 Claude 的探测请求用同一份辅助计划，测试与 AI 任务发同样的思考参数。
+
+维护记录：2026-11-11 · 按模型能力表决定思考：新增两个模块与调用链；接口、数据库不变，head `0042_assistant_message_client_id` 不变。2026-11-11 · 复审修正：传输层加猜测上限被拒的退回，L0 键加实际思考字段。
+
+### 2026-11-11 邀请与重置：直接给链接
+
+“账户与连接”页创建邀请或签发密码重置后，显示的是可以直接打开的链接（`/register?token=…`、`/reset-password?token=…`），由前端 `AccountView.vue` 的 `secretLink` 用当前页面的来源加转义后的令牌拼出。后端接口不变，仍只返回令牌、不代发邮件。
+
+维护记录：2026-11-11 · 邀请与重置：直接给链接：记录链接在前端拼出、接口不变。
+
+### 2026-11-11 评分细则适用范围（分期 A：评分标准侧）
+
+方案见 [docs/评分细则适用范围方案.md](docs/评分细则适用范围方案.md)。每条细则评分时看论文的哪一部分，由模型在起草细则时返回，或由范围识别任务补上，不由人指定；本分期只到“存进细则、页面只读显示”，评分怎么用见分期 B。
+
+```
+词表 rubric_scope.vocabulary（section-roles@1，按 Profile：thesis / general_document / technical_proposal）
+起草 ai_rule_drafter（rubric-rule-draft@10）
+  payload.scope_vocabulary → 模型每组返回 scope {type, sections}（严格 Schema 枚举；精简 Schema 只枚举类型）
+  validate_ai_rule_draft：按词表校验并写回规整值；@10 起漏写按全文补上
+采用 ai-draft.js：组上的 scope 复制到每一行结构化扣分
+编译 pipeline._ai_row_scope：只认可归属的 AI 行（ai_* 来源 + 指纹 + 行键）→ stored_scope(source=ai_draft) → atomic_rules.scope
+范围识别 AI 任务 rule_scope（rubric_scope.identification + ai_tasks.rule_scope）
+  对象：草稿状态、参与评分、语义判断、scope 为空的规则；每个评分项一个条目（最多 20 条规则）
+  on_task_success → apply_identified_scopes：锁评分标准行（与发布共用）、核对仍是建任务时的执行草稿，
+      只写仍为空的规则，source=ai_identified，追加审计事件 scope，不改规则状态；全部不合格的输出修正一次后记失败
+复制已有细则：atomic_recompile._fields、lifecycle.clone_published_rubric 都带上 scope
+```
+
+- 持久化：0044 给 `atomic_rules` 加可空 JSON 列 `scope`，`ck_ai_tasks_kind` 加 `rule_scope`；不建表。版本内容哈希只在 `scope` 非空时含它；审查签名不含它。
+- 审查工作区规则带 `scope`（只读）与 `scope_label`，两者都不在 `rule_content` 里，不进 `content_token` 与审查签名；原来的 `judge_scope` / `judge_scope_hint` 推断展示删除。
+- 重新编译（`pipeline` 持久化）：`review_carry.snapshot_rule_scopes` / `carry_rule_scopes` 把内容与评分上下文未变的规则的范围带到新版本；人工与 Excel 行的范围因此不会在下一次保存后丢失。
+- 不再由人指定：`lifecycle` 可编辑字段去掉 `applies_to`，`evidence_policy.judge_scope` 随修改去掉；规则编辑器只读显示范围。Excel“适用范围”列仍写进 `applies_to`，只用来给 Word 批注找对应规则。
+- 前端：第 3 步 `RuleScopePanel` 发起识别；`stores/rubrics.scopeTask` 与其它 AI 任务一样轮询、可停止与重试。完成时只重读审查工作区，不重建编辑表单；`AtomicRuleEditor` 的范围显示取自工作区（`ruleScopes`），不在编辑表单里，所以识别期间或读取途中的修改不会被覆盖。
+- 评分：本分期不读 `scope`，`SCORING_JUDGE_SCOPE_ENABLED` 打开时仍按旧的 `judge_scope.py` 推断（生产没开），分期 B 改写。
+
+维护记录：2026-11-11 · 评分细则适用范围（分期 A）：新增模块、AI 任务种类与编译落库；迁移 head 升为 `0044_atomic_rule_scope`。
+
+### 2026-11-11 评分细则适用范围（分期 B：评分侧）
+
+方案见 [docs/评分细则适用范围方案.md](docs/评分细则适用范围方案.md) 第 8 节。`SCORING_JUDGE_SCOPE_ENABLED`（默认关）打开时，评分按细则的适用范围取证据；关闭时与之前逐字相同（规则快照 `@3`、全部按全文）。
+
+```
+快照 rubric_snapshot：开关开 → atomic-rule-snapshot@5 = @3 + scope {type, sections}（库里为空记为 document）
+                      旧的 @4（applies_to + evidence_policy.judge_scope）删除，evidence_policy 里的 judge_scope 一律不进快照
+执行器 rule_executor.execute_rule_plan（Core，只认 Profile 注入的 rule_scope_policy）
+  一篇一次 policy.section_role_map：有语义规则要看章节时，词表对不上的一级标题交给
+      ThesisLLMRuntime.classify_section_headings 归类一次（只发标题）→ profile_prompt_extensions.section_roles
+  共用证据（SCORING_EVIDENCE_SCOPE=criterion）只限范围相同的规则（_same_scope_rules）
+  每条 / 每个互斥组：建信封 → policy.missing_sections 非空 → 不调用模型，not_triggered + RULE_SCOPE_SECTION_MISSING
+                     模型返回 → policy.citations_cover_targets 为假 → not_triggered + RULE_SCOPE_CITATION_INCOMPLETE
+  两种问题与 RULE_EVIDENCE_INSUFFICIENT 一样让评分项 review_required
+取证据 selection.build_v4_envelope(judge_scope=True)
+  judge_scope.rule_scope：范围只来自 @5 的 scope（judge-scope@2）
+  select_scoped_units：按 section_roles.RoleResolver 的角色取目标章节；整章放得下就全部给（上限 max(top_k, 60)），
+      多章交替取；section_coverage 列出全文每个标题路径（含一段没选的），用来判断整章与缺章
+提示词 core_view：+rule-scope@1；scope {type, sections:[{role, headings, coverage}]}，每条证据带 section_role；
+      开了范围时非分档规则允许 insufficient_evidence
+```
+
+- Core 包不依赖检索与词表（`test_m2_import_boundary`）：三个判断放在 `scoring/retrieval/scope_policy.py`，由 `ThesisProfile`（含通用文档）与 `TechnicalProposalProfile` 的 `rule_scope_policy` 注入；没有它的 Profile 不应用范围。
+- 持久化与身份：章节角色归类写在信封扩展里，进入判定身份；没有新列、没有迁移。两种新复核原因进 `review_reasons`（`scope_section_missing` / `scope_citation_incomplete`）。
+- 不变的：v1 兼容路径按 `applies_to` 取章节文本块的逻辑；开关关闭时的提示词、快照与判定身份。
+
+维护记录：2026-11-11 · 评分细则适用范围（分期 B）：新增两个检索模块、执行器的两处检查与快照 @5；无迁移，head 仍为 `0044_atomic_rule_scope`。

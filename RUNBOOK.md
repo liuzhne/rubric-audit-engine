@@ -1313,6 +1313,19 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | `SCORING_JUDGE_SCOPE_ENABLED` 含义改为按细则适用范围取证据（仍默认关，QWK 后再开）；排错补两种新的复核原因与“开了范围后转人工变多” |
+| 2026-11-11 | 评分细则适用范围（#99 第三轮复审） | 无新命令与排错；页面行为见 ARCHITECTURE 同日条目 |
+| 2026-11-11 | 评分细则适用范围（#99 第二轮复审） | 无新命令；面板说明改为“评分沿用现有取证逻辑” |
+| 2026-11-11 | 评分细则适用范围（#99 复审） | 排错补“范围识别任务失败：执行草稿已经换了” |
+| 2026-11-11 | 评分细则适用范围（分期 A：评分标准侧） | 迁移 `0044_atomic_rule_scope`（先跑迁移工作流再部署，有范围数据时拒绝降级）；契约版本升为 `2026-11-11.rule-scope`；排错补“规则显示尚未识别”“编辑报 applies_to 是禁止字段”“识别后部分规则仍按全文” |
+| 2026-11-11 | AI 起草互斥组规整（#94 第二轮复审） | 核对脚本的 `blocks_publish` 与发布校验对齐：组里有分档细则时不看排除，照样算阻断；排错补“重新编译报 `RUBRIC_RECOMPILE_BLOCKED`、原因是互斥组重名” |
+| 2026-11-11 | 邀请与重置：直接给链接 | 无新命令、无后端变化；`public/` 已重建；邀请新成员的操作改为“复制链接发给对方”；排错：对方打不开邀请链接 |
+| 2026-11-11 | 按模型能力表决定思考（复审修正） | 表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次，新增日志 `thinking_output_limit_fallback` 与对应排错；写明只有严格 Schema 才是正式输出的硬上界 |
+| 2026-11-11 | 按模型能力表决定思考 | 新环境变量 `THINKING_CAPABILITY_SCOPE`（off / auxiliary / all，默认 auxiliary，经仓库变量进生产）；无迁移；`llm_call` 日志新增思考与正式输出字段，新增 `thinking_capability_mismatch`、`thinking_explicit_adjusted`；能力表维护步骤；排错：守卫报思考没关、起草截断、思考模型超时、表外模型上限变大 |
+| 2026-11-10 | 评分任务个人隔离：#95 复审修正 | 无新命令、无迁移变化；`public/` 已重建；排错：归档后“评分标准”“创建人”变成“—” |
+| 2026-11-10 | 评分任务个人隔离 | 迁移 `0043_batch_owner_isolation`（先跑迁移工作流再部署）；发布前查没有归属的任务；排错：教师说任务“不见了”、新接口漏了归属条件；`public/` 已重建 |
+| 2026-11-10 | AI 起草互斥组规整（#94 复审） | 核对脚本加 `invalid_mutex_groups`（跨评分项或含分档的组），与单档组合起来覆盖 `mutex_definition_invalid` 的全部情况 |
+| 2026-11-09 | AI 起草互斥组规整（分期 A） | 新增排错“发布被 `mutex_definition_invalid` 挡住”（报错指向发布校验，真正原因在起草或采用时少了档）与 `inspect_ai_draft_rules` 只读核对命令 |
 | 2026-11-07 | 流水线补强：扫描、SHA 固定、超时 | 3.0 新增“供应链与安全扫描”；新增 `.github/dependabot.yml`；排错补“action 没固定 SHA 的测试失败”与“Dependabot 升级 PR 让任务失败”（不要直接关 PR，改动推到它的分支上） |
 | 2026-11-07 | 分支模型与流水线拆分：main 规则集不开 strict | 3.0 第 5 条改为 `release-gates-passed` 绿即可合并，说明为何不开 strict 与热修后手动重跑门禁；排错补“发布 PR 显示落后于 main、不要点 Update branch” |
 | 2026-11-07 | 分支模型与流水线拆分：#84 复审修正 | 3.0 补：线上版本看 `/opt/pgs/RELEASE`、从预演起冻结 develop 并核对提交、守卫不是安全边界；部署文档标明 Vercel 链路已停用，上线清单改核对 Lightsail 部署与 `RELEASE`；部署文档标题与开头、§2A、上线清单的线上验证项改为 Lightsail 现状（Vercel 项只在恢复 Vercel 时适用），9.4 标题去掉“迁移中”，开头补现状说明（数据在实例上，见 9.4.1），原 Supabase 段标为历史 |
@@ -2891,7 +2904,7 @@ uv run uvicorn backend.app.main:app --port 8000
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `SCORING_TOKEN_BUDGET_TARGET` | `provider_view` | 预算量实际发给模型的视图；`envelope` 回到旧量法 |
-| `SCORING_JUDGE_SCOPE_ENABLED` | `false` | 跨章节规则在各目标章节里取证据；视图显示完整标题路径 |
+| `SCORING_JUDGE_SCOPE_ENABLED` | `false` | 按细则的适用范围取证据（2026-11-11 起含义改变，见“评分细则适用范围（分期 B）”）：只给范围内的段落，找不到章节转人工，并允许“证据不足”；视图显示完整标题路径与章节角色 |
 | `SCORING_INSUFFICIENT_EVIDENCE_MODE` | `off` | `review` 时模型可回“证据不足”，所属评分项转人工 |
 
 B、C 改变评分，打开前要用 QWK 留出集对比（真实模型调用需要维护者授权预算）。改仓库变量后要重新部署才生效。
@@ -3177,3 +3190,181 @@ cd frontend/workbench && npx vitest run src/stores/assistant.test.js
   - 真正原因：同一个编号带了不同的文字，只可能是前端出错或有人构造请求。后端按第一次的结果回放，没有新建消息；查前端为什么复用了编号。
 
 维护记录：2026-11-06 · 评分助手：发送去重：新增迁移发布与回滚步骤、回放日志，排错写明同一句话出现两次与文字不一致的真实原因。
+
+### 2026-11-09 评分标准发布被 `mutex_definition_invalid` 挡住
+
+症状：第 3 步或 `/api/rubrics/{id}/review-workspace` 的 `structural_blockers` 里有 `mutex_definition_invalid`，`field_path` 为 `/atomic_rules/<细则编号>/mutex_group`。2026-11-09 之前页面显示的是英文 “mutex group '…' must have 2+ non-band rules in one criterion”。
+
+- 报错指向：发布校验认为互斥组定义写错了（同组参与评分的细则不足 2 条、跨评分项，或含分档细则）。
+- 真正原因：几乎都是 AI 起草的组只剩 1 档——模型只写了一档、预览里取消了同组其他档，或点了“仅应用此条”。这类组名形如 `T04-B03-G01-SEVERITY`（评分项、批次、组序号）。分期 A 上线后，新编译的草稿不再出现这种情况；存量草稿在下次应用任意 AI 建议时修好，也可以手工处理。
+- 手工处理：在第 2 步的原子规则编辑里清空这条细则的互斥组再保存，它会回到待确认；或者补齐同组的其他档。组名不以 `-SEVERITY` 结尾的是人工写的，按原意修正。
+- 核对（只读，查完回滚，只输出编号和数字，不输出规则正文和原文；本地把前缀换成 `.venv/bin/python -m`）：
+
+  ```bash
+  ssh pgs-prod 'docker exec pgs-app-1 python -m backend.app.scripts.inspect_ai_draft_rules <评分标准 ID>'
+  ```
+
+  ```bash
+  ssh pgs-prod 'docker exec pgs-app-1 python -m backend.app.scripts.inspect_ai_draft_rules --all'
+  ```
+
+  `lone_mutex_groups` 是单档互斥组（`blocks_publish` 与发布校验对单条组的判断一致：只因排除剩 1 条、且这条不是分档细则的不挡）；`invalid_mutex_groups` 是 2 条以上、却跨评分项或含分档细则的组，发布校验同样报这个错（两类合起来覆盖 `mutex_definition_invalid` 的全部情况，这一类多半是人工写的，不归 AI 规整管）；`collided_mutex_groups` 是同名多次起草，不挡发布，但会把不同问题并成一组判分；`single_tier_ranges` 是引用了区间原文却只有一档的 AI 组，由分期 B 处理。`--all` 只列出有问题的评分标准。
+
+另一种报错：采用 AI 建议或重新编译时返回 422 `RUBRIC_RECOMPILE_BLOCKED`（建评分标准时是 400），提示只说“当前修改无法生成新的执行草稿”，`context.reason` 里写着“AI 起草的互斥组……与其他规则重名，可用的替代名也都已被占用”。真正的原因在人工规则：同一评分项里有人工规则的互斥组恰好用了 AI 组的原名和它的全部替代名（`原名-指纹前 8 位`、`原名-原名哈希-指纹`）。系统不把 AI 的档位并进人工组，改人工规则的互斥组名后重试即可。
+
+测试：`.venv/bin/python -m pytest -q backend/app/tests/test_ai_mutex_normalization.py`
+
+维护记录：2026-11-09 · AI 起草互斥组规整：新增 `mutex_definition_invalid` 排错与核对脚本命令。
+
+### 2026-11-10 评分任务个人隔离
+
+方案见 `docs/评分任务个人隔离方案.md`。教师只看得到自己建的评分任务及其下的文件、结果、作业、复核与导出；组织管理员与平台管理员看本组织全部。没有新环境变量，没有开关。
+
+发布：迁移 `0043_batch_owner_isolation`（回填空的 `owner_id`，给 `grading_batches` / `evaluation_batches` 的 `owner_id` 建索引，不新建表）。生产先跑迁移工作流（先 `dry_run`，再 `-f dry_run=false`，`expected_head=0043_batch_owner_isolation`），再部署。顺序不能反：先部署的话，没回填的旧任务会从教师的列表里消失，直到迁移跑完。
+
+发布前后各查一次没有归属的任务（只读；生产库用 `begin read only … rollback`，不要用会话级 `SET`）：
+
+```sql
+select count(*) filter (where owner_id is null) as no_owner,
+       count(*) filter (where owner_id is null and created_by is null) as no_owner_no_creator
+from grading_batches;
+```
+
+迁移后 `no_owner` 应等于 `no_owner_no_creator`。剩下的这些只有管理员看得到；要交给某位教师，由维护者把 `owner_id` 改成该用户的 id。
+
+回滚：降级 0043 只删索引，回填的归属留着。要恢复“全组织可见”只能回退代码版本。
+
+验证：`.venv/bin/python -m pytest -q backend/app/tests/test_personal_isolation.py backend/app/tests/test_organization_isolation.py`。
+
+排错：
+
+- **教师说自己的任务“不见了”，或打开旧链接是 404。**
+  - 报错指向：像是任务被删了，或登录到了别的组织。
+  - 真正原因：任务的 `owner_id` 是空的或是别人的。任务若是同事建的，这是隔离生效后的正常结果；若是自己建的旧任务，查 `select id, name, owner_id, created_by from grading_batches where id = '…'`，`owner_id` 为空说明迁移没跑或这一行连创建人也没有。
+- **管理员的任务列表里“创建人”是“—”。**
+  - 报错指向：像是用户被删了。
+  - 真正原因：任务没有归属（`owner_id` 为空）。这种任务教师都看不到。
+- **新加的列表接口，教师能看到同事的数据。**
+  - 报错指向：没有报错，测试也可能全绿——本地与多数测试关着鉴权，关着鉴权时不收窄。
+  - 真正原因：查询只加了 `organization_id` 条件，没用 `guards.batch_scope` / `paper_scope` / `run_scope`（或没传 `owner_id=guards.personal_owner_id(principal)`）。数据库 RLS 只按组织，兜不住。照 `test_personal_isolation.py` 加一个开鉴权、同组织两位教师的用例。
+
+维护记录：2026-11-10 · 评分任务个人隔离：新增迁移发布顺序、发布前后的核对查询与三条排错。
+
+#95 复审补充排错：
+
+- **归档或重新打开任务后，列表里这一行的“评分标准”或“创建人”变成“—”，刷新后又回来。**
+  - 报错指向：像是评分标准被删了，或任务丢了归属。
+  - 真正原因：阶段动作的响应不带连表标签，前端把空值合并进了列表行。已在 `stores/batches.js` 的 `applyStageResult` 修掉；再出现说明浏览器还在用旧页面，刷新即可。
+
+维护记录：2026-11-10 · 评分任务个人隔离：#95 复审修正：补一条排错。
+
+### 2026-11-11 按模型能力表决定思考
+
+方案见 `docs/模型思考能力表方案.md`。规则：能关闭思考的模型直接关闭，输出上限沿用现有值；关不掉的发最低强度，请求上限放到 `min(模型最大输出, 32768)`，真正的上限是超时。正式输出的长度靠输出结构约束，只有用严格 Schema 时才是硬上界：起草回退到精简 Schema 时没有上界，审查只有提示词约束（方案 5.3）。写法来自 `backend/app/services/llm/thinking_capabilities.py` 的能力表，按「协议 + 主机族 + 模型名前缀」匹配；连接的显式配置优先，表外模型不发参数、按可能在思考处理。
+
+开关 `THINKING_CAPABILITY_SCOPE`（经仓库变量进生产，`scripts/production_env.py` 已放行；没设即默认值）：
+
+| 取值 | AI 任务与评分助手 | 评分路径（Core、旧兼容路径、语义一致性） |
+|---|---|---|
+| `auxiliary`（默认） | 按能力表 | 与改动前逐字节相同 |
+| `off` | 改动前的行为 | 改动前的行为 |
+| `all` | 按能力表 | 按能力表：会改分、改运行身份，决策账本与缓存对受影响的连接失效一次 |
+
+- 回滚：仓库变量设 `THINKING_CAPABILITY_SCOPE=off` 后重新部署，不用发版。
+- 切 `all` 之前：按 §15 用 QWK 留出集重新锚定（真实调用，需维护者授权预算）；核实 OpenAI 推理模型、Kimi 部分型号对 `temperature` 的限制（放开后它们才进评分路径）。
+- 无迁移、无新表；AI 任务的缺省等待在思考开着时是 240 秒（连接显式超时仍优先，最多 300）。
+
+新增或修改一条记录：
+
+1. 只依据厂商官方文档或生产日志，`sources` 写链接，`verified_on` 写核实日期；查不到的不进表（落到未知模型策略，不出错，只是不关思考）。
+2. 前缀写规整后的模型名（小写、去掉 `/` 前缀）；前缀后紧跟版本号（数字、`.数字`、`-一两位数字`）的不算命中，日期快照与变体后缀算命中——给新版本单独加一条，不要靠前缀碰运气。
+3. 改了已有记录的请求写法，必须同时换它的身份值（强度名）或升 `CORE_PROVIDER_PROMPT_VERSION`；然后更新 `test_thinking_capabilities.py` 的 `WIRE_SNAPSHOT`（测试失败时会打印新值）。只新增记录也要更新快照。
+
+验证：
+
+```bash
+.venv/bin/python -m pytest -q backend/app/tests/test_thinking_capabilities.py
+```
+
+日志（都不含内容）：
+- 每次调用的 `llm_call` 行尾多了 `answer_tokens=` / `answer=`（`reported` 是厂商报告的准确值，`estimated` 是按可见文字估算，`-` 是算不出来）、`thinking=on|off`、`effort=`、`thinking_source=`（`explicit` / `explicit_adjusted` / `table` / `family_default` / `unknown` / `legacy`）、`entry=`（命中的记录）、`answer_budget=`（正式输出预算）、`max_tokens=`（实发上限）。
+- `thinking_capability_mismatch`：能力表说能关、也发了关闭写法，应答里却有思考。
+- `thinking_explicit_adjusted`：连接显式配置了“关闭”，表里记着这个模型关不掉，改发了最低强度。
+- `thinking_output_limit_fallback`：表里不知道这个模型的最大输出、上限放到了 32768，厂商以 400 拒绝；已按放开前的上限重发一次（`sent=` 原上限，`fallback=` 重发的上限）。
+
+排错：
+- **现象**：评分失败，错误码 `PROVIDER_THINKING_NOT_DISABLED`。
+  - 报错指向：一致性守卫，像是连接配置错了。
+  - 真正原因：也可能是能力表把这个模型误标成了可以关闭思考（连接没配置思考时，关不关由表决定）。查这次调用的 `llm_call` 行：`thinking_source=table` 且同一时间有 `thinking_capability_mismatch`，就按 `entry=` 去改那条记录（改写法要换身份或升版本）。
+- **现象**：起草报“模型输出达到长度上限”。
+  - 报错指向：输出上限太小。
+  - 真正原因：多半是思考把额度用光（11-10 的 glm-5.3 就是这样）。看日志 `thinking=` 与 `reasoning_tokens=`：`thinking=on` 时上限已经放到封顶值，先查连接是不是显式设了较小的 `max_tokens`；`thinking=off` 却有推理 token，就是能力表误标或厂商静默忽略了关闭写法。
+- **现象**：AI 任务超时，提示“这个模型关不掉思考……仍在时限内没有返回”。
+  - 报错指向：网络或厂商慢。
+  - 真正原因：关不掉思考的模型在最低强度下也想得太久。可以在连接里把超时调到 300 秒，或换能关闭思考的模型；不要调大输出上限，那不解决时间。
+- **现象**：表外模型（`thinking_source=unknown`）的 AI 任务请求上限是 32768、等待 240 秒。
+  - 报错指向：像是配置被改了。
+  - 真正原因：未知模型按可能在思考处理（方案 Q1）。确认它能关思考后按上面的步骤补一条记录，或在连接里显式配置思考设置。
+- **现象**：AI 任务或评分助手的一次调用发了两次请求，第一次 400。
+  - 报错指向：像是重试策略错了（这些调用的超时与 5xx 只试 1 次）。
+  - 真正原因：看同一时间有没有 `thinking_output_limit_fallback`：表外模型的最大输出比 32768 小（GPT-4o mini、旧 Claude、Gemini 2.0 等），厂商拒绝了猜的上限，传输层按放开前的上限重发，不占重试次数。按模型官方页补一条带 `max_output` 的记录（或在连接里显式写 `max_tokens`），以后就不再多发一次。重发后若又报截断，说明这个模型其实在思考，最大输出又小，只能换模型或请厂商调整。
+
+维护记录：2026-11-11 · 按模型能力表决定思考：新增开关、能力表维护步骤、日志字段与四条排错。2026-11-11 · 复审修正：写明严格 Schema 之外没有硬上界；新增 `thinking_output_limit_fallback` 日志与“一次调用发了两次请求”的排错。
+
+### 2026-11-11 邀请与重置：直接给链接
+
+邀请新成员：平台管理员或组织管理员在“账户与连接 → 组织成员”填邮箱、选角色，点“创建邀请链接”，把页面上的链接复制给对方。对方打开后设置姓名和密码即加入该组织。密码重置同理（“签发重置链接”）。链接只显示一次，只能用一次。
+
+验证：`cd frontend/workbench && npx vitest run src/views/AccountView.test.js`。
+
+排错：
+
+- **对方说邀请链接打不开，或打开是别的网站。**
+  - 报错指向：像是令牌失效。
+  - 真正原因：链接的域名取自管理员创建邀请时所在的页面地址。管理员是从本机转发端口或旧入口打开的页面，链接就指向那里。从正式入口重新创建一个邀请即可。
+
+维护记录：2026-11-11 · 邀请与重置：直接给链接：记录邀请操作与一条排错。
+
+### 2026-11-11 评分细则适用范围（分期 A：评分标准侧）
+
+方案见 `docs/评分细则适用范围方案.md`。发布：迁移 `0044_atomic_rule_scope`（`atomic_rules` 加可空列 `scope`，`ck_ai_tasks_kind` 加 `rule_scope`，不建表）。生产先跑迁移工作流再部署；有带范围的细则或范围识别任务时 0044 拒绝降级。契约版本升为 `2026-11-11.rule-scope`，已打开的旧页面会在下一次写操作前自动刷新。
+
+排错：
+
+- **规则编辑器里适用范围显示“尚未识别，按全文”**
+  - 报错指向：页面只读字段，看起来像漏了配置。
+  - 真正原因：这条规则不是 AI 起草的（Excel 已解析或导入的原子规则），还没做过范围识别。在第 3 步“适用范围”里点“识别适用范围”。评分标准必须是草稿；已发布的先复制为新版本。
+- **保存原子规则时报“规则修改包含禁止字段: applies_to”**
+  - 报错指向：后端拒绝了修改。
+  - 真正原因：页面是 0044 之前打开的旧版本，还在提交适用范围。刷新页面即可；范围不再由人修改。
+- **范围识别完成，部分规则仍按全文**
+  - 报错指向：任务状态是“成功”。
+  - 真正原因：任务结果的 `failed`（修正一次后仍不合格的评分项）或 `missing`（模型没给出可用范围的规则编号）。这些规则保持没有范围、按全文处理；可再识别一次，只会处理仍然没有范围的规则。
+
+- **范围识别任务失败：“执行草稿已经换了，识别结果没有写入”**
+  - 报错指向：任务失败，像是模型或连接的问题。
+  - 真正原因：识别期间有人保存了修改（重新编译出了新的执行草稿）。结果不会写到旧草稿上；在新草稿上再识别一次即可。同理，识别期间提交审核或发布会得到“评分标准已提交审核或已发布”。
+
+测试：`.venv/bin/python -m pytest -q backend/app/tests/test_rule_scope.py`
+
+维护记录：2026-11-11 · 评分细则适用范围（分期 A）：新增迁移发布步骤与三条排错。
+
+### 2026-11-11 评分细则适用范围（分期 B：评分侧）
+
+`SCORING_JUDGE_SCOPE_ENABLED`（默认关，生产不开）打开时按细则的适用范围取证据：规则快照升 `@5`、只给范围内的段落、找不到章节转人工、允许“证据不足”。关闭时与之前完全相同。打开前必须先做 QWK 联合评测，需单独授权真实模型预算；本分期没有迁移。
+
+排错：
+
+- **评分项转人工，复核原因是“要看的章节在论文里没有找到”（`scope_section_missing`）**
+  - 报错指向：看起来像模型没判。
+  - 真正原因：细则的适用范围要求某一章，但论文里没有哪一段被对到这个章节角色——系统没有调用模型。查信封扩展 `section_roles` 和标题：常见是论文标题用了词表之外的说法（毕业论文会再问模型归类一次一级标题，技术方案只用词表），或论文确实缺这一章。补词表同义词要升 `section-roles` 版本。
+- **评分项转人工，复核原因是“需要对照两章……没引用到两章的原文”（`scope_citation_incomplete`）**
+  - 报错指向：模型判了有问题。
+  - 真正原因：多章对照的规则，模型的引用只落在一章里，结果按方案不采用。不是传输或解析失败；人工核对原文后给分即可。
+- **开了范围后转人工明显变多**
+  - 报错指向：规则任务大量 `review_required`。
+  - 真正原因：章节太长放不进预算时证据是 partial，缺失类规则只能判“证据不足”。先看证据选择身份的 `section_coverage` 里目标章节是否 `complete`，再决定是否调大 `SCORING_CONTEXT_WINDOW_TOKENS` 或关掉开关。
+
+测试：`.venv/bin/python -m pytest -q backend/app/tests/test_rule_scope_scoring.py backend/app/tests/test_scoring_stage2.py backend/app/tests/test_scoring_stage2_bc.py`
+
+维护记录：2026-11-11 · 评分细则适用范围（分期 B）：开关含义更新与三条排错。

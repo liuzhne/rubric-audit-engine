@@ -155,13 +155,18 @@ class Settings(BaseSettings):
     # 第二阶段改造（docs/论文评分第二阶段改造方案.md）。
     # 预算检查量什么：provider_view = 实际发给模型的视图；envelope = 旧量法（带哈希的完整信封），只作回退。
     SCORING_TOKEN_BUDGET_TARGET: Literal["provider_view", "envelope"] = "provider_view"
-    # 按判定范围（章节内 / 跨章节 / 全文）取证据。改变评分，QWK 评测后再打开。
+    # 按细则的适用范围取证据（docs/评分细则适用范围方案.md 第 8 节）：规则快照升 @5、只给范围内的段落、
+    # 找不到章节转人工，并允许“证据不足”。改变评分，QWK 评测后再打开。
     SCORING_JUDGE_SCOPE_ENABLED: bool = False
     # off = 证据不足并入 not_triggered（现状）；review = 模型可回 insufficient_evidence，评分项转人工。
     SCORING_INSUFFICIENT_EVIDENCE_MODE: Literal["off", "review"] = "off"
     # off = 提示词不变；cite = 要求每条语义判定给依据引文与一句理由（漏写不判失败；docs/评分证据与理由改造方案.md G5）。
     # 改提示词、进入判定身份，可能改分；统一评测后再打开。
     SCORING_DECISION_BASIS_MODE: Literal["off", "cite"] = "off"
+    # 按模型能力表决定思考（docs/模型思考能力表方案.md）：off = 全部旧行为（回滚用）；
+    # auxiliary = AI 任务与评分助手按能力表、评分路径旧行为；all = 评分路径也按能力表
+    # （会改分、改运行身份，QWK 留出集复核并经维护者批准后再切）。
+    THINKING_CAPABILITY_SCOPE: Literal["off", "auxiliary", "all"] = "auxiliary"
     SCORING_RULE_TASKS_ENABLED: bool = True
     # Rule-level decision ledger: reuse a validated semantic decision whose full
     # decision identity is unchanged, so retries only pay for failed rules.

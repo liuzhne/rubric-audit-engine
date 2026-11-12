@@ -82,6 +82,46 @@ def _optional_count(value):
         return None
 
 
+ANSWER_REPORTED = "reported"
+ANSWER_ESTIMATED = "estimated"
+
+
+def estimate_text_tokens(text) -> int:
+    """没有本地分词器时的保守估算：UTF-8 字节数 ÷ 3（与证据选择的 ``conservative_token_estimate`` 同一口径）。
+
+    中文约每字 1 token、英文偏高估；只用于事后统计，标为 ``estimated``，不参与任何上限计算。
+    """
+
+    if not isinstance(text, str) or not text:
+        return 0
+    return max(1, -(-len(text.encode("utf-8")) // 3))
+
+
+def _answer_tokens(*, prompt, completion, total, reasoning, reasoning_reported, thinking_seen, answer_text):
+    """正式输出用了多少 token（docs/模型思考能力表方案.md 第 5.4 节）。
+
+    厂商报告了推理：合计 > 输入 + 输出时推理不在输出里（Vertex），正式输出就是输出；否则推理算在输出里
+    （OpenAI、OpenRouter），正式输出 = 输出 − 推理。没有思考迹象：正式输出就是输出。只看到思考文本或
+    思考块、没有计数（智谱、Claude）：按可见文字估算。
+    """
+
+    counts = [_optional_count(value) for value in (prompt, completion, total)]
+    prompt, completion, total = counts
+    if completion is None:
+        return None, None
+    if reasoning_reported and reasoning:
+        if prompt is not None and total is not None and total > prompt + completion:
+            return completion, ANSWER_REPORTED
+        return max(0, completion - reasoning), ANSWER_REPORTED
+    if reasoning:  # 推算值：合计里多出的部分就是推理，输出本身是正式输出
+        return completion, ANSWER_REPORTED
+    if not thinking_seen:
+        return completion, ANSWER_REPORTED
+    if answer_text is None:
+        return None, None
+    return min(completion, estimate_text_tokens(answer_text)), ANSWER_ESTIMATED
+
+
 def observed_usage(
     *,
     prompt,
@@ -91,6 +131,7 @@ def observed_usage(
     thinking_seen=False,
     finish_reason=None,
     truncated=False,
+    answer_text=None,
 ) -> dict:
     """一次应答的中性用量与行为观测（只有计数和结束原因，不含任何内容）。
 
@@ -108,8 +149,13 @@ def observed_usage(
         if None not in counts and counts[2] > counts[0] + counts[1]:
             reasoning = counts[2] - counts[0] - counts[1]
             source = REASONING_INFERRED
+    reported = source == REASONING_REPORTED
     if source is None and thinking_seen:
         source = REASONING_REPORTED
+    answer, answer_source = _answer_tokens(
+        prompt=prompt, completion=completion, total=total, reasoning=reasoning,
+        reasoning_reported=reported, thinking_seen=thinking_seen, answer_text=answer_text,
+    )
     return {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
@@ -118,6 +164,9 @@ def observed_usage(
         "reasoning_source": source,
         "finish_reason": None if finish_reason is None else str(finish_reason),
         "truncated": bool(truncated),
+        # 正式输出（事后统计，只进调用日志；估算值标 estimated）。
+        "answer_tokens": answer,
+        "answer_source": answer_source,
     }
 
 
@@ -266,6 +315,8 @@ def metered_call(scorer, call, *, guard=None, thinking=None, before_send=None, o
 
 
 __all__ = [
+    "ANSWER_ESTIMATED",
+    "ANSWER_REPORTED",
     "REASONING_INFERRED",
     "REASONING_REPORTED",
     "THINKING_NOT_DISABLED",
@@ -274,6 +325,7 @@ __all__ = [
     "TokenBudgetExceededError",
     "USAGE_FIELDS",
     "UsageMeter",
+    "estimate_text_tokens",
     "metered_call",
     "observed_usage",
     "scorer_usage_snapshot",

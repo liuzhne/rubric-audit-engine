@@ -10,6 +10,7 @@ match 为问题关键词，运行时与 finding 的 message/kind 做包含匹配
 """
 
 import re
+from decimal import Decimal
 
 RULE_INSTRUCTIONS = (
     "你是评分规则编译助手。把给定评分项的自由文本扣分规则与模板批注，归一化成结构化扣分规则。"
@@ -23,6 +24,24 @@ _POINTS_TAIL_RE = re.compile(r"\s*扣?\s*\d+(?:\s*[-~至]\s*\d+)?\s*分?\s*$")
 _POINT_RANGE_RE = re.compile(
     r"\d+(?:\.\d+)?\s*(?:-|~|至|到)\s*\d+(?:\.\d+)?\s*分?"
 )
+
+
+# 扣分区间：区间后必须紧跟“分”。“8000-10000字”“3~5 页”是条件里的数字范围，不是
+# 扣分区间；“1-3分钟”是时长。上面的 _POINT_RANGE_RE 把“分”当可选，会误判这两类
+# （AI起草互斥组规整与区间拆档方案 §2.2），分期 B 改用这里。
+_STRICT_POINT_RANGE_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(?:-|~|～|－|—|–|至|到)\s*(\d+(?:\.\d+)?)\s*分(?!钟)"
+)
+
+
+def point_range(text) -> tuple[Decimal, Decimal] | None:
+    """原文写的扣分区间 (下限, 上限)；没有区间或下限不小于上限时返回 None。"""
+
+    for match in _STRICT_POINT_RANGE_RE.finditer(str(text or "")):
+        low, high = Decimal(match.group(1)), Decimal(match.group(2))
+        if low < high:
+            return low, high
+    return None
 
 
 _MULTI_EACH_RE = re.compile(r"各(?:扣|减|计)|分别(?:扣|减)|每项(?:扣|减)")

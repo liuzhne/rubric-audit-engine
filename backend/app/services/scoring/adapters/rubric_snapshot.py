@@ -10,9 +10,9 @@ from sqlalchemy import select
 from backend.app.db import models
 from backend.app.services.rubrics import lifecycle
 from backend.app.services.rubrics.rule_status import participates
+from backend.app.services.rubric_scope import read_scope
 from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import CompiledRubricSnapshot
-from backend.app.services.scoring.core.contracts import JUDGE_SCOPES
 from backend.app.services.scoring.core.contracts import M4_ATOMIC_RULE_SCHEMAS
 from backend.app.services.scoring.core.contracts import WORDED_ATOMIC_RULE_SCHEMAS
 from backend.app.services.scoring.core.rule_context import derive_context_needs
@@ -66,10 +66,11 @@ def _assessment_mode(scoring_mode: object) -> object:
 def _atomic_rule_schema_version(compiler_version: object, *, judge_scope: bool = False) -> str:
     # @3 = @2 + the rule's published wording.  Without it the semantic judge
     # only saw a rule code and answered "not_applicable" for every rule.
-    # @4 = @3 + applies_to, only while judge scope is switched on: producing it
-    # always would change every decision identity and orphan the ledger.
+    # @5 = @3 + scope (docs/评分细则适用范围方案.md 第 8 节), only while judge scope
+    # is switched on: producing it always would change every decision identity
+    # and orphan the ledger.
     if compiler_version in _M4_COMPILER_VERSIONS:
-        return "atomic-rule-snapshot@4" if judge_scope else "atomic-rule-snapshot@3"
+        return "atomic-rule-snapshot@5" if judge_scope else "atomic-rule-snapshot@3"
     return "atomic-rule-snapshot@1"
 
 
@@ -92,18 +93,21 @@ def _rule_text_fields(source: Mapping[str, object], schema_version: str) -> dict
         "boundary_example": source.get("boundary_example") or None,
         "context_needs": derive_context_needs(name, rule_text),
     }
-    if schema_version == "atomic-rule-snapshot@4":
-        fields["applies_to"] = str(source.get("applies_to") or "global")
+    if schema_version == "atomic-rule-snapshot@5":
+        # 空即全文（方案 Q5）：没有范围的规则在身份里明确记为全文。
+        scope = read_scope(source.get("scope"))
+        fields["scope"] = (
+            {"type": scope["type"], "sections": scope["sections"]}
+            if scope is not None
+            else {"type": "document", "sections": []}
+        )
     return fields
 
 
 def _rule_evidence_policy(source: Mapping[str, object], schema_version: str) -> dict:
     policy = deepcopy(source["evidence_policy"])
-    # judge_scope is an editable hint stored with the rule; only @4 carries it
-    # (the edit endpoint validates it, an unknown value is ignored here).
-    scope = policy.pop("judge_scope", None)
-    if schema_version == "atomic-rule-snapshot@4" and scope in JUDGE_SCOPES:
-        policy["judge_scope"] = scope
+    # 人工判定范围已取消（docs/评分细则适用范围方案.md 第 7 节）；旧规则上留着的值不进快照。
+    policy.pop("judge_scope", None)
     if (
         schema_version in M4_ATOMIC_RULE_SCHEMAS
         and source["judge_type"] == "semantic"
@@ -410,7 +414,7 @@ class CompiledRubricSnapshotLoader:
                             "positive_example": item.positive_example,
                             "negative_example": item.negative_example,
                             "boundary_example": item.boundary_example,
-                            "applies_to": item.applies_to,
+                            "scope": item.scope,
                         },
                         atomic_rule_schema_version,
                     ),

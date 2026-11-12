@@ -1,5 +1,6 @@
 // @ts-check
 import { defineStore } from "pinia";
+import { isActiveAiTask } from "@/lib/ai-tasks.js";
 import { ref } from "vue";
 
 import { api, StaleContextError } from "@/api/client.js";
@@ -431,12 +432,39 @@ export const useRubricsStore = defineStore("rubrics", () => {
     return ruleReviewTask.value;
   }
 
-  /** @param {"review"|"structure"|"import"} key */
+  /**
+   * 最近一次适用范围识别任务：给不经过起草的规则补上范围，完成后写进草稿规则。
+   * @type {import('vue').Ref<any>}
+   */
+  const scopeTask = ref(null);
+
+  /**
+   * 适用范围识别（docs/评分细则适用范围方案.md 第 6 节）：老师发起任务，不填写范围。
+   *
+   * 能点这个按钮说明还有规则没有范围；同内容的任务（例如刷新页面前那次成功、但模型没给出
+   * 可用范围的任务）会被后端直接复用、不再调用模型，所以没有进行中的任务时一律重新识别。
+   * @param {string} rubricId
+   * @param {{connectionId: string|null}} input
+   */
+  async function startScopeIdentification(rubricId, input) {
+    requireConnection(input.connectionId);
+    const running = isActiveAiTask(scopeTask.value) && scopeTask.value?.rubric_id === rubricId;
+    scopeTask.value = await api.post(`/rubrics/${rubricId}/ai-tasks`, {
+      kind: "rule_scope",
+      params: {},
+      ai_connection_id: input.connectionId,
+      regenerate: !running,
+    });
+    return scopeTask.value;
+  }
+
+  /** @param {"review"|"structure"|"import"|"scope"} key */
   function trackedTask(key) {
+    if (key === "scope") return scopeTask;
     return key === "review" ? ruleReviewTask : key === "structure" ? structureTask : importStructureTask;
   }
 
-  /** 刷新正在跟踪的审查 / 结构识别任务。 @param {"review"|"structure"|"import"} key */
+  /** 刷新正在跟踪的审查 / 结构识别 / 范围识别任务。 @param {"review"|"structure"|"import"|"scope"} key */
   async function refreshAiTask(key) {
     const holder = trackedTask(key);
     const task = holder.value;
@@ -446,7 +474,7 @@ export const useRubricsStore = defineStore("rubrics", () => {
     return fresh;
   }
 
-  /** @param {"review"|"structure"|"import"} key @param {"cancel"|"retry"} action */
+  /** @param {"review"|"structure"|"import"|"scope"} key @param {"cancel"|"retry"} action */
   async function aiTaskAction(key, action) {
     const holder = trackedTask(key);
     const task = holder.value;
@@ -465,7 +493,8 @@ export const useRubricsStore = defineStore("rubrics", () => {
     const tasks = (await api.get(`/rubrics/${rubricId}/ai-tasks?active=1`)) || [];
     ruleReviewTask.value = tasks.find((/** @type {any} */ task) => task.kind === "rule_review") || null;
     structureTask.value = tasks.find((/** @type {any} */ task) => task.kind === "structure_suggestion") || null;
-    return { review: ruleReviewTask.value, structure: structureTask.value };
+    scopeTask.value = tasks.find((/** @type {any} */ task) => task.kind === "rule_scope") || null;
+    return { review: ruleReviewTask.value, structure: structureTask.value, scope: scopeTask.value };
   }
 
   /** @param {string} rubricId */
@@ -706,6 +735,8 @@ export const useRubricsStore = defineStore("rubrics", () => {
     mergeStructure,
     undoStructure,
     ruleReviewTask,
+    scopeTask,
+    startScopeIdentification,
     estimateRuleReview,
     startRuleReview,
     refreshAiTask,

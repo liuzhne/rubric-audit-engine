@@ -28,7 +28,7 @@ from backend.app.services.scoring.core.contracts import PromptEnvelopeV3
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV4
 
 # ⚠️ 凡改动评分 prompt/输入构造，务必 bump 本版本号以使旧缓存失效（设计§7：prompt 进哈希）。
-PROMPT_VERSION = "2026-10-20-1"  # Google 主机上连接没配置思考也按关闭处理（旧路径缓存键不含思考）
+PROMPT_VERSION = "2026-11-11-1"  # 缓存键加入评分路径的思考身份与正式输出预算（docs/模型思考能力表方案.md 第 6.4 节）
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,15 @@ class CacheEnvelopeEntry:
     expires_at: datetime
 
 
+def _scoring_thinking(scorer):
+    plan = getattr(scorer, "scoring_thinking_plan", None)
+    if plan is not None:
+        # 身份之外再记实际发出的思考字段：只改了能力表的写法、身份不变时，旧键也不会命中按旧写法
+        # 得到的结果（不必再记得升 PROMPT_VERSION；CORE_PROVIDER_PROMPT_VERSION 不进这个键）。
+        return {**plan.identity, "request_fields": plan.fields()}
+    return {"enabled": None, "type": getattr(scorer, "thinking_type", None)}
+
+
 def build_request(scorer, criterion, candidates, structure_checks, rubric_version, anchors=None):
     """构造进入哈希且作为审计留存的"完整输入"。
     校准锚点并入哈希 → 锚点变化即缓存失效（保可复现，设计§7）。"""
@@ -88,6 +97,10 @@ def build_request(scorer, criterion, candidates, structure_checks, rubric_versio
             "openai_temperature": settings.OPENAI_TEMPERATURE,
             "openai_compatible_temperature": settings.OPENAI_COMPATIBLE_TEMPERATURE,
         },
+        # 评分路径的思考身份（开关；强度与放开后的上限已在 model_version 里）与正式输出预算：
+        # 同一型号从「不发」改成「发关闭写法」时 model_version 不变，没有这两项旧键会命中旧结果。
+        "thinking": _scoring_thinking(scorer),
+        "max_tokens": getattr(scorer, "max_tokens", getattr(scorer, "max_output_tokens", None)),
         "rubric_version": rubric_version,
         "criterion": {
             "id": getattr(criterion, "id", None),

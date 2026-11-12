@@ -1,5 +1,4 @@
 import json
-from urllib.parse import urlparse
 
 import httpx
 
@@ -19,9 +18,11 @@ from backend.app.services.llm.legacy_prompts import chat_envelope_instructions a
 from backend.app.services.llm.legacy_prompts import chat_input_payload as _input_payload
 from backend.app.services.llm.legacy_prompts import chat_instructions as _instructions
 from backend.app.services.llm.legacy_prompts import strip_json_fence as _strip_json_fence
-from backend.app.services.llm.thinking_params import effective_thinking_type
-from backend.app.services.llm.tool_calls import parse_chat_tool_response
+from backend.app.services.llm import thinking_capabilities as thinking
+from backend.app.services.llm.hosts import OPENROUTER
+from backend.app.services.llm.hosts import host_family
 from backend.app.services.llm.thinking_params import thinking_request_fields
+from backend.app.services.llm.tool_calls import parse_chat_tool_response
 from backend.app.services.llm.transport import post_with_retry
 from backend.app.services.llm.usage import UsageMeter
 from backend.app.services.llm.usage import observed_usage
@@ -52,8 +53,17 @@ class OpenAICompatibleChatScorer(LLMScorer):
         self.top_p = float(top_p if top_p is not None else 1)
         self.response_format_json = settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON if response_format_json is None else bool(response_format_json)
         configured_thinking = settings.OPENAI_COMPATIBLE_THINKING_TYPE if thinking_type is None else thinking_type
-        # Google 主机认 reasoning_effort 而不是 thinking 字段：记下实际发出的写法，运行身份才如实。
-        self.thinking_type = effective_thinking_type(self.base_url, self.model_name, configured_thinking)
+        self.configured_thinking_type = str(configured_thinking or "").strip()
+        # 按模型能力表决定思考（docs/模型思考能力表方案.md）：辅助计划给 AI 任务与评分助手，
+        # 评分计划给 score_*（THINKING_CAPABILITY_SCOPE 不是 all 时与改动前逐字节相同）。
+        self.thinking_plan, self.scoring_thinking_plan = thinking.plans(
+            thinking.CHAT, self.base_url, self.model_name, thinking_type=configured_thinking,
+        )
+        # 运行身份读的是评分计划：Google 主机认 reasoning_effort 而不是 thinking 字段，记换算后的值。
+        self.thinking_type = self.scoring_thinking_plan.identity_type
+        self.model_version = type(self).model_version + thinking.model_version_suffix(
+            self.scoring_thinking_plan, max_tokens_explicit=self.max_tokens_explicit,
+        )
         self.service_tier = (
             settings.OPENAI_COMPATIBLE_SERVICE_TIER
             if service_tier is None
@@ -83,15 +93,15 @@ class OpenAICompatibleChatScorer(LLMScorer):
                 {"role": "user", "content": _input_payload(paper, criterion, evidence_candidates, structure_checks, anchors)},
             ],
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_tokens": self._scoring_max_tokens(self.max_tokens),
         }
-        payload.update(thinking_request_fields(self.base_url, self.model_name, self.thinking_type))
+        payload.update(self.scoring_thinking_plan.fields())
         if self.response_format_json:
             payload["response_format"] = {"type": "json_object"}
         if self.service_tier:
             payload["service_tier"] = self.service_tier
 
-        response = self._post_with_retry(payload)
+        response = self._post_with_retry(payload, call_context=self._scoring_context(payload))
         response.raise_for_status()
         data = response.json()
         output = _parse_chat_json_output(data)
@@ -128,17 +138,17 @@ class OpenAICompatibleChatScorer(LLMScorer):
             ],
             "temperature": float(sampling["temperature"]),
             "top_p": float(sampling["top_p"]),
-            "max_tokens": sampling["max_tokens"],
+            "max_tokens": self._envelope_max_tokens(provider),
         }
         if sampling["seed"] is not None:
             payload["seed"] = sampling["seed"]
-        payload.update(thinking_request_fields(self.base_url, self.model_name, provider["thinking"]["type"]))
+        payload.update(self._envelope_thinking_fields(provider))
         if provider["response_format"] == "json_object":
             payload["response_format"] = {"type": "json_object"}
         if self.service_tier:
             payload["service_tier"] = self.service_tier
 
-        response = self._post_with_retry(payload)
+        response = self._post_with_retry(payload, call_context=self._scoring_context(payload))
         response.raise_for_status()
         data = response.json()
         output = _parse_chat_json_output(data)
@@ -173,18 +183,19 @@ class OpenAICompatibleChatScorer(LLMScorer):
             ],
             "temperature": float(sampling["temperature"]),
             "top_p": float(sampling["top_p"]),
-            "max_tokens": sampling["max_tokens"],
+            # 信封记正式输出预算（Core 证据预算按它扣）；思考开着时实发上限放到封顶值，写在 model_version 里。
+            "max_tokens": self._envelope_max_tokens(provider),
         }
         if sampling["seed"] is not None:
             payload["seed"] = sampling["seed"]
-        payload.update(thinking_request_fields(self.base_url, self.model_name, provider["thinking"]["type"]))
+        payload.update(self._envelope_thinking_fields(provider))
         if provider["response_format"] == "json_object":
             payload["response_format"] = {"type": "json_object"}
         if self.service_tier:
             payload["service_tier"] = self.service_tier
 
         self.last_view_summary = compression_summary(request)
-        response = self._post_with_retry(payload)
+        response = self._post_with_retry(payload, call_context=self._scoring_context(payload))
         response.raise_for_status()
         return _parse_chat_json_output(response.json())
 
@@ -205,16 +216,20 @@ class OpenAICompatibleChatScorer(LLMScorer):
         raw = self._post_core_request(envelopes[0], validated[0][1], request)
         return decode_core_group_response(envelopes, raw, request)
 
-    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None, attempts_limit=None, default_timeout_seconds=None, rate_limit_retries=None, deadline=None):
-        request_options = {}
+    def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None, attempts_limit=None, default_timeout_seconds=None, rate_limit_retries=None, deadline=None, scoring=False):
+        """``default_max_tokens`` 是正式输出预算；``scoring=True`` 用评分计划（语义一致性检查）。"""
+
+        request_options = {"call_context": None}
         if attempts_limit is not None:
             request_options["attempts_limit"] = attempts_limit
         if rate_limit_retries:
             request_options["rate_limit_retries"] = rate_limit_retries
         if deadline is not None:
             request_options["deadline"] = deadline
-        if default_timeout_seconds is not None and not self.timeout_seconds_explicit:
-            request_options["timeout_seconds"] = max(self.timeout_seconds, default_timeout_seconds)
+        timeout = self.request_timeout_seconds(default_timeout_seconds, scoring=scoring)
+        if timeout is not None:
+            request_options["timeout_seconds"] = timeout
+        plan = self._json_plan(scoring)
         body = {
             "model": self.model_name,
             "messages": [
@@ -222,10 +237,9 @@ class OpenAICompatibleChatScorer(LLMScorer):
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens if self.max_tokens_explicit or default_max_tokens is None else max(self.max_tokens, default_max_tokens),
+            "max_tokens": self.request_output_tokens(default_max_tokens, scoring=scoring),
         }
-        thinking_type = (self.thinking_type or "").strip()
-        body.update(thinking_request_fields(self.base_url, self.model_name, thinking_type))
+        body.update(plan.fields())
         if self.response_format_json:
             body["response_format"] = {"type": "json_object"}
         if response_schema is not None:
@@ -234,11 +248,22 @@ class OpenAICompatibleChatScorer(LLMScorer):
             }}
         if self.service_tier:
             body["service_tier"] = self.service_tier
+        request_options["call_context"] = thinking.call_context(
+            plan, answer_budget=default_max_tokens, max_tokens=body["max_tokens"],
+        )
+        fallback = None if scoring else thinking.output_limit_fallback(
+            plan, field="max_tokens", sent=body["max_tokens"], configured=self.max_tokens,
+            explicit=self.max_tokens_explicit, answer_budget=default_max_tokens,
+        )
+        if fallback:
+            request_options["output_limit_fallback"] = fallback
         if response_schema is not None:
             # ``reasoning`` is an OpenRouter extension.  Other OpenAI-compatible
             # providers (including Google AI Studio) may reject the same field,
             # even though they support strict ``json_schema`` output.
-            if urlparse(self.base_url).hostname == "openrouter.ai" and (
+            # 能力表接管后由 OpenRouter 的族默认记录发出；旧行为（scope=off）保留这个特判。
+            thinking_type = (plan.identity_type or "").strip() if plan.legacy else None
+            if plan.legacy and host_family(self.base_url) == OPENROUTER and (
                 not thinking_type or thinking_type == "disabled"
             ):
                 body["reasoning"] = {"enabled": False}
@@ -266,12 +291,24 @@ class OpenAICompatibleChatScorer(LLMScorer):
             "tools": tools,
             "tool_choice": tool_choice,
             "temperature": self.temperature,
-            "max_tokens": int(max_tokens or self.max_tokens),
+            "max_tokens": (
+                self.request_output_tokens(max_tokens)
+                if self.thinking_plan.raises_output_limit
+                else int(max_tokens or self.max_tokens)
+            ),
         }
-        body.update(thinking_request_fields(self.base_url, self.model_name, (self.thinking_type or "").strip()))
+        body.update(self.thinking_plan.fields())
         if self.service_tier:
             body["service_tier"] = self.service_tier
-        options = {"attempts_limit": 1, "deadline": deadline}
+        options = {"attempts_limit": 1, "deadline": deadline, "call_context": thinking.call_context(
+            self.thinking_plan, answer_budget=max_tokens, max_tokens=body["max_tokens"],
+        )}
+        fallback = thinking.output_limit_fallback(
+            self.thinking_plan, field="max_tokens", sent=body["max_tokens"],
+            configured=int(max_tokens or self.max_tokens), explicit=self.max_tokens_explicit,
+        )
+        if fallback:
+            options["output_limit_fallback"] = fallback
         if rate_limit_retries:
             options["rate_limit_retries"] = rate_limit_retries
             options["rate_limit_delay_seconds"] = rate_limit_delay_seconds
@@ -282,8 +319,60 @@ class OpenAICompatibleChatScorer(LLMScorer):
         response.raise_for_status()
         return parse_chat_tool_response(response.json())
 
+    # -- 思考计划：上限、超时与日志上下文 ---------------------------------------------------------
+
+    def _json_plan(self, scoring=False):
+        return self.scoring_thinking_plan if scoring else self.thinking_plan
+
+    def request_output_tokens(self, answer_budget=None, *, scoring=False):
+        """AI 任务的实发上限：``answer_budget`` 是正式输出预算（docs/模型思考能力表方案.md 第 5.2 节）。"""
+
+        return thinking.request_max_tokens(
+            self._json_plan(scoring), configured=self.max_tokens, explicit=self.max_tokens_explicit,
+            answer_budget=answer_budget,
+        )
+
+    def request_timeout_seconds(self, default_timeout_seconds=None, *, scoring=False):
+        """AI 任务的单次等待：连接显式超时优先；思考开着时不少于 THINKING_ON_TIMEOUT_SECONDS。"""
+
+        if default_timeout_seconds is None or self.timeout_seconds_explicit:
+            return None
+        timeout = max(self.timeout_seconds, default_timeout_seconds)
+        if self._json_plan(scoring).raises_output_limit:
+            timeout = max(timeout, thinking.THINKING_ON_TIMEOUT_SECONDS)
+        return timeout
+
+    def _scoring_max_tokens(self, answer_budget):
+        """评分请求的实发上限：信封与运行身份里记的是正式输出预算。"""
+
+        if self.scoring_thinking_plan.raises_output_limit and not self.max_tokens_explicit:
+            return self.scoring_thinking_plan.raised_max_tokens()
+        return int(answer_budget)
+
+    def _envelope_matches_plan(self, provider):
+        return provider["thinking"] == self.scoring_thinking_plan.identity
+
+    def _envelope_thinking_fields(self, provider):
+        """信封冻结的思考设置为准：与评分计划一致时发计划的写法（含强度）；不一致的旧信封按改动前的换算发。"""
+
+        if self._envelope_matches_plan(provider):
+            return self.scoring_thinking_plan.fields()
+        return thinking_request_fields(self.base_url, self.model_name, provider["thinking"]["type"])
+
+    def _envelope_max_tokens(self, provider):
+        answer_budget = provider["sampling"]["max_tokens"]
+        if self._envelope_matches_plan(provider):
+            return self._scoring_max_tokens(answer_budget)
+        return int(answer_budget)
+
+    def _scoring_context(self, payload):
+        return thinking.call_context(
+            self.scoring_thinking_plan, answer_budget=self.max_tokens, max_tokens=payload.get("max_tokens"),
+        )
+
     def _post_with_retry(self, payload, *, attempts_limit=None, timeout_seconds=None, rate_limit_retries=None, deadline=None,
-                         rate_limit_delay_seconds=None, rate_limit_min_call_seconds=None):
+                         rate_limit_delay_seconds=None, rate_limit_min_call_seconds=None, call_context=None,
+                         output_limit_fallback=None):
         return post_with_retry(
             self,
             url="%s/chat/completions" % self.base_url,
@@ -308,6 +397,8 @@ class OpenAICompatibleChatScorer(LLMScorer):
             deadline=deadline,
             rate_limit_delay_seconds=rate_limit_delay_seconds,
             rate_limit_min_call_seconds=rate_limit_min_call_seconds,
+            call_context=call_context,
+            output_limit_fallback=output_limit_fallback,
         )
 
 
@@ -345,6 +436,8 @@ def _observed_usage_from_chat(data):
         ),
         finish_reason=finish_reason,
         truncated=finish_reason == "length",
+        # 智谱只给思考文本、不报推理计数：正式输出按可见文字估算。
+        answer_text=_message_content_to_text(message.get("content")),
     )
 
 

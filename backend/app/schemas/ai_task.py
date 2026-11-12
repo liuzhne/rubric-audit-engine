@@ -8,7 +8,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 
-AITaskKind = Literal["rule_draft", "unit_classification", "rule_review", "structure_suggestion"]
+AITaskKind = Literal["rule_draft", "unit_classification", "rule_review", "structure_suggestion", "rule_scope"]
 
 
 class AITaskCreate(BaseModel):

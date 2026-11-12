@@ -65,9 +65,11 @@ def list_scoring_runs(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    query = select(ScoringRun).order_by(ScoringRun.created_at.desc())
-    if principal.organization_id is not None:
-        query = query.where(ScoringRun.organization_id == principal.organization_id)
+    query = (
+        select(ScoringRun)
+        .where(*guards.run_scope(principal))
+        .order_by(ScoringRun.created_at.desc())
+    )
     if paper_id:
         query = query.where(ScoringRun.paper_id == paper_id)
     if batch_id:

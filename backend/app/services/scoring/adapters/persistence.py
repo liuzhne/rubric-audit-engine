@@ -348,10 +348,18 @@ def core_item_reason(rule_results, review_issues=None) -> str:
         for issue in review_issues or ()
         if issue.get("code") == "RULE_EVIDENCE_INSUFFICIENT"
     }
+    # 适用范围的两种复核（找不到章节、多章对照没引用到两章）同样不能算进“未发现问题”。
+    scope_review = {
+        issue.get("rule_code")
+        for issue in review_issues or ()
+        if issue.get("code") in {"RULE_SCOPE_SECTION_MISSING", "RULE_SCOPE_CITATION_INCOMPLETE"}
+    }
     counts = {}
     for result in rule_results or ():
         if result.get("status") == "not_triggered" and result.get("rule_code") in insufficient:
             label = "证据不足"
+        elif result.get("status") == "not_triggered" and result.get("rule_code") in scope_review:
+            label = "需人工核对"
         else:
             label = _STATUS_LABELS.get(result.get("status"), result.get("status"))
         counts[label] = counts.get(label, 0) + 1

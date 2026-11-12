@@ -76,7 +76,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install uv and Python
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.12"
           enable-cache: true
@@ -121,7 +121,9 @@ jobs:
             0039_site_leads \
             0040_provider_output_observations \
             0041_assistant_agent_state \
-            0042_assistant_message_client_id
+            0042_assistant_message_client_id \
+            0043_batch_owner_isolation \
+            0044_atomic_rule_scope
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done
@@ -422,12 +424,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Install uv and Python for the Vercel Python builder
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.12"
           enable-cache: true
       - name: Set up Node.js for the Vercel CLI
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - name: Install the Vercel CLI
@@ -660,6 +662,8 @@ jobs:
           SCORING_INSUFFICIENT_EVIDENCE_MODE: ${{ vars.SCORING_INSUFFICIENT_EVIDENCE_MODE }}
           # 评分证据与理由（docs/评分证据与理由改造方案.md）；没设即 off，统一评测后再设。
           SCORING_DECISION_BASIS_MODE: ${{ vars.SCORING_DECISION_BASIS_MODE }}
+          # 按模型能力表决定思考（docs/模型思考能力表方案.md）；没设即 auxiliary，off 回滚，all 要 QWK 复核后再设。
+          THINKING_CAPABILITY_SCOPE: ${{ vars.THINKING_CAPABILITY_SCOPE }}
         run: |
           set -euo pipefail
           host="${SITE_URL#https://}"

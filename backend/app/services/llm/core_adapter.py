@@ -89,15 +89,22 @@ def core_runtime_provider_contract(scorer, *, artifact_hash: str) -> dict:
         "max_output_tokens",
         getattr(scorer, "max_tokens", 512),
     )
-    thinking_type = (
-        str(getattr(scorer, "thinking_type", "") or "").strip() or None
-    )
-    thinking_enabled = thinking_type is not None and thinking_type.casefold() not in {
-        "none",
-        "disabled",
-        "false",
-        "off",
-    }
+    plan = getattr(scorer, "scoring_thinking_plan", None)
+    if plan is not None:
+        # 适配器按模型能力表解析出的评分计划（docs/模型思考能力表方案.md 第 6 节）：type 只表示开关，
+        # 强度与放开后的请求上限在 model_version 里。
+        thinking_type = plan.identity_type
+        thinking_enabled = bool(plan.thinking_on)
+    else:
+        thinking_type = (
+            str(getattr(scorer, "thinking_type", "") or "").strip() or None
+        )
+        thinking_enabled = thinking_type is not None and thinking_type.casefold() not in {
+            "none",
+            "disabled",
+            "false",
+            "off",
+        }
     response_format = (
         "json_schema"
         if provider == "openai"

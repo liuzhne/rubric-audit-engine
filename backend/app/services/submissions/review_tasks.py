@@ -9,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from backend.app.db import models
+from backend.app.services.ownership import owned_run_ids
+from backend.app.services.ownership import run_owner_id
 from backend.app.services.submissions.lifecycle import ResourceConflictError
 from backend.app.services.submissions.lifecycle import ResourceNotFoundError
 from backend.app.services.submissions.review import recalculate_generic_run
@@ -94,6 +96,7 @@ def list_manual_tasks(
     db,
     *,
     organization_id: str | None,
+    owner_id: str | None = None,
     status: str | None = None,
     batch_id: str | None = None,
     scoring_run_id: str | None = None,
@@ -117,6 +120,12 @@ def list_manual_tasks(
     if organization_id is not None:
         query = query.where(
             models.ManualReviewTask.organization_id == organization_id
+        )
+    if owner_id is not None:
+        # 个人隔离按所属评分任务的归属判断（docs/评分任务个人隔离方案.md）；
+        # 能看全组织的身份由调用方传 None。
+        query = query.where(
+            models.ManualReviewTask.scoring_run_id.in_(owned_run_ids(owner_id))
         )
     if status is not None:
         query = query.where(models.ManualReviewTask.status == status)
@@ -144,7 +153,9 @@ def list_manual_tasks(
     return db.scalars(query).all()
 
 
-def get_manual_task(db, *, task_id: str, organization_id: str | None):
+def get_manual_task(
+    db, *, task_id: str, organization_id: str | None, owner_id: str | None = None
+):
     task = db.scalar(
         select(models.ManualReviewTask)
         .where(models.ManualReviewTask.id == task_id)
@@ -158,6 +169,9 @@ def get_manual_task(db, *, task_id: str, organization_id: str | None):
         organization_id is not None and task.organization_id != organization_id
     ):
         raise ResourceNotFoundError("manual review task not found")
+    if owner_id is not None and run_owner_id(db, task.scoring_run) != owner_id:
+        # 与列表同一口径：教师拿不到别人任务下的复核任务，也不泄露它存在。
+        raise ResourceNotFoundError("manual review task not found")
     return task
 
 
@@ -166,11 +180,12 @@ def claim_manual_task(
     *,
     task_id: str,
     organization_id: str | None,
+    owner_id: str | None = None,
     reviewer_id: str,
     version: int,
 ):
     task = get_manual_task(
-        db, task_id=task_id, organization_id=organization_id
+        db, task_id=task_id, organization_id=organization_id, owner_id=owner_id
     )
     if task.version != version or task.status != "open":
         raise ResourceConflictError("manual review task was already changed")
@@ -188,11 +203,12 @@ def release_manual_task(
     *,
     task_id: str,
     organization_id: str | None,
+    owner_id: str | None = None,
     reviewer_id: str,
     version: int,
 ):
     task = get_manual_task(
-        db, task_id=task_id, organization_id=organization_id
+        db, task_id=task_id, organization_id=organization_id, owner_id=owner_id
     )
     if (
         task.version != version
@@ -250,6 +266,7 @@ def resolve_manual_task(
     *,
     task_id: str,
     organization_id: str | None,
+    owner_id: str | None = None,
     reviewer_id: str,
     version: int,
     final_score: float,
@@ -257,7 +274,7 @@ def resolve_manual_task(
     evidence: list[dict],
 ):
     task = get_manual_task(
-        db, task_id=task_id, organization_id=organization_id
+        db, task_id=task_id, organization_id=organization_id, owner_id=owner_id
     )
     if (
         task.version != version
@@ -286,7 +303,7 @@ def resolve_manual_task(
         reviewer_id=reviewer_id,
     )
     task = get_manual_task(
-        db, task_id=task_id, organization_id=organization_id
+        db, task_id=task_id, organization_id=organization_id, owner_id=owner_id
     )
     task.status = "resolved"
     task.resolution_type = "human_score"

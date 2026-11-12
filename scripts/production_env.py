@@ -85,17 +85,19 @@ _DATABASE_PASSWORD = re.compile(r"^[A-Za-z0-9]{24,}$")
 #: 可选开关：GitHub 仓库变量没设时不写进 .env，应用取默认值（关闭）。
 #: ASSISTANT_AGENT_ENABLED：评分助手的 Agent 回合（docs/评分助手Agent化方案.md）。设为 true 时，部署流水线先用
 #: 新镜像跑 assistant_eval_gate：当前提示词指纹上没有达标的评测报告就不部署（§12.5）。
-#: SCORING_JUDGE_SCOPE_ENABLED：按判定范围取证据（docs/论文评分第二阶段改造方案.md），QWK 评测后再打开。
+#: SCORING_JUDGE_SCOPE_ENABLED：按细则的适用范围取证据（docs/评分细则适用范围方案.md 第 8 节），QWK 评测后再打开。
 #: ASSISTANT_STREAM_ENABLED：评分助手的过程流式（docs/评分助手过程流式方案.md），在实例上核实代理不攒推送后再打开。
 OPTIONAL_SWITCHES = ("SITE_LEADS_ENABLED", "ASSISTANT_AGENT_ENABLED", "SCORING_JUDGE_SCOPE_ENABLED",
                      "ASSISTANT_STREAM_ENABLED")
 #: 取值不是 true / false 的可选设置：没设时不写进 .env，应用取默认值。第一个取值是默认值。
 #: SCORING_TOKEN_BUDGET_TARGET=envelope 是预算检查的回退；SCORING_INSUFFICIENT_EVIDENCE_MODE=review 打开“证据不足”；
 #: SCORING_DECISION_BASIS_MODE=cite 让每条判定都给依据（docs/评分证据与理由改造方案.md）。
+#: THINKING_CAPABILITY_SCOPE：按模型能力表决定思考的范围（docs/模型思考能力表方案.md）；off 是回滚，all 要 QWK 复核后再设。
 OPTIONAL_CHOICES = {
     "SCORING_TOKEN_BUDGET_TARGET": ("provider_view", "envelope"),
     "SCORING_INSUFFICIENT_EVIDENCE_MODE": ("off", "review"),
     "SCORING_DECISION_BASIS_MODE": ("off", "cite"),
+    "THINKING_CAPABILITY_SCOPE": ("auxiliary", "off", "all"),
 }
 # --from-environment 只取这些：部署任务的环境里还有 GITHUB_*、RUNNER_* 等无关变量。
 ENVIRONMENT_NAMES = (

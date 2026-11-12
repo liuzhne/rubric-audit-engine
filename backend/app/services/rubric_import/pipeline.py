@@ -27,8 +27,13 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.config import settings
 from backend.app.db import models
-from backend.app.services.rubric_import.deduction_caps import normalize_ai_group_caps
+from backend.app.services.rubric_import.deduction_caps import (
+    effective_mutex_groups,
+    normalize_ai_group_caps,
+)
 from backend.app.services.rubrics.rule_origin import entry_ai_model
+from backend.app.services.rubric_scope import ScopeError
+from backend.app.services.rubric_scope import stored_scope
 from backend.app.services.rubrics.rule_origin import is_ai_entry
 from backend.app.services.rubric_import.compiler import analyze_rule_input
 from backend.app.services.rubric_import.compiler import is_multi_judgement
@@ -204,6 +209,22 @@ def _decimal(value: object, *, default: str = "0") -> Decimal:
         raise ValueError(f"invalid decimal value: {value!r}") from exc
 
 
+def _compiled_deduction_points(deduction: object, max_score: object) -> Decimal | None:
+    """这一行结构化扣分会编译成细则时返回分值，否则返回 None。
+
+    编译循环与互斥组规整共用这一个判断：规整只数真正会生成细则的行。
+    """
+
+    if not isinstance(deduction, Mapping):
+        return None
+    if str(deduction.get("source") or "").startswith("ai_") and deduction.get("confirmed") is not True:
+        return None
+    points = _decimal(deduction.get("points") or deduction.get("max_points"))
+    if points <= 0 or points > _decimal(max_score):
+        return None
+    return points
+
+
 def _number_text(value: object) -> str:
     number = _decimal(value)
     rendered = format(number, "f")
@@ -315,6 +336,7 @@ def _rule(
     source_rule_codes: list[str] | None = None,
     ai_origin: bool = False,
     ai_model: str | None = None,
+    scope: Mapping[str, object] | None = None,
 ) -> dict:
     normalized_evidence = deepcopy(dict(evidence_policy or {}))
     if not normalized_evidence:
@@ -360,6 +382,9 @@ def _rule(
     if ai_origin or creation_method == "llm":
         rule["ai_origin"] = True
         rule["ai_model"] = ai_model
+    # 0044：适用范围同样只在有值时写进编译图，没有范围的规则的图逐字节不变。
+    if scope:
+        rule["scope"] = deepcopy(dict(scope))
     return rule
 
 
@@ -1038,6 +1063,8 @@ def _assemble_file_graph(
             scoring_mode = "banded"
         elif scoring_mode in {"review", "review_only"}:
             scoring_mode = "review_only"
+        # “适用范围”列只用来给 Word 批注找对应规则（老师确认的关联提示），不决定评分时看哪部分：
+        # 评分范围只来自 atomic_rules.scope（docs/评分细则适用范围方案.md 第 7 节）。
         applies_to = _text(record.get("适用范围")) or "global"
         evidence_hints = _split(record.get("证据提示"))
         criterion = {
@@ -1213,7 +1240,26 @@ def _assemble_file_graph(
     )
 
 
+def _ai_row_scope(deduction, profile_key) -> dict | None:
+    """起草时模型给这一行返回的适用范围（docs/评分细则适用范围方案.md 第 5 节）。
+
+    只认可归属的 AI 行：来源以 ``ai_`` 开头、带生成指纹与草稿行键。人工与 Excel 行上即使
+    写了 ``scope`` 也忽略——范围不由人指定。范围不合格（被改过）同样忽略，按全文处理。
+    """
+    if not isinstance(deduction, Mapping) or not str(deduction.get("source") or "").startswith("ai_"):
+        return None
+    if not deduction.get("generation_fingerprint") or not deduction.get("draft_row_key"):
+        return None
+    if deduction.get("scope") is None:
+        return None
+    try:
+        return stored_scope(deduction["scope"], profile_key, source="ai_draft")
+    except ScopeError:
+        return None
+
+
 def _manual_nodes(payload: Mapping[str, object]):
+    profile_key = payload.get("business_profile_key") or "thesis"
     criteria = []
     rules = []
     source_rules = []
@@ -1313,9 +1359,12 @@ def _manual_nodes(payload: Mapping[str, object]):
             )
         elif mode in {"deductive", "deduct"} and projection["deduction_rules_structured"]:
             compiled_count = 0
-            for deduction_index, deduction in enumerate(
-                projection["deduction_rules_structured"], start=1
-            ):
+            structured_rows = projection["deduction_rules_structured"]
+            mutex_groups = effective_mutex_groups(structured_rows, compiled={
+                index for index, deduction in enumerate(structured_rows)
+                if _compiled_deduction_points(deduction, projection["max_score"]) is not None
+            })
+            for deduction_index, deduction in enumerate(structured_rows, start=1):
                 if not isinstance(deduction, Mapping):
                     continue
                 source = str(deduction.get("source") or "")
@@ -1333,10 +1382,8 @@ def _manual_nodes(payload: Mapping[str, object]):
                         }
                     )
                     continue
-                points = _decimal(
-                    deduction.get("points") or deduction.get("max_points")
-                )
-                if points <= 0 or points > _decimal(projection["max_score"]):
+                points = _compiled_deduction_points(deduction, projection["max_score"])
+                if points is None:
                     continue
                 compiled_count += 1
                 judge_type = (
@@ -1389,13 +1436,14 @@ def _manual_nodes(payload: Mapping[str, object]):
                         max_points=points,
                         repeat_policy=deduction.get("repeat_policy") or "once",
                         cap_points=deduction.get("cap_points"),
-                        mutex_group=deduction.get("mutex_group"),
+                        mutex_group=mutex_groups[deduction_index - 1],
                         applies_to=projection["applies_to"],
                         creation_method="manual",
                         source_rule_codes=[code],
                         # 采用 AI 结果时，前端在条目上写明 ai_origin 与生成模型名。
                         ai_origin=is_ai_entry(deduction),
                         ai_model=entry_ai_model(deduction) if is_ai_entry(deduction) else None,
+                        scope=_ai_row_scope(deduction, profile_key),
                     )
                 )
             if compiled_count == 0:
@@ -1890,9 +1938,10 @@ def persist_prepared_import(
             )
 
             from backend.app.services.rubrics.review_carry import (
-                snapshot_confirmed_rows, carry_confirmed_rows,
+                snapshot_confirmed_rows, carry_confirmed_rows, snapshot_rule_scopes, carry_rule_scopes,
             )
             previous_reviews = snapshot_confirmed_rows(session, predecessor) if same_rubric_context else {}
+            previous_scopes = snapshot_rule_scopes(session, predecessor) if same_rubric_context else {}
             if graph.get("expected_rule_tokens"):
                 from backend.app.services.rubrics.review_workspace import content_token
                 current_rules = session.scalars(select(models.AtomicRule).join(models.RubricVersion).where(
@@ -2085,6 +2134,7 @@ def persist_prepared_import(
                     creation_method=value["creation_method"],
                     ai_origin=bool(value.get("ai_origin") or value["creation_method"] == "llm"),
                     ai_model=value.get("ai_model"),
+                    scope=deepcopy(value.get("scope")),
                     reviewed_by=None,
                     reviewed_at=None,
                 )
@@ -2120,6 +2170,9 @@ def persist_prepared_import(
                 )
                 session.add(link)
             session.flush()
+            if previous_scopes:
+                carry_rule_scopes(rule_by_code.values(), previous_scopes)
+                session.flush()
             if previous_reviews:
                 carry_confirmed_rows(session, rubric.id, rule_by_code.values(),
                                      previous_reviews, predecessor.id, actor_id)

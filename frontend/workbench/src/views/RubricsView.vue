@@ -9,6 +9,7 @@ import { canPublishRubric, canSubmitReview, compilationReady, isScoringCompleten
 import AiRuleDraftPanel from "@/components/AiRuleDraftPanel.vue";
 import ParseCoveragePanel from "@/components/ParseCoveragePanel.vue";
 import RuleAuditPanel from "@/components/RuleAuditPanel.vue";
+import RuleScopePanel from "@/components/RuleScopePanel.vue";
 import StructureSuggestionPanel from "@/components/StructureSuggestionPanel.vue";
 import SourceReviewPanel from '@/components/SourceReviewPanel.vue';
 import TableRecognitionPanel from '@/components/TableRecognitionPanel.vue';
@@ -309,7 +310,7 @@ async function cancelImportSession() {
 /**
  * 跟踪一个后台 AI 任务（审查、结构识别）：轮询到结束为止（页面隐藏时暂停），结束时
  * 调用一次 `onFinish`。刷新或关页面不影响任务，回到页面时由 resume 接着跟踪。
- * @param {"review"|"structure"|"import"} key
+ * @param {"review"|"structure"|"import"|"scope"} key
  * @param {(task: any) => unknown} onFinish
  * @param {(message: string) => void} report
  */
@@ -461,6 +462,28 @@ const reviewTracker = aiTaskTracker("review", async (task) => {
   const latest = await store.loadRuleReview(id);
   if (selected.value === id) ruleReview.value = latest;
 }, (message) => { parseError.value = message; });
+
+// 适用范围识别（docs/评分细则适用范围方案.md 第 6 节）：完成后重新读取草稿，规则上显示新范围。
+// 识别完成只重新读取审查工作区，不重建编辑表单：范围不进 content_token，编辑器上的范围显示
+// 直接取工作区（ruleScopes），所以识别期间或读取途中做的修改都不会被覆盖，照常可以保存。
+const scopeTracker = aiTaskTracker("scope", async (task) => {
+  const id = selected.value;
+  if (task.status !== "succeeded" || !id || task.rubric_id !== id) return;
+  const latest = await api.get(`/rubrics/${id}/review-workspace`);
+  if (selected.value === id && latest.compilation_id === workspace.value?.compilation_id) workspace.value = latest;
+}, (message) => { parseError.value = message; });
+/** 规则编号 → 只读的适用范围显示；来自审查工作区，不在编辑表单里。 */
+const ruleScopes = computed(() => Object.fromEntries((workspace.value?.rules || []).map((rule) =>
+  [rule.id, { scope: rule.scope, scope_label: rule.scope_label }])));
+const unscopedRuleCount = computed(() => (workspace.value?.rules || []).filter((rule) =>
+  rule.judge_type === "semantic" && rule.status !== "rejected" && !rule.scope).length);
+const runScopeIdentification = () => parseAction(async (id) => {
+  await scopeTracker.track(await store.startScopeIdentification(id, { connectionId: draftConnection.value || null }));
+});
+/** @param {"cancel"|"retry"} action */
+const scopeAction = (action) => parseAction(async () => {
+  await scopeTracker.track(await store.aiTaskAction("scope", action));
+});
 
 const suggestStructure = ({ dryRun }) => parseAction(async (id) => {
   if (dryRun) { structureEstimate.value = (await store.estimateStructure(id)).estimate; return; }
@@ -792,6 +815,7 @@ const structuralMessages = {
   weight_policy_invalid: '评分项满分或权重与总分不一致，请在第 1 步核对。',
   rule_rejection_audit_missing: '已排除的细则缺少排除记录，请恢复后重新排除。',
   rule_rejection_audit_mismatch: '已排除的细则与排除记录不一致，请恢复后重新排除。',
+  mutex_definition_invalid: '互斥组里参与评分的细则不足 2 条（或跨评分项、含分档细则）。请在原子规则编辑里清空这条细则的互斥组，或补齐同组的其他档。',
 };
 const activeIssues = computed(() => [...(draft.value?.active_compilation?.blockers || []),
   ...(workspace.value?.structural_blockers || []).map(issue => ({ ...issue, message: structuralMessages[issue.code] || issue.message, criterion_code: issue.identity?.criterion_code }))]);
@@ -896,11 +920,11 @@ async function refreshDetail(id = selected.value) {
       total_score: full.total_score, criteria: structuredClone(full.criteria || []) };
     if (nextWorkspace.atomic_editing) editForm.value.atomic_rules = nextWorkspace.rules.map((rule) => ({
       id: rule.id, content_token: rule.content_token, criterion_id: rule.criterion_id,
-      rule_code: rule.rule_code, judge_scope: rule.judge_scope, judge_scope_hint: rule.judge_scope_hint,
+      rule_code: rule.rule_code,
       changes: Object.fromEntries([
         'name','rule_text','direction','effect_type','max_points','repeat_policy','cap_points',
         'judge_type','checker_key','checker_params','evidence_policy','positive_example',
-        'negative_example','boundary_example','strictness','applies_to','mutex_group',
+        'negative_example','boundary_example','strictness','mutex_group',
         'depends_on_rule_codes','levels',
       ].map((key) => [key, structuredClone(rule[key])])),
     }));
@@ -1041,6 +1065,7 @@ async function saveAndValidate() {
 watch(selected, async (id) => {
   classificationProgress.value = null; classificationPoller.stop(); store.classificationTask = null;
   structureTracker.stop(); reviewTracker.stop(); store.structureTask = null; store.ruleReviewTask = null;
+  scopeTracker.stop(); store.scopeTask = null;
   workspace.value = null; coverage.value = null; draft.value = null;
   selectedCriterion.value = null; sourceMode.value = true; sourceFilter.value = "pending"; chosenVisibility.value = null;
   editForm.value = null; reviewError.value = null; reviewNotice.value = null;
@@ -1059,8 +1084,10 @@ watch(selected, async (id) => {
       await store.resumeDraftTasks(id); watchDraftTasks();
       const classification = await store.resumeClassificationTask(id);
       if (classification && selected.value === id) await trackClassification(id, classification);
-      const { review, structure } = await store.resumeReviewTasks(id);
-      if (selected.value === id) { await reviewTracker.track(review); await structureTracker.track(structure); }
+      const { review, structure, scope } = await store.resumeReviewTasks(id);
+      if (selected.value === id) {
+        await reviewTracker.track(review); await structureTracker.track(structure); await scopeTracker.track(scope);
+      }
     }
     catch (err) { if (!(err instanceof StaleContextError)) draftError.value = err instanceof Error ? err.message : "读取起草任务失败"; }
   }
@@ -1096,7 +1123,7 @@ onMounted(async () => {
 });
 onUnmounted(() => {
   loadSequence += 1; draftPoller.stop(); classificationPoller.stop();
-  structureTracker.stop(); reviewTracker.stop(); importStructureTracker.stop();
+  structureTracker.stop(); reviewTracker.stop(); importStructureTracker.stop(); scopeTracker.stop();
   window.removeEventListener("beforeunload", beforeUnload);
 });
 </script>
@@ -1263,7 +1290,7 @@ onUnmounted(() => {
             <RuleReviewPanel v-if="activeCriterion && workspace" :criterion="activeCriterion" :rules="criterionRules" :busy="operationBusy" :editable="editable"
               :defer-confirmation="hasPendingAiDraft" @confirm="confirmRules([$event])" @confirm-all="confirmRules"
               @exclude="setRuleExcluded($event, true)" @restore="setRuleExcluded($event, false)" />
-            <AtomicRuleEditor v-if="editForm?.atomic_rules && current.status === 'draft'" :rules="editForm.atomic_rules.filter(r => r.criterion_id === selectedCriterion)" :disabled="!canEdit || operationBusy" />
+            <AtomicRuleEditor v-if="editForm?.atomic_rules && current.status === 'draft'" :rules="editForm.atomic_rules.filter(r => r.criterion_id === selectedCriterion)" :scopes="ruleScopes" :disabled="!canEdit || operationBusy" />
             <details v-else-if="editableCriterion && current.status === 'draft'" class="card card-pad">
               <summary>修改 {{ activeCriterion?.code }} 的评分细则</summary>
               <p class="faint">保存会生成新的执行草稿；新条款需重新核对确认。</p>
@@ -1321,6 +1348,9 @@ onUnmounted(() => {
             </div>
             <p v-if="publishError" class="notice notice-danger" role="alert">{{ publishError }}</p>
           </section>
+          <RuleScopePanel v-if="step === 3 && current.status === 'draft'" :pending="unscopedRuleCount"
+            :busy="operationBusy" :editable="canEdit" :dirty="Boolean(dirty)" :task="store.scopeTask"
+            @run="runScopeIdentification" @task-action="scopeAction" />
           <RuleAuditPanel v-if="step === 3 && current.status !== 'published'" :review="ruleReview" :estimate="ruleEstimate"
             :busy="operationBusy" :editable="canEdit" :connection-id="draftConnection" :task="store.ruleReviewTask"
             @estimate="estimateReview" @run="runReview" @dismiss="dismissFinding" @task-action="reviewAction" />

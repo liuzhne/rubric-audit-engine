@@ -3219,7 +3219,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "rule_draft" | "unit_classification" | "rule_review" | "structure_suggestion";
+            kind: "rule_draft" | "unit_classification" | "rule_review" | "structure_suggestion" | "rule_scope";
             /** Params */
             params?: {
                 [key: string]: unknown;
@@ -3716,6 +3716,8 @@ export interface components {
             name: string;
             /** Owner Id */
             owner_id?: string | null;
+            /** Owner Name */
+            owner_name?: string | null;
             /** Paper Type */
             paper_type?: string | null;
             /** Rubric Id */

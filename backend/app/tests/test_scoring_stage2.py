@@ -18,6 +18,7 @@ from backend.app.services.scoring.core.contracts import derive_evidence_unit_id
 from backend.app.services.scoring.core.rule_executor import EVIDENCE_INSUFFICIENT_CODE
 from backend.app.services.scoring.core.rule_executor import _prompt_envelope
 from backend.app.services.scoring.retrieval import judge_scope
+from backend.app.services.scoring.retrieval import section_roles
 from backend.app.services.scoring.retrieval.selection import TOKEN_POLICY_VERSION
 from backend.app.services.scoring.retrieval.selection import VIEW_TOKEN_POLICY_VERSION
 from backend.app.services.scoring.retrieval.selection import TokenBudgetError
@@ -164,53 +165,82 @@ def test_unknown_budget_target_is_rejected():
         build_v4_envelope(_paper_envelope(), top_k=3, budget_target="whole", **BUDGET)
 
 
-# ── 分期 B：判定范围 ────────────────────────────────────────────────
+# ── 分期 B：判定范围（docs/评分细则适用范围方案.md 第 8 节） ─────────────
+
+
+def _scoped_rule(scope_type, sections, **text):
+    """@5 规则：范围来自细则自带的 scope，不再从 applies_to 或规则文字推断。"""
+
+    return {"schema_version": "atomic-rule-snapshot@5", **(text or CROSS_RULE_TEXT),
+            "scope": {"type": scope_type, "sections": list(sections)}}
+
+
+def _thesis_envelope(rule, *, roles=None):
+    """毕业论文 Profile 的信封：章节角色按毕业论文词表对应。"""
+
+    content_hash = _base_mapping()["evidence_units"][0]["normalized_content_hash"]
+    value = _envelope(units=_paper_units(content_hash), rule=rule).to_mapping()
+    value["runtime_identity"]["profile_key"] = "thesis"
+    if roles is not None:
+        value["profile_prompt_extensions"]["section_roles"] = {"version": "section-role-map@1", "headings": roles}
+    return PromptEnvelopeV3.from_mapping(value)
 
 
 @pytest.mark.parametrize(
     ("rule", "expected"),
     [
-        ({"judge_type": "semantic", **CROSS_RULE_TEXT}, ("cross_section", ["绪论", "结论"])),
-        ({"judge_type": "semantic", "name": "摘要与正文结论一致", "rule_text": ""}, ("cross_section", ["摘要", "结论"])),
-        # 只提到一个章节、或没有“一致/回应”类词，都不算跨章节。
-        ({"judge_type": "semantic", "name": "结论与实验数据不符", "rule_text": ""}, ("document", [])),
-        ({"judge_type": "semantic", "name": "绪论与结论", "rule_text": "分别给出"}, ("document", [])),
-        ({"judge_type": "semantic", "applies_to": "系统设计", "name": "", "rule_text": ""}, ("section", ["系统设计"])),
-        ({"judge_type": "semantic", "applies_to": "绪论、结论", "name": "", "rule_text": ""}, ("cross_section", ["绪论", "结论"])),
-        ({"judge_type": "semantic", "applies_to": "global", **CROSS_RULE_TEXT}, ("cross_section", ["绪论", "结论"])),
-        ({"judge_type": "semantic", "applies_to": "全文", "name": "", "rule_text": ""}, ("document", [])),
-        ({"judge_type": "deterministic", **CROSS_RULE_TEXT}, ("document", [])),
+        ({"judge_type": "semantic", "scope": {"type": "cross_section", "sections": ["绪论", "结论"]}},
+         ("cross_section", ["绪论", "结论"])),
+        ({"judge_type": "semantic", "scope": {"type": "section", "sections": ["系统设计"]}}, ("section", ["系统设计"])),
+        ({"judge_type": "semantic", "scope": {"type": "document", "sections": []}}, ("document", [])),
+        # 不再按 applies_to 或规则文字推断：没有 scope 一律全文。
+        ({"judge_type": "semantic", "applies_to": "系统设计", "name": "", "rule_text": ""}, ("document", [])),
+        ({"judge_type": "semantic", **CROSS_RULE_TEXT}, ("document", [])),
+        ({"judge_type": "deterministic", "scope": {"type": "section", "sections": ["绪论"]}}, ("document", [])),
     ],
 )
-def test_infer_judge_scope(rule, expected):
-    scope = judge_scope.infer_judge_scope(rule)
+def test_rule_scope_comes_only_from_the_snapshot(rule, expected):
+    scope = judge_scope.rule_scope(rule)
     assert (scope["scope"], scope["targets"]) == expected
 
 
 @pytest.mark.parametrize(
-    ("target", "heading", "expected"),
+    ("heading", "expected"),
     [
-        ("绪论", "第1章 绪论", True),
-        ("绪论", "1 引言", True),
-        ("第三章 系统设计", "3 系统设计", True),
-        ("系统设计", "4.2 总体设计", True),
-        ("结论", "第3章 系统设计", False),
-        ("结论", "", False),
+        ("第1章 绪论", "绪论"),
+        ("1 引言", "绪论"),
+        ("4.2 总体设计", "系统设计"),
+        ("第5章 总结与展望", "结论"),
+        ("系统设计与实现", "系统设计"),  # 取命中最长的同义词
+        ("致谢", "致谢"),
+        ("第3章 校园互助", None),
+        ("", None),
     ],
 )
-def test_heading_matches_strips_numbering_and_uses_role_aliases(target, heading, expected):
-    assert judge_scope.heading_matches(target, heading) is expected
+def test_heading_role_strips_numbering_and_uses_the_vocabulary(heading, expected):
+    assert section_roles.heading_role(heading, "thesis") == expected
 
 
 def test_cross_section_selection_takes_evidence_from_each_target_first():
-    envelope = _paper_envelope()
-    value = build_v4_envelope(envelope, top_k=3, judge_scope=True, **BUDGET).to_mapping()
+    value = build_v4_envelope(_thesis_envelope(_scoped_rule("cross_section", ["绪论", "结论"])),
+                              top_k=3, judge_scope=True, **BUDGET).to_mapping()
 
     assert value["coverage_mode"] == "cross_section"
-    assert value["evidence_selection_identity"]["selector_version"].endswith("+judge-scope@1")
+    assert value["evidence_selection_identity"]["selector_version"].endswith("+judge-scope@2")
     first_two = [unit["section_path"][0] for unit in value["evidence_units"][:2]]
     assert first_two == ["第1章 绪论", "第5章 结论"]
     assert all("系统设计" not in unit["section_path"][0] for unit in value["evidence_units"])
+    # 开了范围时，未选的标题路径也列出，用来判断整章与缺章。
+    paths = {tuple(item["section_path"]) for item in value["evidence_selection_identity"]["section_coverage"]}
+    assert ("第3章 系统设计",) in paths
+
+
+def test_section_scope_gives_the_whole_chapter_when_it_fits():
+    value = build_v4_envelope(_thesis_envelope(_scoped_rule("section", ["系统设计"])),
+                              top_k=1, judge_scope=True, **BUDGET).to_mapping()
+    assert value["coverage_mode"] == "section"
+    assert len(value["evidence_units"]) == 3
+    assert {unit["section_path"][0] for unit in value["evidence_units"]} == {"第3章 系统设计"}
 
 
 def test_scope_switch_off_matches_the_unscoped_identity():
@@ -230,32 +260,53 @@ def test_document_scope_rule_is_unchanged_when_the_switch_is_on():
     assert on == off
 
 
-def test_scoped_selection_falls_back_to_the_whole_paper_when_no_section_matches():
-    content_hash = _base_mapping()["evidence_units"][0]["normalized_content_hash"]
-    units = _paper_units(content_hash)
-    selected = judge_scope.select_scoped_units(
-        units,
-        {"scope": "section", "targets": ["参考文献"]},
-        rank=list,
-        top_k=2,
-    )
-    assert selected == units[:2]
+def test_missing_target_is_reported_and_heading_overrides_are_used():
+    missing = build_v4_envelope(_thesis_envelope(_scoped_rule("section", ["参考文献"])),
+                                top_k=3, judge_scope=True, **BUDGET).to_mapping()
+    assert judge_scope.missing_targets(missing) == ["参考文献"]
+
+    # 第 3 章标题词表认不出时，本篇的模型归类结果说它是“需求分析”。
+    rule = _scoped_rule("section", ["需求分析"])
+    plain = build_v4_envelope(_thesis_envelope(rule), top_k=3, judge_scope=True, **BUDGET).to_mapping()
+    assert judge_scope.missing_targets(plain) == ["需求分析"]
+    classified = build_v4_envelope(_thesis_envelope(rule, roles={"第3章 系统设计": "需求分析"}),
+                                   top_k=3, judge_scope=True, **BUDGET).to_mapping()
+    assert judge_scope.missing_targets(classified) == []
+    assert {unit["section_path"][0] for unit in classified["evidence_units"]} == {"第3章 系统设计"}
 
 
-def test_view_reports_scope_targets_and_full_section_path(monkeypatch):
+def test_view_reports_scope_coverage_and_section_roles(monkeypatch):
     monkeypatch.setattr(settings, "SCORING_JUDGE_SCOPE_ENABLED", True)
-    envelope = build_v4_envelope(_paper_envelope(), top_k=3, judge_scope=True, **BUDGET)
+    envelope = build_v4_envelope(_thesis_envelope(_scoped_rule("cross_section", ["绪论", "结论"])),
+                                 top_k=3, judge_scope=True, **BUDGET)
     request = core_view.build_core_request(envelope)
     view = json.loads(request.user)
 
-    assert view["scope"] == {
-        "type": "cross_section",
-        "targets": [{"name": "绪论", "evidence": 2}, {"name": "结论", "evidence": 1}],
-    }
+    assert view["scope"] == {"type": "cross_section", "sections": [
+        {"role": "绪论", "headings": ["第1章 绪论"], "coverage": "complete"},
+        {"role": "结论", "headings": ["第5章 结论"], "coverage": "complete"},
+    ]}
     sections = {item["section"] for item in view["evidence"]}
     assert "第5章 结论 › 5.1 总结" in sections
-    assert {item["target"] for item in view["evidence"]} == {"绪论", "结论"}
-    assert "scope.targets" in request.system
+    assert {item["section_role"] for item in view["evidence"]} == {"绪论", "结论"}
+    assert "coverage=complete" in request.system and "不能判缺失" in request.system
+    # 开了范围，扣分规则就允许“证据不足”（分档规则仍必须选档）。
+    deduct = build_v4_envelope(
+        _thesis_envelope(_scoped_rule("cross_section", ["绪论", "结论"], **{**CROSS_RULE_TEXT, **DEDUCT_RULE})),
+        top_k=3, judge_scope=True, **BUDGET)
+    assert "insufficient_evidence" in core_view.build_core_request(deduct).schema["properties"]["status"]["enum"]
+
+
+def test_view_marks_a_partial_chapter(monkeypatch):
+    monkeypatch.setattr(settings, "SCORING_JUDGE_SCOPE_ENABLED", True)
+    envelope = _thesis_envelope(_scoped_rule("section", ["系统设计"]))
+    value = build_v4_envelope(envelope, top_k=1, judge_scope=True, **BUDGET).to_mapping()
+    value["evidence_units"] = value["evidence_units"][:1]
+    value["evidence_selection_identity"]["section_coverage"] = [
+        {**item, "selected_unit_count": 1, "complete": False} if item["section_path"] == ["第3章 系统设计"] else item
+        for item in value["evidence_selection_identity"]["section_coverage"]
+    ]
+    assert judge_scope.scope_view([value["atomic_rule_snapshot"]], value)["sections"][0]["coverage"] == "partial"
 
 
 def test_view_is_unchanged_while_the_scope_switch_is_off():
@@ -264,7 +315,7 @@ def test_view_is_unchanged_while_the_scope_switch_is_off():
     view = json.loads(request.user)
 
     assert "scope" not in view
-    assert all("›" not in item["section"] and "target" not in item for item in view["evidence"])
+    assert all("›" not in item["section"] and "section_role" not in item for item in view["evidence"])
     assert request.system == core_view._SINGLE_INSTRUCTIONS
     assert core_view.provider_prompt_suffix() == ""
 
@@ -385,7 +436,7 @@ def test_insufficient_evidence_with_a_finding_is_invalid():
 def test_prompt_suffix_covers_both_switches(monkeypatch):
     monkeypatch.setattr(settings, "SCORING_JUDGE_SCOPE_ENABLED", True)
     monkeypatch.setattr(settings, "SCORING_INSUFFICIENT_EVIDENCE_MODE", "review")
-    assert core_view.provider_prompt_suffix() == "+judge-scope@1+insufficient@1"
+    assert core_view.provider_prompt_suffix() == "+rule-scope@1+insufficient@1"
     group = core_view._group_instructions()
     assert group.endswith(core_view._GROUP_INSTRUCTIONS[len(core_view._COMMON_INSTRUCTIONS):])
     assert deepcopy(core_view._statuses())[-1] == "insufficient_evidence"

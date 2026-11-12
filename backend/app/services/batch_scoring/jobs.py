@@ -126,6 +126,7 @@ THINKING_NOT_DISABLED_MESSAGE = (
     "模型没有按运行设置关闭思考：运行身份记的是「不思考」，应答里却观测到推理 token，"
     "评分结果不能如实复现，本篇已停止，同一任务里尚未开始的材料也已停止、不再花费。"
     "请换一个能关闭思考的模型，或把连接的思考设置改为开启并调大输出上限，然后新建评分任务。"
+    "如果连接没有配置思考设置，可能是模型能力表把这个模型记成了可以关闭思考，请把这条信息转告管理员核对。"
 )
 THINKING_STOPPED_ITEM_MESSAGE = (
     "同一任务里另一份材料发现模型没有按设置关闭思考，本份尚未开始，已随任务停止，未产生费用。"
@@ -276,7 +277,7 @@ def get_latest_batch_scoring_job(session, batch_id):
     )
 
 
-def list_attention_batch_scoring_jobs(session, *, organization_id=None):
+def list_attention_batch_scoring_jobs(session, *, organization_id=None, owner_id=None):
     """List the latest active or failed execution for each visible batch."""
     recent_failure_cutoff = utcnow() - timedelta(hours=ATTENTION_FAILURE_HOURS)
     latest_generation = (
@@ -307,6 +308,9 @@ def list_attention_batch_scoring_jobs(session, *, organization_id=None):
     )
     if organization_id is not None:
         query = query.where(GradingBatch.organization_id == organization_id)
+    if owner_id is not None:
+        # 教师只看自己任务的作业；能看全组织的身份由调用方传 None。
+        query = query.where(GradingBatch.owner_id == owner_id)
     return list(session.scalars(query).all())
 
 
