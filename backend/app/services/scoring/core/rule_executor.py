@@ -53,6 +53,12 @@ def _decimal_text(value: Decimal | str | int) -> str:
 # 所属评分项转人工（docs/论文评分第二阶段改造方案.md 第 6 节）。
 EVIDENCE_INSUFFICIENT_CODE = "RULE_EVIDENCE_INSUFFICIENT"
 _EVIDENCE_INSUFFICIENT_MARK = "_evidence_insufficient"
+# 适用范围（docs/评分细则适用范围方案.md 第 8.3、8.5 节）：目标章节在论文里找不到时不调用模型；
+# 多章对照判 triggered 却没引用到两章时不采用。两者都记为 not_triggered 加一条 review 级问题，
+# 所属评分项转人工，与“证据不足”同一条路径。
+SCOPE_SECTION_MISSING_CODE = "RULE_SCOPE_SECTION_MISSING"
+SCOPE_CITATION_INCOMPLETE_CODE = "RULE_SCOPE_CITATION_INCOMPLETE"
+_SCOPE_REVIEW_MARK = "_scope_review"
 
 
 def _issue(code, severity, criterion_code, rule_code, message):
@@ -95,7 +101,8 @@ def _validate_profile(profile, request):
 
 
 def _prompt_envelope(
-    *, request, node, profile, selection_rules=None, criterion_rules=None, selection_report=None
+    *, request, node, profile, selection_rules=None, criterion_rules=None, selection_report=None,
+    section_roles=None,
 ):
     build_extensions = getattr(profile, "build_prompt_extensions", None)
     if not callable(build_extensions):
@@ -131,11 +138,14 @@ def _prompt_envelope(
                 "document_snapshot_hash": document["document_snapshot_hash"],
             },
             "evidence_units": _plain(document["evidence_units"]),
-            "profile_prompt_extensions": _plain(
-                build_extensions(
-                    submission_snapshot=_plain(submission),
-                    document_snapshot=_plain(document),
-                )
+            "profile_prompt_extensions": _with_section_roles(
+                _plain(
+                    build_extensions(
+                        submission_snapshot=_plain(submission),
+                        document_snapshot=_plain(document),
+                    )
+                ),
+                section_roles,
             ),
         }
     )
@@ -151,6 +161,79 @@ def _prompt_envelope(
             kwargs["selection_report"] = selection_report
         return build_provider_envelope(base_envelope=envelope, **kwargs)
     return envelope
+
+
+def _with_section_roles(extensions, section_roles):
+    """本篇论文冻结的章节角色归类写进信封扩展（进入判定身份，同一篇论文的规则共用）。"""
+
+    if section_roles is None or not isinstance(extensions, dict):
+        return extensions
+    return {**extensions, "section_roles": deepcopy(section_roles)}
+
+
+def _scope_policy(profile):
+    """Profile 注入的适用范围判断（``rule_scope_policy``）；没有时不应用范围。"""
+
+    return getattr(profile, "rule_scope_policy", None)
+
+
+def _section_role_map(value, nodes_by_code, llm_runtime, profile):
+    policy = _scope_policy(profile)
+    if policy is None:
+        return None
+    return policy.section_role_map(
+        value=value,
+        rules=[node["atomic_rule_snapshot"] for node in nodes_by_code.values()],
+        llm_runtime=llm_runtime,
+    )
+
+
+def _same_scope_rules(rules, rule):
+    """共用一次证据选择的评分项规则只限范围相同的：范围不同的规则要看的段落不同。"""
+
+    if rules is None:
+        return None
+    mine = rule.get("scope")
+    return [item for item in rules if item.get("scope") == mine]
+
+
+def _scope_missing(envelope, profile):
+    policy = _scope_policy(profile)
+    return list(policy.missing_sections(envelope)) if policy is not None else []
+
+
+def _scope_missing_decision(plan, rule, missing):
+    decision = _decision_skeleton(plan, rule, status="not_triggered")
+    decision["calculated_effect"] = None if rule["direction"] == "none" else "0"
+    decision[_SCOPE_REVIEW_MARK] = (
+        SCOPE_SECTION_MISSING_CODE,
+        "scope section not found in the submission: " + "、".join(missing),
+    )
+    return decision
+
+
+def _checked_scope_citations(decision, envelope, rule, profile):
+    """多章对照判 triggered 时，引用必须覆盖至少两个目标章节；否则不采用这次判定。"""
+
+    policy = _scope_policy(profile)
+    if policy is None or not isinstance(decision, dict) or decision.get("status") != "triggered":
+        return decision
+    if policy.citations_cover_targets(decision, envelope, rule):
+        return decision
+    decision.update(
+        {
+            "status": "not_triggered",
+            "selected_level_code": None,
+            "evidence_refs": [],
+            "occurrences": [],
+            "calculated_effect": None if rule["direction"] == "none" else "0",
+        }
+    )
+    decision[_SCOPE_REVIEW_MARK] = (
+        SCOPE_CITATION_INCOMPLETE_CODE,
+        "cross-section decision did not cite two target sections",
+    )
+    return decision
 
 
 def _topological_order(nodes_by_code):
@@ -502,6 +585,7 @@ def _semantic_decision(
     decision_ledger=None,
     execution_journal=None,
     criterion_rules=None,
+    section_roles=None,
 ):
     rule = node["atomic_rule_snapshot"]
     report = {}
@@ -511,7 +595,13 @@ def _semantic_decision(
         profile=profile,
         criterion_rules=criterion_rules,
         selection_report=report,
+        section_roles=section_roles,
     )
+    missing = _scope_missing(envelope, profile)
+    if missing:
+        decision = _scope_missing_decision(request["plan"], rule, missing)
+        _attach_selection(decision, report)
+        return decision, None, None
     decision, error, message = _semantic_decision_for_envelope(
         request=request,
         rule=rule,
@@ -521,6 +611,8 @@ def _semantic_decision(
         decision_ledger=decision_ledger,
         execution_journal=execution_journal,
     )
+    if error is None:
+        decision = _checked_scope_citations(decision, envelope, rule, profile)
     _attach_selection(decision, report)
     return decision, error, message
 
@@ -665,6 +757,7 @@ def _judge_semantic_group(
     decision_ledger=None,
     execution_journal=None,
     criterion_rules=None,
+    section_roles=None,
 ):
     """Judge all tiers of one mutex group in one provider call.
 
@@ -683,6 +776,7 @@ def _judge_semantic_group(
             selection_rules=rules,
             criterion_rules=criterion_rules,
             selection_report=report,
+            section_roles=section_roles,
         )
         for node, report in zip(nodes, reports)
     ]
@@ -692,6 +786,12 @@ def _judge_semantic_group(
     first_units = envelopes[0].to_mapping()["evidence_units"]
     if any(envelope.to_mapping()["evidence_units"] != first_units for envelope in envelopes[1:]):
         return None
+    missing = _scope_missing(envelopes[0], profile)
+    if missing:
+        return {
+            rule["rule_code"]: (_scope_missing_decision(request["plan"], rule, missing), None, None)
+            for rule in rules
+        }
     identity = _group_identity(
         group_code, [rule_decision_identity(envelope) for envelope in envelopes]
     )
@@ -701,13 +801,16 @@ def _judge_semantic_group(
             return None
         trial = dict(occurrence_payloads)
         results = {}
-        for rule in rules:
-            results[rule["rule_code"]] = _semantic_decision_from_response(
+        for rule, envelope in zip(rules, envelopes):
+            decision, error, message = _semantic_decision_from_response(
                 request=request,
                 rule=rule,
                 response=responses.get(rule["rule_code"]),
                 occurrence_payloads=trial,
             )
+            if error is None:
+                decision = _checked_scope_citations(decision, envelope, rule, profile)
+            results[rule["rule_code"]] = (decision, error, message)
         if all(error is None for _decision, error, _message in results.values()):
             occurrence_payloads.update(trial)
         return results
@@ -1110,10 +1213,15 @@ def _criterion_results(*, order, nodes_by_code, decisions, issues):
 
         mode = criterion["assessment_mode"]
         rule_codes = {rule["rule_code"] for rule in rules}
+        # 证据不足与适用范围的两种复核（找不到章节、多章对照没引用到两章）同样转人工。
         insufficient_rules = {
             issue["rule_code"]
             for issue in issues
-            if issue["code"] == EVIDENCE_INSUFFICIENT_CODE
+            if issue["code"] in {
+                EVIDENCE_INSUFFICIENT_CODE,
+                SCOPE_SECTION_MISSING_CODE,
+                SCOPE_CITATION_INCOMPLETE_CODE,
+            }
             and issue["rule_code"] in rule_codes
         }
         review_triggered = bool(insufficient_rules) or any(
@@ -1296,6 +1404,7 @@ def execute_rule_plan(
     )
     group_results = {}
     semantic_rules_by_criterion = {}
+    section_roles = _section_role_map(value, nodes_by_code, llm_runtime, profile)
     for code in order:
         node = nodes_by_code[code]
         if node["atomic_rule_snapshot"]["judge_type"] == "semantic":
@@ -1341,7 +1450,7 @@ def execute_rule_plan(
                     occurrence_payloads=occurrence_payloads,
                 )
             elif rule["judge_type"] == "semantic":
-                criterion_rules = semantic_rules_by_criterion.get(criterion_code)
+                criterion_rules = _same_scope_rules(semantic_rules_by_criterion.get(criterion_code), rule)
                 result = None
                 group = groups.get(code)
                 if group is not None:
@@ -1357,6 +1466,7 @@ def execute_rule_plan(
                             decision_ledger=decision_ledger,
                             execution_journal=execution_journal,
                             criterion_rules=criterion_rules,
+                            section_roles=section_roles,
                         )
                     if group_results[key] is not None:
                         result = group_results[key][code]
@@ -1370,6 +1480,7 @@ def execute_rule_plan(
                         decision_ledger=decision_ledger,
                         execution_journal=execution_journal,
                         criterion_rules=criterion_rules,
+                        section_roles=section_roles,
                     )
                 decision, error, message = result
             else:
@@ -1387,6 +1498,7 @@ def execute_rule_plan(
                 type(exc).__name__,
             )
         insufficient = bool(decision.pop(_EVIDENCE_INSUFFICIENT_MARK, False))
+        scope_review = decision.pop(_SCOPE_REVIEW_MARK, None)
         if error:
             decision["status"] = "invalid"
             decision["evidence_refs"] = []
@@ -1405,6 +1517,8 @@ def execute_rule_plan(
                     "evidence does not cover what the rule checks",
                 )
             )
+        elif scope_review is not None:
+            issues.append(_issue(scope_review[0], "review", criterion_code, code, scope_review[1]))
         elif decision["status"] == "triggered":
             if rule["effect_type"] == "review":
                 issues.append(
