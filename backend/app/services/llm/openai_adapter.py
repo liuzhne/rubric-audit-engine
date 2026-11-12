@@ -475,6 +475,9 @@ def _parse_json_output(data):
     text = data.get("output_text")
     if not text:
         text = _extract_output_text(data.get("output") or [])
+    if not text and _has_refusal(data.get("output") or []):
+        # 拒答先于「没有正文」：拒答不重问，按 PROVIDER_OUTPUT_REFUSED 报告。不带拒答原文。
+        raise ResponsesJSONOutputError("refused")
     if not text:
         # 带 reason：规则执行器据此认出「答了但不能用」，可以重问（与 Chat、Messages 一致）。
         raise ResponsesJSONOutputError(
@@ -488,6 +491,17 @@ def _parse_json_output(data):
         raise ResponsesJSONOutputError(
             "invalid_json", "OpenAI response was not valid JSON: %s" % exc
         ) from exc
+
+
+def _has_refusal(output_items) -> bool:
+    """输出里有没有拒答内容（``type="refusal"``）；结构不对的项一律当作没有。"""
+
+    for item in output_items if isinstance(output_items, list) else ():
+        contents = item.get("content") if isinstance(item, dict) else None
+        for content in contents if isinstance(contents, list) else ():
+            if isinstance(content, dict) and content.get("type") == "refusal":
+                return True
+    return False
 
 
 def _extract_output_text(output_items):

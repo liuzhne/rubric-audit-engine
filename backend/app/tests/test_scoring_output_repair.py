@@ -677,3 +677,42 @@ def test_the_paper_runtime_checks_the_group_entry_separately():
     assert ThesisLLMRuntime(_RepairableScorer()).supports_group_repair is False
     # 单条规则的判断不受整组入口影响。
     assert ThesisLLMRuntime(_GroupWithoutRepair()).output_repair_limit > 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"id": "r", "output": [{"type": "message", "content": [{"type": "refusal", "refusal": MARKER}]}]},
+        {"id": "r", "output_text": "", "output": [{"content": [{"type": "refusal", "refusal": MARKER}]}]},
+    ],
+)
+def test_a_responses_refusal_is_a_refusal_not_an_empty_answer(body):
+    from backend.app.services.llm.openai_adapter import _parse_json_output
+    from backend.app.services.scoring.core.rule_executor import _output_invalid_check
+
+    with pytest.raises(ProviderJSONOutputError) as caught:
+        _parse_json_output(body)
+
+    assert caught.value.reason == "refused" and MARKER not in str(caught.value)
+    # 拒答不重问，照旧报成拒答。
+    assert _output_invalid_check(caught.value) is None
+    assert project_rule_execution_failure(caught.value)[0] == "PROVIDER_OUTPUT_REFUSED"
+
+
+@pytest.mark.parametrize(
+    "choice, reason",
+    [
+        ({"message": {"role": "assistant", "content": None, "refusal": MARKER}}, "refused"),
+        ({"finish_reason": "content_filter", "message": {"role": "assistant", "content": ""}}, "refused"),
+        ({"finish_reason": "length", "message": {"role": "assistant", "content": "", "refusal": "x"}}, "output_truncated"),
+        ({"message": {"role": "assistant", "content": "", "refusal": None}}, "empty_content"),
+        ({"message": {"role": "assistant", "content": ""}}, "empty_content"),
+    ],
+)
+def test_a_chat_refusal_is_told_apart_from_an_empty_answer(choice, reason):
+    from backend.app.services.llm.openai_compatible_adapter import _parse_chat_json_output
+
+    with pytest.raises(ProviderJSONOutputError) as caught:
+        _parse_chat_json_output({"id": "c", "choices": [choice]})
+
+    assert caught.value.reason == reason and MARKER not in str(caught.value)

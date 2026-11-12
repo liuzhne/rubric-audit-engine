@@ -467,7 +467,13 @@ def _parse_chat_json_output(data):
         raise ChatJSONOutputError("missing_message")
     text = _message_content_to_text(message.get("content"))
     if not text.strip():
-        raise ChatJSONOutputError("output_truncated" if truncated else "empty_content")
+        if truncated:
+            raise ChatJSONOutputError("output_truncated")
+        # 拒答先于「没有正文」：``message.refusal`` 有内容，或被内容过滤拦下。拒答不重问。
+        refusal = message.get("refusal")
+        if (isinstance(refusal, str) and refusal.strip()) or choice.get("finish_reason") == "content_filter":
+            raise ChatJSONOutputError("refused")
+        raise ChatJSONOutputError("empty_content")
     try:
         return json.loads(_strip_json_fence(text))
     except json.JSONDecodeError as exc:

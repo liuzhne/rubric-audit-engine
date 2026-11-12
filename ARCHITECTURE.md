@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | `openai_adapter._parse_json_output` 与 `openai_compatible_adapter._parse_chat_json_output` 先识别拒答（`refused`）再报没有正文；拒答不进重问 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | `failures.OUTPUT_REPAIR_CHECKS` / `safe_output_check`：内核只认登记过的校验标识；运行时新增 `supports_group_repair`；`core_view.request_input_estimate` 计入重问提示；Responses 的 `_parse_json_output` 改抛带 `reason` 的 `ResponsesJSONOutputError` |
 | 2026-11-12 | 评分模型回答不合格的重问与报错 | 规则执行器在回答不合格时带固定修正提示重问 1 次（`_RepairBudget`，上限来自运行时的 `output_repair_limit`）；适配器的回答校验改抛 `CoreResponseInvalidError`（带 `check`）；`failures` 新增 `PROVIDER_OUTPUT_INVALID` 与出错位置 `where`；无迁移 |
 | 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | 新增 `scoring/retrieval/section_roles.py`（标题对到章节角色）与 `scope_policy.py`（Profile 注入 Core 的三个判断）；`judge_scope.py` 改为只读 `@5` 的 `scope`；规则快照 `@4` 删除、`@5` 新增；执行器加缺章短路与多章引用检查。开关默认关，见 §2026-11-11 小节 |
@@ -2096,3 +2097,9 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - `llm/openai_adapter._parse_json_output` 改抛 `ResponsesJSONOutputError`（`invalid_json` / `empty_content`，消息不变）。
 
 维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 复审）：校验标识集合、整组重问的签名检查、输入估算与两处类型检查。
+
+### 2026-11-13 评分模型回答不合格的重问与报错（#103 第二轮复审）
+
+回答解析的判断顺序（Responses 与 Chat 一致，Messages 原本就是）：截断 → 拒答 → 没有正文 → 不是合法 JSON。只有后两种（`empty_content`、`invalid_json`）会进执行器的重问；拒答报 `refused`，由 `failures` 投影为 `PROVIDER_OUTPUT_REFUSED`。Responses 看输出项里 `type="refusal"` 的内容，Chat 看 `message.refusal` 与 `finish_reason=content_filter`。
+
+维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 第二轮复审）：回答解析先识别拒答。
