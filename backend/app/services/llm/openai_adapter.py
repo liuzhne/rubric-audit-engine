@@ -13,6 +13,7 @@ from backend.app.services.llm.core_view import build_core_request
 from backend.app.services.llm.core_view import compression_summary
 from backend.app.services.llm.core_view import decode_core_group_response
 from backend.app.services.llm.core_view import decode_core_response
+from backend.app.services.llm.core_view import with_repair
 from backend.app.services.llm.core_view import preflight_core_request
 from backend.app.services.llm.errors import ProviderJSONOutputError
 from backend.app.services.llm.legacy_prompts import envelope_score_schema as _envelope_score_schema
@@ -26,8 +27,8 @@ from backend.app.services.llm.usage import observed_usage
 class ResponsesJSONOutputError(ProviderJSONOutputError):
     """Safe completion metadata; never include model content or credentials."""
 
-    def __init__(self, reason):
-        super().__init__(reason, "Responses JSON output: " + reason)
+    def __init__(self, reason, message=None):
+        super().__init__(reason, message or "Responses JSON output: " + reason)
 
 
 class OpenAIResponsesScorer(LLMScorer):
@@ -166,7 +167,11 @@ class OpenAIResponsesScorer(LLMScorer):
             "model": provider["model"],
             **_sampling_controls(sampling),
             "instructions": request.system,
-            "input": request.user,
+            # 重问：原输入一字不改，修正提示另起一条用户消息。
+            "input": request.user if not request.repair_hint else [
+                {"role": "user", "content": request.user},
+                {"role": "user", "content": request.repair_hint},
+            ],
             "max_output_tokens": self._scoring_max_tokens(sampling["max_tokens"]),
             **self.scoring_thinking_plan.fields(),
             "text": {
@@ -185,22 +190,22 @@ class OpenAIResponsesScorer(LLMScorer):
         _raise_if_incomplete(data)
         return _parse_json_output(data)
 
-    def score_core_envelope(self, *, envelope):
+    def score_core_envelope(self, *, envelope, repair=None):
         """Score one immutable PromptEnvelopeV3/V4 semantic rule via its view."""
 
         envelope, provider = self._validated_core(envelope)
-        request = build_core_request(envelope)
+        request = with_repair(build_core_request(envelope), repair)
         raw = self._post_core_request(
             envelope, provider, request, schema_name="semantic_rule_response"
         )
         return decode_core_response(envelope, raw, request)
 
-    def score_core_group(self, *, envelopes, group_code):
+    def score_core_group(self, *, envelopes, group_code, repair=None):
         """Judge every tier of one mutex group in a single request."""
 
         validated = [self._validated_core(envelope) for envelope in envelopes]
         envelopes = [envelope for envelope, _provider in validated]
-        request = build_core_group_request(envelopes, group_code=group_code)
+        request = with_repair(build_core_group_request(envelopes, group_code=group_code), repair)
         raw = self._post_core_request(
             envelopes[0], validated[0][1], request, schema_name="semantic_group_response"
         )
@@ -260,6 +265,9 @@ class OpenAIResponsesScorer(LLMScorer):
         _raise_if_incomplete(data)
         try:
             return _parse_json_output(data)
+        except ProviderJSONOutputError:
+            # 解析已经分好类（拒答、没有正文、非法 JSON）：原样上抛，不能把拒答改报成格式错误。
+            raise
         except ValueError as exc:
             raise ResponsesJSONOutputError("invalid_json") from exc
 
@@ -467,17 +475,37 @@ def _input_payload(paper, criterion, evidence_candidates, structure_checks, anch
 
 
 def _parse_json_output(data):
+    if _has_refusal(data.get("output") or []):
+        # 有拒答标记就是拒答，即使同时带着正文也不采用（失败关闭）：不重问，按
+        # PROVIDER_OUTPUT_REFUSED 报告，不带拒答原文。
+        raise ResponsesJSONOutputError("refused")
     text = data.get("output_text")
     if not text:
         text = _extract_output_text(data.get("output") or [])
     if not text:
-        raise ValueError("OpenAI response did not contain text output")
+        # 带 reason：规则执行器据此认出「答了但不能用」，可以重问（与 Chat、Messages 一致）。
+        raise ResponsesJSONOutputError(
+            "empty_content", "OpenAI response did not contain text output"
+        )
 
     cleaned = _strip_json_fence(text)
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        raise ValueError("OpenAI response was not valid JSON: %s" % exc) from exc
+        raise ResponsesJSONOutputError(
+            "invalid_json", "OpenAI response was not valid JSON: %s" % exc
+        ) from exc
+
+
+def _has_refusal(output_items) -> bool:
+    """输出里有没有拒答内容（``type="refusal"``）；结构不对的项一律当作没有。"""
+
+    for item in output_items if isinstance(output_items, list) else ():
+        contents = item.get("content") if isinstance(item, dict) else None
+        for content in contents if isinstance(contents, list) else ():
+            if isinstance(content, dict) and content.get("type") == "refusal":
+                return True
+    return False
 
 
 def _extract_output_text(output_items):

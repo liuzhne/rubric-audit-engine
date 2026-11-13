@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from decimal import Decimal
 
+from backend.app.services.llm.errors import CoreResponseInvalidError
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV3
 from backend.app.services.scoring.core.contracts import PromptEnvelopeV4
 
@@ -21,6 +22,46 @@ from backend.app.services.scoring.core.contracts import PromptEnvelopeV4
 # paper digest, rule wording) and mutex-group requests.
 CORE_PROVIDER_PROMPT_VERSION = "core-semantic-provider@3"
 CORE_RESPONSE_SCHEMA = "atomic-rule-decisions@1"
+
+# 回答不合格时的重问（docs/评分模型回答不合格的重问与报错方案.md 第 4.3 节）。键是校验标识
+# ``check``；提示是固定文字，绝不拼接模型上一次的回答。首次请求不含这些文字，所以它们不进
+# 判定身份，改动只升这个版本号（只写日志）。
+OUTPUT_REPAIR_VERSION = "core-output-repair@1"
+_REPAIR_TAIL = "判断依据和其余要求不变，请重新回复。"
+OUTPUT_REPAIR_HINTS = {
+    "json": "上一次回复不是一个合法的 JSON 对象。请只输出一个 JSON 对象，不要输出其它文字或 Markdown。",
+    "fields": "上一次回复缺少必填字段，或含有未声明的字段。请严格按要求的 JSON 结构回复：要求的字段必须全部出现，不得增加其它字段。",
+    "status": "上一次回复的 status 不在允许的取值内。status 只能使用要求中列出的取值。",
+    "non_triggered_has_decision": (
+        "上一次回复的 status 不是 triggered，却给出了档位、选中的规则或 occurrences。"
+        "status 不是 triggered 时，level_code（互斥组为 selected_rule_code）必须为 null，occurrences 必须为空数组。"
+    ),
+    "triggered_without_evidence": (
+        "上一次回复判为 triggered，却没有给出证据。判 triggered 时 occurrences 至少包含一处，"
+        "每处至少一条证据；找不到证据时不要判 triggered。"
+    ),
+    "evidence": (
+        "上一次回复引用的证据不合格。证据只能取自给出的 evidence：evidence_ref 必须是其中出现的 ref，"
+        "quote 必须是该段落中逐字、连续的原文，type 必须是 source_quote。"
+    ),
+    "level": (
+        "上一次回复的 level_code 不合格。按档位选择的规则判 triggered 时必须从给出的档位中选一个；"
+        "其它规则的 level_code 必须为 null。"
+    ),
+    "finding_code": "上一次回复使用了未列出的 finding_code。finding_code 只能取要求中列出的值。",
+    "rule_code": "上一次回复里的 rule_code、group_code 或 selected_rule_code 与要求的不一致。请原样使用要求中给出的编码。",
+}
+
+
+def output_repair_hint(check) -> str | None:
+    """``check`` 对应的固定修正提示；不认识的标识返回 None（不重问）。"""
+
+    hint = OUTPUT_REPAIR_HINTS.get(check) if isinstance(check, str) else None
+    return None if hint is None else hint + _REPAIR_TAIL
+
+
+def _invalid(check: str, message: str) -> CoreResponseInvalidError:
+    return CoreResponseInvalidError(check, message)
 
 
 def _decimal_text(value) -> str:
@@ -343,7 +384,7 @@ def normalize_core_provider_response(
 
     value = _core_envelope(envelope).to_mapping()
     if not isinstance(response, Mapping):
-        raise TypeError("Core provider response must be an object")
+        raise _invalid("fields", "Core provider response must be an object")
     required = {
         "schema_version",
         "rule_code",
@@ -355,9 +396,9 @@ def normalize_core_provider_response(
     if allow_basis:
         keys.discard("basis")
     if keys != required:
-        raise ValueError("Core provider response has invalid fields")
+        raise _invalid("fields", "Core provider response has invalid fields")
     if response["schema_version"] != "semantic-rule-response@2":
-        raise ValueError("Core provider response schema_version is unsupported")
+        raise _invalid("fields", "Core provider response schema_version is unsupported")
     units = {
         item["evidence_unit_id"]: item for item in value["evidence_units"]
     }
@@ -366,21 +407,21 @@ def normalize_core_provider_response(
 
     rule = value["atomic_rule_snapshot"]
     if response["rule_code"] != rule["rule_code"]:
-        raise ValueError("Core provider response named an unauthorized rule")
+        raise _invalid("rule_code", "Core provider response named an unauthorized rule")
     status = response["status"]
     allowed_statuses = {"triggered", "not_triggered", "not_applicable"}
     if allow_insufficient:
         allowed_statuses.add("insufficient_evidence")
-    if status not in allowed_statuses:
-        raise ValueError("Core provider response status is invalid")
+    if not isinstance(status, str) or status not in allowed_statuses:
+        raise _invalid("status", "Core provider response status is invalid")
 
     raw_occurrences = response["occurrences"]
     if not isinstance(raw_occurrences, list):
-        raise TypeError("Core provider response occurrences must be an array")
+        raise _invalid("fields", "Core provider response occurrences must be an array")
     level_code = response["level_code"]
     if status != "triggered":
         if level_code is not None or raw_occurrences:
-            raise ValueError("non-triggered Core response must not contain a decision")
+            raise _invalid("non_triggered_has_decision", "non-triggered Core response must not contain a decision")
         return {
             "schema_version": "semantic-rule-response@2",
             "rule_code": rule["rule_code"],
@@ -390,16 +431,16 @@ def normalize_core_provider_response(
             **extras,
         }
     if not raw_occurrences:
-        raise ValueError("triggered Core response must contain evidence")
+        raise _invalid("triggered_without_evidence", "triggered Core response must contain evidence")
 
     if rule["direction"] == "band":
         allowed_levels = {
             item["level_code"] for item in rule.get("levels", ()) or ()
         }
-        if level_code not in allowed_levels:
-            raise ValueError("Core provider response selected an unauthorized level")
+        if not isinstance(level_code, str) or level_code not in allowed_levels:
+            raise _invalid("level", "Core provider response selected an unauthorized level")
     elif level_code is not None:
-        raise ValueError("non-band Core response must not select a level")
+        raise _invalid("level", "non-band Core response must not select a level")
 
     allowed_codes = set(_allowed_finding_codes(rule))
     occurrences = []
@@ -408,13 +449,14 @@ def normalize_core_provider_response(
             "finding_code",
             "evidence",
         }:
-            raise ValueError("Core provider occurrence has invalid fields")
+            raise _invalid("fields", "Core provider occurrence has invalid fields")
         finding_code = occurrence["finding_code"]
-        if finding_code not in allowed_codes:
-            raise ValueError("Core provider response named an unauthorized finding")
+        # 先看类型：数组等不可哈希的值查集合会抛 TypeError，应当按回答不合格拒绝。
+        if not isinstance(finding_code, str) or finding_code not in allowed_codes:
+            raise _invalid("finding_code", "Core provider response named an unauthorized finding")
         raw_evidence = occurrence["evidence"]
         if not isinstance(raw_evidence, list) or not raw_evidence:
-            raise ValueError("Core provider occurrence must contain evidence")
+            raise _invalid("triggered_without_evidence", "Core provider occurrence must contain evidence")
         evidence = []
         referenced_units = []
         for item in raw_evidence:
@@ -423,10 +465,11 @@ def normalize_core_provider_response(
                 "evidence_unit_id",
                 "quote",
             }:
-                raise ValueError("Core provider evidence has invalid fields")
+                raise _invalid("evidence", "Core provider evidence has invalid fields")
             if item["type"] != "source_quote":
-                raise ValueError("Core provider evidence type is invalid")
-            unit = units.get(item["evidence_unit_id"])
+                raise _invalid("evidence", "Core provider evidence type is invalid")
+            unit_id = item["evidence_unit_id"]
+            unit = units.get(unit_id) if isinstance(unit_id, str) else None
             quote = item["quote"]
             if (
                 unit is None
@@ -434,7 +477,7 @@ def normalize_core_provider_response(
                 or not quote.strip()
                 or quote.strip() not in unit["normalized_text"]
             ):
-                raise ValueError("Core provider quote is not authorized")
+                raise _invalid("evidence", "Core provider quote is not authorized")
             evidence.append(
                 {
                     "type": "source_quote",
@@ -466,6 +509,9 @@ def normalize_core_provider_response(
 __all__ = [
     "CORE_PROVIDER_PROMPT_VERSION",
     "CORE_RESPONSE_SCHEMA",
+    "OUTPUT_REPAIR_HINTS",
+    "OUTPUT_REPAIR_VERSION",
+    "output_repair_hint",
     "core_envelope_instructions",
     "core_response_json_schema",
     "core_runtime_provider_contract",

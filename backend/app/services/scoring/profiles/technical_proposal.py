@@ -536,7 +536,7 @@ class TechnicalProposalLLMRuntime:
         # 与论文 Profile 相同：身份声明不思考、模型却在思考时，本篇其余调用不再发出。
         self.thinking_guard = ThinkingConsistencyGuard()
 
-    def score(self, *, envelope):
+    def score(self, *, envelope, repair=None):
         from backend.app.services.llm_observability import observation
 
         value = envelope.to_mapping()
@@ -560,16 +560,36 @@ class TechnicalProposalLLMRuntime:
                 ).get("policy_hash"),
             },
         ):
-            return self._score(envelope=envelope, value=value, rule=rule)
+            return self._score(envelope=envelope, value=value, rule=rule, repair=repair)
 
-    def _score(self, *, envelope, value, rule):
+    @property
+    def output_repair_limit(self) -> int:
+        """本篇最多重问几次（回答不合格后带固定修正提示再问）；0 表示不重问。
+
+        评分器的 Core 入口不接受 ``repair``（Mock、旧评分器）时为 0。执行器只读这个数，
+        不直接读配置。
+        """
+
+        import inspect
+
+        from backend.app.core.config import settings
+
+        explicit = getattr(self.scorer, "score_core_envelope", None)
+        try:
+            supported = callable(explicit) and "repair" in inspect.signature(explicit).parameters
+        except (TypeError, ValueError):
+            supported = False
+        return max(0, int(settings.SCORING_OUTPUT_REPAIR_MAX_PER_PAPER)) if supported else 0
+
+    def _score(self, *, envelope, value, rule, repair=None):
         explicit = getattr(self.scorer, "score_core_envelope", None)
         if callable(explicit):
             from backend.app.services.llm.usage import metered_call
 
+            extra = {"repair": repair} if repair else {}
             return metered_call(
                 self.scorer,
-                lambda: explicit(envelope=envelope),
+                lambda: explicit(envelope=envelope, **extra),
                 guard=self.thinking_guard,
                 thinking=value["runtime_identity"]["provider"]["thinking"],
                 on_usage=lambda delta: setattr(self, "last_call_usage", delta),

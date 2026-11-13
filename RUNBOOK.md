@@ -1313,6 +1313,9 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | 一条排错：拒答与回答不合格的区分；无新命令 |
+| 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | 材料级说明不再写「已自动重问」，排错条目改为按 `attempt_count` 判断有没有重问过；无新命令 |
+| 2026-11-12 | 评分模型回答不合格的重问与报错 | 新环境变量 `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER`（默认 5，0 关闭）；新日志 `rule_output_repair`，`rule_execution_failed` 多了 `check` 与 `where`；两条排错；无迁移 |
 | 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | `SCORING_JUDGE_SCOPE_ENABLED` 含义改为按细则适用范围取证据（仍默认关，QWK 后再开）；排错补两种新的复核原因与“开了范围后转人工变多” |
 | 2026-11-11 | 评分细则适用范围（#99 第三轮复审） | 无新命令与排错；页面行为见 ARCHITECTURE 同日条目 |
 | 2026-11-11 | 评分细则适用范围（#99 第二轮复审） | 无新命令；面板说明改为“评分沿用现有取证逻辑” |
@@ -2032,6 +2035,7 @@ npm --prefix frontend/workbench run api:generate
 | `SCORING_DECISION_LEDGER_TTL_DAYS` | `30` | 账本记录的保留天数 |
 | `SCORING_MAX_INPUT_TOKENS_PER_PAPER` | `0`（不限） | 单篇输入 token 上限：开始前按估算拦截，运行中按实际用量截止 |
 | `SCORING_MAX_INPUT_TOKENS_PER_BATCH` | `0`（不限） | 单批输入 token 上限：开始前按估算拦截 |
+| `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER` | `5` | 模型回答没过校验时带固定提示重问：每条规则最多 1 次，每篇最多这么多次；`0` 关闭 |
 
 看用量：
 
@@ -3368,3 +3372,46 @@ from grading_batches;
 测试：`.venv/bin/python -m pytest -q backend/app/tests/test_rule_scope_scoring.py backend/app/tests/test_scoring_stage2.py backend/app/tests/test_scoring_stage2_bc.py`
 
 维护记录：2026-11-11 · 评分细则适用范围（分期 B）：开关含义更新与三条排错。
+
+### 2026-11-12 评分模型回答不合格的重问与报错
+
+模型答了但回答没过校验时，系统带一条固定的修正提示重问 1 次。每条规则（或互斥组）最多 1 次，每篇论文最多 `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER` 次（默认 5）。回滚：把它设为 `0` 后重启 app 与 worker，行为回到「不合格直接判无效」，报错改进保留。
+
+看重问发生了多少、成没成：
+
+```bash
+ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h worker | grep -E "rule_output_repair|rule_execution_failed" | tail -40'
+```
+
+- `rule_output_repair rule_code=… check=… outcome=accepted`：重问后合格，规则任务 `attempt_count=2`。
+- `outcome=rejected`：重问后仍不合格，或重问请求本身失败。
+- `outcome=skipped_cap`：本篇的重问次数用完了，没有重问。
+- `check` 是哪一类校验没过：`json`、`fields`、`status`、`non_triggered_has_decision`、`triggered_without_evidence`、`evidence`、`level`、`finding_code`、`rule_code`。日志里没有模型回答和论文内容。
+
+排错：
+
+- **材料失败，说明是「模型对部分规则的回答没有通过格式校验」（`PROVIDER_OUTPUT_INVALID`）**
+  - 报错指向：模型回答。这次指向是对的，但容易去查连接或限流。
+  - 真正原因：模型的回答没过校验。说明里不写有没有重问过，要看规则任务：`attempt_count=2` 是重问后仍不合格，`attempt_count=1` 是没有重问（上限设成了 0、本篇名额用完即日志里的 `skipped_cap`，或评分器不接受 `repair`）。先点「重试失败项」（已成功的规则复用，只重判失败的）。同一条规则反复失败时看 `rule_output_repair` 的 `check`：总是 `evidence` 多半是模型在改写引文而不是逐字摘录，总是 `fields` / `status` 多半是这个模型不守 JSON 结构，换模型比调参数有效。一篇里 `skipped_cap` 很多说明是系统性的，不要靠调大上限解决。
+- **`RULE_EXECUTION_FAILED`，页面说「评分规则执行失败」**
+  - 报错指向：让人去查模型或 Worker。
+  - 真正原因：2026-11-12 之后这个码只剩代码异常。`rule_execution_failed` 日志行的 `where=<模块>:<行号>` 就是抛出的位置，规则任务的复核说明里也有同一个位置。2026-11-12 之前的版本里，模型回答不合格也报这个码（当天 `t03.v1` 那次就是），那时日志只有 `exception_type=ValueError`，定位不到校验。
+- **测试陷阱：假评分器的 `score_core_envelope` 没有 `repair` 参数**
+  - 报错指向：断言「应该重问」失败，看起来像执行器没生效。
+  - 真正原因：运行时按签名判断评分器接不接受 `repair`，不接受时 `output_repair_limit` 为 0，一次都不重问。测试里的假评分器要写成 `score_core_envelope(self, *, envelope, repair=None)`。
+
+测试：`.venv/bin/python -m pytest -q backend/app/tests/test_scoring_output_repair.py`
+
+维护记录：2026-11-12 · 评分模型回答不合格的重问与报错：新增环境变量、日志字段与三条排错。
+
+维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 复审）：说明文案与排错条目按“是否重问过看 `attempt_count`”修正。
+
+### 2026-11-13 评分模型回答不合格的重问与报错（#103 第二轮复审）
+
+排错：
+
+- **材料报「模型按其安全策略拒绝评判部分规则」（`PROVIDER_OUTPUT_REFUSED`），但日志里没有 `rule_output_repair`**
+  - 报错指向：看起来像重问没生效。
+  - 真正原因：拒答不重问，这是有意的。OpenAI 的两个协议里，拒答表现为「没有正文」加一个拒答标记（Responses 是 `type="refusal"` 的内容，Chat 是 `message.refusal` 或 `finish_reason=content_filter`），解析时先认拒答。只有真的没有正文、也没有拒答标记时才算回答不合格并重问；有拒答标记时即使带着正文也按拒答，不采用。
+
+维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 第二轮复审）：一条排错。

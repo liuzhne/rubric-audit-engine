@@ -592,6 +592,9 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | `openai_adapter._parse_json_output` 与 `openai_compatible_adapter._parse_chat_json_output` 先识别拒答（`refused`）再报没有正文；拒答不进重问 |
+| 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | `failures.OUTPUT_REPAIR_CHECKS` / `safe_output_check`：内核只认登记过的校验标识；运行时新增 `supports_group_repair`；`core_view.request_input_estimate` 计入重问提示；Responses 的 `_parse_json_output` 改抛带 `reason` 的 `ResponsesJSONOutputError` |
+| 2026-11-12 | 评分模型回答不合格的重问与报错 | 规则执行器在回答不合格时带固定修正提示重问 1 次（`_RepairBudget`，上限来自运行时的 `output_repair_limit`）；适配器的回答校验改抛 `CoreResponseInvalidError`（带 `check`）；`failures` 新增 `PROVIDER_OUTPUT_INVALID` 与出错位置 `where`；无迁移 |
 | 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | 新增 `scoring/retrieval/section_roles.py`（标题对到章节角色）与 `scope_policy.py`（Profile 注入 Core 的三个判断）；`judge_scope.py` 改为只读 `@5` 的 `scope`；规则快照 `@4` 删除、`@5` 新增；执行器加缺章短路与多章引用检查。开关默认关，见 §2026-11-11 小节 |
 | 2026-11-11 | 评分细则适用范围（#99 第三轮复审） | 识别完成只重读审查工作区、不重建编辑表单；规则编辑器的范围显示改取工作区（`ruleScopes`），不放进编辑表单 |
 | 2026-11-11 | 评分细则适用范围（#99 第二轮复审） | 范围移出 `rule_content`（不进 `content_token` 与审查签名），审查工作区单独给出；重新编译时 `review_carry.carry_rule_scopes` 把内容未变的规则的范围带过去；前端没有进行中的识别任务时一律重新识别 |
@@ -2059,3 +2062,44 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - 不变的：v1 兼容路径按 `applies_to` 取章节文本块的逻辑；开关关闭时的提示词、快照与判定身份。
 
 维护记录：2026-11-11 · 评分细则适用范围（分期 B）：新增两个检索模块、执行器的两处检查与快照 @5；无迁移，head 仍为 `0044_atomic_rule_scope`。
+
+### 2026-11-12 评分模型回答不合格的重问与报错
+
+方案见 `docs/评分模型回答不合格的重问与报错方案.md`。调用链在「规则执行器 → 运行时 → 适配器」这一段多了一步：
+
+1. 适配器的回答校验（`llm/core_view.decode_core_response` / `decode_core_group_response`、`llm/core_adapter.normalize_core_provider_response`）不再抛裸 `ValueError` / `TypeError`，改抛 `llm/errors.CoreResponseInvalidError`：`reason="output_invalid"`，`check` 是固定的校验标识。它仍是 `ValueError` 的子类。
+2. `scoring/core/rule_executor` 的 `_semantic_decision_for_envelope`（单条）与 `_judge_semantic_group`（互斥组）：第一次请求与以前逐字节相同；模型答了但不合格（适配器抛上面的异常、`invalid_json` / `empty_content`，或执行器校验返回 `failures.OUTPUT_INVALID_CHECKS` 里的 5 个码）时，向 `_RepairBudget` 要一个名额，再调一次 `llm_runtime.score(envelope=…, repair=<check>)` / `score_group(…, repair=…)`。
+3. 名额：每条规则（或每个互斥组）1 次，全篇不超过 `llm_runtime.output_repair_limit`。两个 Profile 的运行时从 `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER` 读这个数；评分器的 `score_core_envelope` 不接受 `repair`（Mock、旧评分器）时为 0。**内核不读配置。**
+4. 适配器收到 `repair` 时用 `core_view.with_repair` 给请求加一条固定提示（`core_adapter.OUTPUT_REPAIR_HINTS`）：Chat 追加第三条消息，Responses 把 `input` 变成两条用户消息，Messages 在同一条用户消息里加第二个文本块。原有的系统消息与用户消息不变。
+5. 重问走同一套计量（单篇输入上限、用量账本、思考守卫）。重问因输入上限没发出时，报告第一次的不合格。
+
+不变的：
+
+- 判定身份、`CORE_PROVIDER_PROMPT_VERSION`、判定账本的读写时机；重问得到的合格判定照常入账。
+- 截断、拒答、思考不一致、熔断、HTTP 错误的处理；确定性规则；复用账本判定的路径。
+- 仍不合格的规则判 `invalid`，规则任务 `failed_exhausted`，评分项不出分（D-016）。
+
+持久化与报错：
+
+- `RuleCallJournal.record_provider_attempt` 改为累加；规则任务 `attempt_count` 可以是 2，`max_attempts = max(1, attempt_count)`。
+- `scoring/core/failures`：`reason` 为 `output_invalid` / `invalid_json` / `empty_content` → `PROVIDER_OUTPUT_INVALID`；其余异常的消息带 `where=<模块>:<行号>`（`failure_site`，取调用栈最靠内的本项目代码帧）。
+- `adapters/persistence`：语义规则且确实发过请求时，执行器的 5 个校验码也写进规则任务的 `provider_error`。
+- `batch_scoring/jobs._incomplete_scoring_error` 把这 6 个码统一报成 `PROVIDER_OUTPUT_INVALID`（类别 `llm`）；`assistant/views.DIAGNOSES` 有对应的卡片文案。
+
+维护记录：2026-11-12 · 评分模型回答不合格的重问与报错：执行器增加重问一步，新增异常类型、错误码与出错位置；无迁移。
+
+### 2026-11-13 评分模型回答不合格的重问与报错（#103 复审）
+
+- `scoring/core/failures.OUTPUT_REPAIR_CHECKS` 是全部校验标识，`safe_output_check` 把不在其中的值归为 `fields`。执行器（重问、日志）与失败投影都经过它；它与 `llm/core_adapter.OUTPUT_REPAIR_HINTS` 的键一致由测试保证。
+- 论文运行时新增 `supports_group_repair`（看评分器 `score_core_group` 的签名）；执行器在重问互斥组前检查它，没有这个属性的运行时按支持处理。
+- `core_view.request_input_estimate` 把 `repair_hint` 与一条消息的封装余量算进去，`preflight_core_request` 因此量的是重问时实际发出的大小。
+- `core_view._map_evidence_refs` 只遍历数组类型的 `occurrences` / `evidence`，其它类型原样交给归一化拒绝；`core_adapter.normalize_core_provider_response` 对 `status`、`level_code`、`finding_code`、证据编号先查类型再查集合。
+- `llm/openai_adapter._parse_json_output` 改抛 `ResponsesJSONOutputError`（`invalid_json` / `empty_content`，消息不变）。
+
+维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 复审）：校验标识集合、整组重问的签名检查、输入估算与两处类型检查。
+
+### 2026-11-13 评分模型回答不合格的重问与报错（#103 第二轮复审）
+
+回答解析的判断顺序（Responses 与 Chat 一致，Messages 原本就是）：截断 → 拒答 → 没有正文 → 不是合法 JSON。只有后两种（`empty_content`、`invalid_json`）会进执行器的重问；拒答报 `refused`，由 `failures` 投影为 `PROVIDER_OUTPUT_REFUSED`。Responses 看输出项里 `type="refusal"` 的内容，Chat 看 `message.refusal` 与 `finish_reason=content_filter`。有拒答标记时即使同时带着正文也不采用正文：截断时报截断，否则报拒答。Responses 的 `complete_json` 原样上抛解析给出的分类。
+
+维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 第二轮复审）：回答解析先识别拒答。

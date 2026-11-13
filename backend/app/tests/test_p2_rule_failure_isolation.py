@@ -1,6 +1,7 @@
 """P2 executable specification: one provider failure cannot erase siblings."""
 
 from copy import deepcopy
+import re
 
 import httpx
 
@@ -96,8 +97,11 @@ def test_unknown_rule_failure_logs_only_safe_exception_identity(monkeypatch):
         if item["rule_code"] == SEMANTIC_RULE_CODE
     )
     assert issue["code"] == "RULE_EXECUTION_FAILED"
-    assert issue["message"] == (
-        "rule execution failed (exception_type=TypeError)"
+    # 出错位置只有模块与行号（这里是测试里的假运行时），没有异常消息。
+    assert re.fullmatch(
+        r"rule execution failed \(exception_type=TypeError, "
+        r"where=tests/test_p2_rule_failure_isolation:\d+\)",
+        issue["message"],
     )
     assert len(warnings) == 1
     rendered = warnings[0][0] % warnings[0][1:]

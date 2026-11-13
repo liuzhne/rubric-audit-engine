@@ -43,6 +43,8 @@ from backend.app.services.llm.errors import PlatformModelMissingError
 from backend.app.services.llm.errors import ProviderCallError
 from backend.app.services.scoring.decision_ledger import bypass_ledger_reads
 from backend.app.services.scoring.core.canonical import canonical_sha256
+from backend.app.services.scoring.core.failures import OUTPUT_INVALID_CHECKS
+from backend.app.services.scoring.core.failures import OUTPUT_INVALID_CODE
 from backend.app.services.work_queue.kinds import ClaimedItem
 from backend.app.services.work_queue.kinds import WorkKind
 from backend.app.services.work_queue.kinds import register
@@ -753,7 +755,12 @@ def _incomplete_scoring_error(rule_tasks):
         for task in failed
         if isinstance(task.provider_error, dict)
     ]
-    provider_codes = [code for code in provider_codes if code]
+    # 执行器校验返回的几个码与适配器的 PROVIDER_OUTPUT_INVALID 是同一件事：模型答了但回答不合格。
+    provider_codes = [
+        OUTPUT_INVALID_CODE if code in OUTPUT_INVALID_CHECKS else code
+        for code in provider_codes
+        if code
+    ]
     if THINKING_NOT_DISABLED_CODE in provider_codes:
         # 不比多少：身份与行为不一致是根因，其余规则的失败（截断、没发出）都是它的后果。
         return IncompleteScoringResultError(
@@ -788,6 +795,11 @@ def _incomplete_scoring_error(rule_tasks):
                 "请调大该 AI 连接的输出 token 上限（max_output_tokens / max_tokens），"
                 "或关闭思考、降低思考强度后重试。注意：调大上限会改变判定身份，"
                 "已成功的规则也要重新判定、重新计费。"
+            )
+        elif code == OUTPUT_INVALID_CODE:
+            message = (
+                "模型对部分规则的回答没有通过格式校验。"
+                "可以直接重试失败项，已成功的规则会复用；反复出现请换一个模型。"
             )
         elif code == "PROVIDER_OUTPUT_REFUSED":
             message = (
