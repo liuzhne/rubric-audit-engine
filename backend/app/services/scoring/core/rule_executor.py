@@ -22,6 +22,9 @@ from backend.app.services.scoring.core.contracts import (
     SemanticRuleResponseV2,
 )
 from backend.app.services.scoring.core.results import RuleExecutionResult
+from backend.app.services.scoring.core.failures import OUTPUT_INVALID_CHECKS
+from backend.app.services.scoring.core.failures import failure_site
+from backend.app.services.scoring.core.failures import safe_output_check
 from backend.app.services.scoring.core.failures import project_rule_execution_failure
 from backend.app.services.scoring.core.decision_identity import rule_decision_identity
 
@@ -575,6 +578,63 @@ def _record_attempt(execution_journal, rule_codes, llm_runtime):
         record(rule_code=rule_code, sent=sent)
 
 
+# 回答不合格时的重问（docs/评分模型回答不合格的重问与报错方案.md）。
+_REPAIRABLE_JSON_REASONS = {"invalid_json", "empty_content"}
+
+
+def _output_invalid_check(exc):
+    """异常表示「模型答了、答案不合格」时返回校验标识，否则 None（不重问）。
+
+    只按鸭子类型看安全的 ``reason`` / ``check``，不导入适配器；截断、拒答、HTTP 错误、
+    输入超预算、思考不一致都不在这里。
+    """
+
+    reason = getattr(exc, "reason", None)
+    if reason == "output_invalid":
+        # 只认已登记的标识：外来评分器给的任意文字不进日志，也不会被拿去重问。
+        return safe_output_check(getattr(exc, "check", None))
+    if reason in _REPAIRABLE_JSON_REASONS:
+        return "json"
+    return None
+
+
+def _logged_check(exc) -> str:
+    """日志里的校验标识：只有「回答不合格」的异常才有，且只取已登记的值。"""
+
+    return _output_invalid_check(exc) or "-"
+
+
+class _RepairBudget:
+    """一篇论文的重问名额：每条规则（或互斥组）1 次，全篇不超过运行时给的上限。"""
+
+    def __init__(self, llm_runtime):
+        try:
+            limit = int(getattr(llm_runtime, "output_repair_limit", 0) or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        self.limit = max(0, limit)
+        self.used = 0
+
+    def take(self, target, check) -> bool:
+        if self.limit <= 0:
+            return False
+        if self.used >= self.limit:
+            _log_repair(target, check, "skipped_cap")
+            return False
+        self.used += 1
+        return True
+
+
+def _log_repair(target, check, outcome):
+    logger.warning(
+        "rule_output_repair rule_code=%s check=%s outcome=%s", target, check, outcome
+    )
+
+
+def _budget_exhausted(exc) -> bool:
+    return getattr(exc, "code", None) == "TOKEN_BUDGET_EXCEEDED"
+
+
 def _semantic_decision(
     *,
     request,
@@ -586,6 +646,7 @@ def _semantic_decision(
     execution_journal=None,
     criterion_rules=None,
     section_roles=None,
+    repair_budget=None,
 ):
     rule = node["atomic_rule_snapshot"]
     report = {}
@@ -610,6 +671,7 @@ def _semantic_decision(
         occurrence_payloads=occurrence_payloads,
         decision_ledger=decision_ledger,
         execution_journal=execution_journal,
+        repair_budget=repair_budget,
     )
     if error is None:
         decision = _checked_scope_citations(decision, envelope, rule, profile)
@@ -636,6 +698,7 @@ def _semantic_decision_for_envelope(
     occurrence_payloads,
     decision_ledger=None,
     execution_journal=None,
+    repair_budget=None,
 ):
     identity = None
     response = None
@@ -659,16 +722,53 @@ def _semantic_decision_for_envelope(
             rule["rule_code"],
             error,
         )
+
+    def ask(repair=None):
+        try:
+            if repair is None:
+                return llm_runtime.score(envelope=envelope)
+            return llm_runtime.score(envelope=envelope, repair=repair)
+        finally:
+            _record_attempt(execution_journal, [rule["rule_code"]], llm_runtime)
+
+    def validated(value):
+        return _validated_decision(
+            request=request,
+            rule=rule,
+            response=value,
+            occurrence_payloads=occurrence_payloads,
+        )
+
+    # 第一次：请求与以往逐字节相同。答了但不合格时，带固定修正提示重问 1 次；重问得到的
+    # 回答走同一套校验，仍不合格就按这一次的结果判无效。
+    first_failure = None
     try:
-        response = llm_runtime.score(envelope=envelope)
-    finally:
-        _record_attempt(execution_journal, [rule["rule_code"]], llm_runtime)
-    decision, error, message = _validated_decision(
-        request=request,
-        rule=rule,
-        response=response,
-        occurrence_payloads=occurrence_payloads,
-    )
+        response = ask()
+    except Exception as exc:
+        check = _output_invalid_check(exc)
+        if check is None or repair_budget is None or not repair_budget.take(rule["rule_code"], check):
+            raise
+        first_failure = exc
+    else:
+        decision, error, message = validated(response)
+        check = OUTPUT_INVALID_CHECKS.get(error)
+        if check is not None and (
+            repair_budget is None or not repair_budget.take(rule["rule_code"], check)
+        ):
+            check = None
+    if check is not None:
+        try:
+            response = ask(check)
+        except Exception as exc:
+            _log_repair(rule["rule_code"], check, "rejected")
+            if not _budget_exhausted(exc):
+                raise
+            # 单篇输入上限用完、重问没有发出：如实报告第一次的不合格，而不是预算。
+            if first_failure is not None:
+                raise first_failure from None
+        else:
+            decision, error, message = validated(response)
+            _log_repair(rule["rule_code"], check, "accepted" if error is None else "rejected")
     if error is None and identity is not None:
         # Written immediately, not at run end, so a crash, timeout or a later
         # provider failure does not discard decisions already paid for.
@@ -758,6 +858,7 @@ def _judge_semantic_group(
     execution_journal=None,
     criterion_rules=None,
     section_roles=None,
+    repair_budget=None,
 ):
     """Judge all tiers of one mutex group in one provider call.
 
@@ -837,25 +938,83 @@ def _judge_semantic_group(
                 "rule_decision_ledger_group_entry_rejected group_code=%s", group_code
             )
 
-    try:
-        responses = llm_runtime.score_group(envelopes=envelopes, group_code=group_code)
-    except Exception as exc:  # noqa: BLE001 - projected to a stable rule issue
-        _record_attempt(execution_journal, [rule["rule_code"] for rule in rules], llm_runtime)
+    rule_codes = [rule["rule_code"] for rule in rules]
+
+    def failed(exc):
         error, message = project_rule_execution_failure(exc)
         logger.warning(
-            "rule_group_execution_failed group_code=%s error_code=%s exception_type=%s",
+            "rule_group_execution_failed group_code=%s error_code=%s exception_type=%s "
+            "check=%s where=%s",
             group_code,
             error,
             type(exc).__name__,
+            _logged_check(exc),
+            failure_site(exc),
         )
         return {
             rule["rule_code"]: (_decision_skeleton(request["plan"], rule), error, message)
             for rule in rules
         }
-    if responses is None:
+
+    def invalid_check(results):
+        """组的回答不合格时的校验标识；合格返回 None。"""
+
+        if results is None:
+            return "fields"
+        for _decision, error, _message in results.values():
+            if error is not None:
+                return OUTPUT_INVALID_CHECKS.get(error, "fields")
         return None
-    _record_attempt(execution_journal, [rule["rule_code"] for rule in rules], llm_runtime)
-    results = validate(responses)
+
+    def take(check):
+        # 评分器的整组入口不接受 repair 时不重问整组（否则重问会以 TypeError 收场，盖住真正的原因）。
+        return (
+            repair_budget is not None
+            and getattr(llm_runtime, "supports_group_repair", True)
+            and repair_budget.take(group_code, check)
+        )
+
+    # 第一次：请求与以往相同。整组答了但不合格时，带固定修正提示把整组重问 1 次；仍不合格
+    # 各档照旧无效，不拆成逐条调用。
+    results = None
+    first_failure = None
+    try:
+        responses = llm_runtime.score_group(envelopes=envelopes, group_code=group_code)
+    except Exception as exc:  # noqa: BLE001 - projected to a stable rule issue
+        _record_attempt(execution_journal, rule_codes, llm_runtime)
+        check = _output_invalid_check(exc)
+        if check is None or not take(check):
+            return failed(exc)
+        first_failure = exc
+    else:
+        if responses is None:
+            return None
+        _record_attempt(execution_journal, rule_codes, llm_runtime)
+        results = validate(responses)
+        check = invalid_check(results)
+        if check is not None and not take(check):
+            check = None
+    if check is not None:
+        try:
+            repaired = llm_runtime.score_group(
+                envelopes=envelopes, group_code=group_code, repair=check
+            )
+        except Exception as exc:  # noqa: BLE001 - projected to a stable rule issue
+            _record_attempt(execution_journal, rule_codes, llm_runtime)
+            _log_repair(group_code, check, "rejected")
+            if not _budget_exhausted(exc):
+                return failed(exc)
+            # 单篇输入上限用完、重问没有发出：如实报告第一次的不合格。
+            if first_failure is not None:
+                return failed(first_failure)
+        else:
+            _record_attempt(execution_journal, rule_codes, llm_runtime)
+            if repaired is not None:
+                responses = repaired
+                results = validate(responses)
+            elif first_failure is not None:
+                return failed(first_failure)
+            _log_repair(group_code, check, "accepted" if accepted(results) else "rejected")
     if results is None:
         return {
             rule["rule_code"]: (
@@ -1404,6 +1563,7 @@ def execute_rule_plan(
     )
     group_results = {}
     semantic_rules_by_criterion = {}
+    repair_budget = _RepairBudget(llm_runtime)
     section_roles = _section_role_map(value, nodes_by_code, llm_runtime, profile)
     for code in order:
         node = nodes_by_code[code]
@@ -1467,6 +1627,7 @@ def execute_rule_plan(
                             execution_journal=execution_journal,
                             criterion_rules=criterion_rules,
                             section_roles=section_roles,
+                            repair_budget=repair_budget,
                         )
                     if group_results[key] is not None:
                         result = group_results[key][code]
@@ -1481,6 +1642,7 @@ def execute_rule_plan(
                         execution_journal=execution_journal,
                         criterion_rules=criterion_rules,
                         section_roles=section_roles,
+                        repair_budget=repair_budget,
                     )
                 decision, error, message = result
             else:
@@ -1489,13 +1651,16 @@ def execute_rule_plan(
         except Exception as exc:
             decision = _decision_skeleton(value["plan"], rule)
             error, message = project_rule_execution_failure(exc)
+            # check：回答没过哪一类校验；where：其余异常出在本项目的哪一行。都不含正文。
             logger.warning(
                 "rule_execution_failed criterion_code=%s rule_code=%s "
-                "error_code=%s exception_type=%s",
+                "error_code=%s exception_type=%s check=%s where=%s",
                 criterion_code,
                 code,
                 error,
                 type(exc).__name__,
+                _logged_check(exc),
+                failure_site(exc),
             )
         insufficient = bool(decision.pop(_EVIDENCE_INSUFFICIENT_MARK, False))
         scope_review = decision.pop(_SCOPE_REVIEW_MARK, None)

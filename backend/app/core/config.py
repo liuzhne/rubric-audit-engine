@@ -177,6 +177,9 @@ class Settings(BaseSettings):
     # cap and the per-paper estimate are checked before a job starts; the
     # per-paper cap is also enforced on actual usage while a paper is scored.
     SCORING_MAX_INPUT_TOKENS_PER_PAPER: int = Field(default=0, ge=0)
+    # 模型回答没通过校验时，带固定修正提示重问：每条规则（或互斥组）最多 1 次，每篇论文
+    # 最多这么多次；0 关闭重问（docs/评分模型回答不合格的重问与报错方案.md）。
+    SCORING_OUTPUT_REPAIR_MAX_PER_PAPER: int = Field(default=5, ge=0, le=50)
     # 一次「AI 起草扣分细则」请求的总时间预算（秒）。Vercel 函数最长 300 秒，留出合并、
     # 校验与返回的余量；没有函数时长限制的自部署可以调大，0 表示不限。
     RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS: float = Field(default=260.0, ge=0)

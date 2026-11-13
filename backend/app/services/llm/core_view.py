@@ -23,12 +23,15 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 import json
 import re
 
 from backend.app.services.llm.core_adapter import _allowed_finding_codes
 from backend.app.services.llm.core_adapter import _core_envelope
 from backend.app.services.llm.core_adapter import normalize_core_provider_response
+from backend.app.services.llm.core_adapter import output_repair_hint
+from backend.app.services.llm.errors import CoreResponseInvalidError
 from backend.app.services.scoring.core.contracts import WORDED_ATOMIC_RULE_SCHEMAS
 from backend.app.services.scoring.core.rule_context import derive_context_needs
 from backend.app.services.scoring.retrieval.compression import COMPRESSOR_VERSION
@@ -187,6 +190,19 @@ class CoreProviderRequest:
     compression: list = field(default_factory=list)
     group_code: str | None = None
     rule_codes: tuple = ()
+    # 回答不合格后的重问：追加在 ``user`` 之后的一条固定提示；首次请求为 None。
+    repair_hint: str | None = None
+
+
+def with_repair(request: CoreProviderRequest, repair) -> CoreProviderRequest:
+    """重问用的请求：``system`` 与 ``user`` 一字不改，只多一条固定的修正提示。"""
+
+    if repair is None:
+        return request
+    hint = output_repair_hint(repair)
+    if hint is None:
+        raise ValueError("unknown output repair check")
+    return replace(request, repair_hint=hint)
 
 
 def _rule_wording(rule) -> list[str]:
@@ -479,11 +495,15 @@ def build_core_group_request(envelopes, *, group_code: str) -> CoreProviderReque
 def request_input_estimate(request: CoreProviderRequest) -> int:
     """Conservative size of exactly what is sent (system + view + framing)."""
 
-    return (
+    estimate = (
         conservative_token_estimate(request.user)
         + conservative_token_estimate(request.system)
         + _FRAMING_ALLOWANCE
     )
+    if request.repair_hint:
+        # 重问多出的那条提示也算进去（另加一条消息的封装余量），预检量的才是实际发出的大小。
+        estimate += conservative_token_estimate(request.repair_hint) + _FRAMING_ALLOWANCE
+    return estimate
 
 
 def estimate_view_input_tokens(value, rules) -> int:
@@ -524,15 +544,19 @@ def _map_evidence_refs(response, alias_to_unit):
     if not isinstance(response, Mapping):
         return response
     mapped = deepcopy(dict(response))
-    for occurrence in mapped.get("occurrences") or ():
+    # 容器类型不对（occurrences 是数字、evidence 是字符串等）时不在这里遍历：原样交给
+    # 归一化，由它按「回答不合格」拒绝，而不是在这里抛 TypeError。
+    occurrences = mapped.get("occurrences")
+    for occurrence in occurrences if isinstance(occurrences, list) else ():
         if not isinstance(occurrence, dict):
             continue
-        for item in occurrence.get("evidence") or ():
+        evidence = occurrence.get("evidence")
+        for item in evidence if isinstance(evidence, list) else ():
             if isinstance(item, dict) and "evidence_ref" in item:
                 ref = item.pop("evidence_ref")
                 unit_id = alias_to_unit.get(ref) if isinstance(ref, str) else None
                 if unit_id is None:
-                    raise ValueError("Core provider response cited an unknown evidence ref")
+                    raise CoreResponseInvalidError("evidence", "Core provider response cited an unknown evidence ref")
                 item["evidence_unit_id"] = unit_id
     basis = mapped.get("basis")
     if isinstance(basis, dict) and isinstance(basis.get("evidence"), list):
@@ -556,7 +580,7 @@ def _request_allows_basis(request: CoreProviderRequest) -> bool:
 def decode_core_response(envelope, response, request: CoreProviderRequest) -> dict:
     allowed = _request_statuses(request)
     if isinstance(response, Mapping) and response.get("status") not in allowed:
-        raise ValueError("Core provider response status is invalid")
+        raise CoreResponseInvalidError("status", "Core provider response status is invalid")
     return normalize_core_provider_response(
         envelope,
         _map_evidence_refs(response, request.alias_to_unit),
@@ -569,30 +593,30 @@ def decode_core_group_response(envelopes, response, request: CoreProviderRequest
     """Project one group decision onto every member rule (fail closed)."""
 
     if not isinstance(response, Mapping):
-        raise TypeError("Core group response must be an object")
+        raise CoreResponseInvalidError("fields", "Core group response must be an object")
     required = {"schema_version", "group_code", "status", "selected_rule_code", "occurrences"}
     keys = set(response)
     allow_basis = _request_allows_basis(request)
     if allow_basis:
         keys.discard("basis")
     if keys != required:
-        raise ValueError("Core group response has invalid fields")
+        raise CoreResponseInvalidError("fields", "Core group response has invalid fields")
     if response["schema_version"] != GROUP_RESPONSE_SCHEMA:
-        raise ValueError("Core group response schema_version is unsupported")
+        raise CoreResponseInvalidError("fields", "Core group response schema_version is unsupported")
     if response["group_code"] != request.group_code:
-        raise ValueError("Core group response named another group")
+        raise CoreResponseInvalidError("rule_code", "Core group response named another group")
     status = response["status"]
     if status not in _request_statuses(request):
-        raise ValueError("Core group response status is invalid")
+        raise CoreResponseInvalidError("status", "Core group response status is invalid")
     selected = response["selected_rule_code"]
     occurrences = response["occurrences"]
     if not isinstance(occurrences, list):
-        raise TypeError("Core group response occurrences must be an array")
+        raise CoreResponseInvalidError("fields", "Core group response occurrences must be an array")
     if status == "triggered":
         if selected not in request.rule_codes:
-            raise ValueError("Core group response selected an unauthorized tier")
+            raise CoreResponseInvalidError("rule_code", "Core group response selected an unauthorized tier")
     elif selected is not None or occurrences:
-        raise ValueError("non-triggered Core group response must not contain a decision")
+        raise CoreResponseInvalidError("non_triggered_has_decision", "non-triggered Core group response must not contain a decision")
 
     decoded = {}
     for envelope in envelopes:
@@ -649,4 +673,5 @@ __all__ = [
     "preflight_core_request",
     "provider_prompt_suffix",
     "request_input_estimate",
+    "with_repair",
 ]
