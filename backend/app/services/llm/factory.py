@@ -73,6 +73,7 @@ def get_llm_scorer(connection_runtime: ConnectionRuntime | None = None, *, sessi
                 temperature=options.get("temperature"),
                 top_p=options.get("top_p"),
                 response_format_json=options.get("response_format_json"),
+                structured_output=options.get("structured_output"),
                 # BYOK endpoints are only protocol-compatible, not guaranteed
                 # to accept the platform provider's non-standard `thinking`
                 # extension.  Send it only when this connection opted in.

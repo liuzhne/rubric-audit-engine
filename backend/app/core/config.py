@@ -180,6 +180,13 @@ class Settings(BaseSettings):
     # 模型回答没通过校验时，带固定修正提示重问：每条规则（或互斥组）最多 1 次，每篇论文
     # 最多这么多次；0 关闭重问（docs/评分模型回答不合格的重问与报错方案.md）。
     SCORING_OUTPUT_REPAIR_MAX_PER_PAPER: int = Field(default=5, ge=0, le=50)
+    # Chat 协议的 Core 评分请求是否把规则的严格 Schema 交给厂商（response_format: json_schema）。
+    # 关闭时请求与身份逐字节不变，连接上的 structured_output 存着但不生效；打开前需要真实留出集 QWK
+    # （docs/Chat评分请求严格Schema方案.md）。
+    SCORING_CHAT_STRICT_SCHEMA_ENABLED: bool = False
+    # Google 主机族：字符串枚举超过这么多个值就不发这个枚举（Vertex 会以「Schema 太复杂」拒绝）。
+    # 暂定值，等对真实接口实测后再定；它写在 model_version 里，改了等于换运行身份。
+    SCORING_CHAT_SCHEMA_ENUM_LIMIT: int = Field(default=64, ge=1, le=2000)
     # 一次「AI 起草扣分细则」请求的总时间预算（秒）。Vercel 函数最长 300 秒，留出合并、
     # 校验与返回的余量；没有函数时长限制的自部署可以调大，0 表示不限。
     RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS: float = Field(default=260.0, ge=0)
