@@ -53,9 +53,11 @@ _ALLOWED_OPTION_KEYS = {
 _CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 _CLAUDE_THINKING_TYPES = ("adaptive", "disabled")
 _CLAUDE_STRUCTURED_OUTPUT_MODES = ("json_schema", "off")
+# Chat 连接多一个 json_object；Responses 始终发严格 Schema，没有这个选项。
+_CHAT_STRUCTURED_OUTPUT_MODES = ("json_schema", "json_object", "off")
 # 只对 OpenAI 系协议有意义的键；Claude 连接带上它们等于「设了却不生效」。
 _OPENAI_ONLY_OPTION_KEYS = frozenset({"response_format_json", "service_tier", "max_output_tokens"})
-_CLAUDE_ONLY_OPTION_KEYS = frozenset({"effort", "structured_output"})
+_CLAUDE_ONLY_OPTION_KEYS = frozenset({"effort"})
 # 只决定「同时发几个请求」，不影响模型看到什么、返回什么；不进复现快照。
 # 否则用户为了躲 429 调低并发，会让所有已锁定该连接的批次报「连接配置已变更」。
 SCHEDULING_OPTION_KEYS = frozenset({"max_concurrency"})
@@ -268,9 +270,9 @@ def validate_provider_options(options: dict | None) -> dict:
         raise ValueError("effort must be one of: %s" % ", ".join(_CLAUDE_EFFORT_LEVELS))
     if (
         "structured_output" in normalized
-        and normalized["structured_output"] not in _CLAUDE_STRUCTURED_OUTPUT_MODES
+        and normalized["structured_output"] not in _CHAT_STRUCTURED_OUTPUT_MODES
     ):
-        raise ValueError("structured_output must be json_schema or off")
+        raise ValueError("structured_output must be json_schema, json_object or off")
     return normalized
 
 
@@ -287,7 +289,12 @@ def validate_provider_options_for(provider_type: str, options: dict | None) -> d
             raise ValueError("thinking_type for Claude must be adaptive or disabled")
         if "temperature" in normalized and "top_p" in normalized:
             raise ValueError("Claude accepts temperature or top_p, not both")
+        if normalized.get("structured_output", "off") not in _CLAUDE_STRUCTURED_OUTPUT_MODES:
+            raise ValueError("structured_output for Claude must be json_schema or off")
     else:
+        if provider_type == "openai_responses" and "structured_output" in normalized:
+            # Responses 的评分请求始终带严格 Schema，这个选项设了也不会生效。
+            raise ValueError("options not used by Responses connections: structured_output")
         stray = sorted(set(normalized) & _CLAUDE_ONLY_OPTION_KEYS)
         if stray:
             raise ValueError("options only used by Claude connections: %s" % ", ".join(stray))
@@ -507,6 +514,7 @@ def verify_connection_runtime(runtime: ConnectionRuntime) -> dict[str, str]:
             "messages": [{"role": "user", "content": "Reply with OK."}],
             "max_tokens": 8,
         }
+        payload.update(_chat_schema_probe_fields(runtime, base_url))
     elif runtime.provider_type == MESSAGES:
         endpoint, payload = _claude_probe(runtime, base_url)
     else:
@@ -547,6 +555,34 @@ def verify_connection_runtime(runtime: ConnectionRuntime) -> dict[str, str]:
         _log_test_failure(runtime, base_url, status=None, error_type=type(exc).__name__)
         raise ValueError("AI connection test failed") from exc
     return {"provider_type": runtime.provider_type, "model_name": runtime.model_name}
+
+
+def _chat_schema_probe_fields(runtime: ConnectionRuntime, base_url: str) -> dict:
+    """评分会带严格 Schema 的 Chat 连接，测试时也带一份小 Schema：不接受就在这里失败，不等到评分。
+
+    总开关关闭或连接不发 Schema 时返回空，探测请求与改动前相同。
+    """
+
+    from backend.app.services.llm import schema_dialects
+
+    options = runtime.provider_options or {}
+    mode = schema_dialects.resolve_chat_response_format(
+        base_url,
+        structured_output=options.get("structured_output"),
+        response_format_json=bool(options.get("response_format_json")),
+    )
+    if mode != schema_dialects.JSON_SCHEMA:
+        return {}
+    return {
+        "messages": [{
+            "role": "user",
+            "content": "Return a JSON object with status set to not_triggered and level_code set to null.",
+        }],
+        "max_tokens": 64,
+        "response_format": schema_dialects.chat_response_format(
+            base_url, name="connection_probe", schema=schema_dialects.PROBE_SCHEMA,
+        ),
+    }
 
 
 _ERROR_TYPE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")

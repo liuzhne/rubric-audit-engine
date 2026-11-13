@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-13 | Chat 评分请求严格 Schema | 新模块 `llm/schema_dialects`（输出约束解析 + 按主机族改写 Schema）；Chat 适配器新增 `core_response_format`，Core 的两个请求可带 `response_format: json_schema`；`core_adapter` 的身份字段读它；总开关默认关闭 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | `openai_adapter._parse_json_output` 与 `openai_compatible_adapter._parse_chat_json_output` 先识别拒答（`refused`）再报没有正文；拒答不进重问 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | `failures.OUTPUT_REPAIR_CHECKS` / `safe_output_check`：内核只认登记过的校验标识；运行时新增 `supports_group_repair`；`core_view.request_input_estimate` 计入重问提示；Responses 的 `_parse_json_output` 改抛带 `reason` 的 `ResponsesJSONOutputError` |
 | 2026-11-12 | 评分模型回答不合格的重问与报错 | 规则执行器在回答不合格时带固定修正提示重问 1 次（`_RepairBudget`，上限来自运行时的 `output_repair_limit`）；适配器的回答校验改抛 `CoreResponseInvalidError`（带 `check`）；`failures` 新增 `PROVIDER_OUTPUT_INVALID` 与出错位置 `where`；无迁移 |
@@ -2103,3 +2104,18 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 回答解析的判断顺序（Responses 与 Chat 一致，Messages 原本就是）：截断 → 拒答 → 没有正文 → 不是合法 JSON。只有后两种（`empty_content`、`invalid_json`）会进执行器的重问；拒答报 `refused`，由 `failures` 投影为 `PROVIDER_OUTPUT_REFUSED`。Responses 看输出项里 `type="refusal"` 的内容，Chat 看 `message.refusal` 与 `finish_reason=content_filter`。有拒答标记时即使同时带着正文也不采用正文：截断时报截断，否则报拒答。Responses 的 `complete_json` 原样上抛解析给出的分类。
 
 维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 第二轮复审）：回答解析先识别拒答。
+
+### 2026-11-13 Chat 评分请求严格 Schema
+
+方案见 `docs/Chat评分请求严格Schema方案.md`。总开关 `SCORING_CHAT_STRICT_SCHEMA_ENABLED` 默认关闭，关闭时请求与运行身份逐字节不变。
+
+- **Schema 从哪来**：不变。`core_view.build_core_request` / `build_core_group_request` 为每条规则（每个互斥组）生成 `request.schema`，Responses 与 Claude 一直在用。
+- **新模块 `llm/schema_dialects`**：
+  - `resolve_chat_response_format` 决定 Chat 的 Core 请求发什么约束：连接选项 `structured_output` > 旧的 `response_format_json` > 核实过的主机族清单 `VERIFIED_STRICT_SCHEMA_FAMILIES`（目前为空）。
+  - `apply(dialect, schema)` 按主机族改写：Google（Vertex、Gemini API）把可空类型写成 `nullable`、枚举去掉 `null`、枚举值超过 `SCORING_CHAT_SCHEMA_ENUM_LIMIT` 时去掉枚举、删 `minLength`、必须为空的数组不带空对象定义；其它主机族原样。
+  - 方言标签（如 `;schema=google@1/e64`）拼在 `model_version` 后面。
+- **调用链**：`OpenAICompatibleChatScorer.__init__` 解析出 `core_response_format` → `core_adapter.core_runtime_provider_contract` 把它记进信封的 `provider.response_format` → `_post_core_request` 按信封发 `response_format`。只影响 `score_core_envelope` 与 `score_core_group`；v1 兼容路径和 `complete_json` 仍只看 `response_format_json`。
+- **边界**：内核与 `core_view` 不知道方言；改写只发生在 Chat 适配器发送前。被放宽的约束仍由 `decode_core_response` 与 `normalize_core_provider_response` 校验。
+- **测试连接**：`ai_connections._chat_schema_probe_fields` 在评分会带 Schema 时让探测也带一份小 Schema（同一个方言）。
+
+维护记录：2026-11-13 · Chat 评分请求严格 Schema：新模块与 Chat 适配器的输出约束，默认关闭。

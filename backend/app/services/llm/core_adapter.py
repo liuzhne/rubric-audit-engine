@@ -146,9 +146,14 @@ def core_runtime_provider_contract(scorer, *, artifact_hash: str) -> dict:
             "false",
             "off",
         }
+    # Chat 适配器自己解析 Core 的输出约束（连接选项 + 总开关，见 llm/schema_dialects）；
+    # 没有这个属性的评分器沿用原来的取法。
+    core_response_format = getattr(scorer, "core_response_format", None)
     response_format = (
         "json_schema"
         if provider == "openai"
+        else core_response_format
+        if core_response_format in {"none", "json_object", "json_schema"}
         else "json_object"
         if bool(getattr(scorer, "response_format_json", False))
         else "none"

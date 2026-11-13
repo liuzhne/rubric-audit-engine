@@ -1313,6 +1313,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-13 | Chat 评分请求严格 Schema | 新环境变量 `SCORING_CHAT_STRICT_SCHEMA_ENABLED`（默认关）与 `SCORING_CHAT_SCHEMA_ENUM_LIMIT`（默认 64，暂定）；Chat 连接选项 `structured_output`；一条排错；无迁移 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | 一条排错：拒答与回答不合格的区分；无新命令 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | 材料级说明不再写「已自动重问」，排错条目改为按 `attempt_count` 判断有没有重问过；无新命令 |
 | 2026-11-12 | 评分模型回答不合格的重问与报错 | 新环境变量 `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER`（默认 5，0 关闭）；新日志 `rule_output_repair`，`rule_execution_failed` 多了 `check` 与 `where`；两条排错；无迁移 |
@@ -2036,6 +2037,8 @@ npm --prefix frontend/workbench run api:generate
 | `SCORING_MAX_INPUT_TOKENS_PER_PAPER` | `0`（不限） | 单篇输入 token 上限：开始前按估算拦截，运行中按实际用量截止 |
 | `SCORING_MAX_INPUT_TOKENS_PER_BATCH` | `0`（不限） | 单批输入 token 上限：开始前按估算拦截 |
 | `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER` | `5` | 模型回答没过校验时带固定提示重问：每条规则最多 1 次，每篇最多这么多次；`0` 关闭 |
+| `SCORING_CHAT_STRICT_SCHEMA_ENABLED` | `false` | Chat 协议的 Core 评分请求带严格 Schema；打开前需要 Vertex 实测与 QWK（见 2026-11-13 条目） |
+| `SCORING_CHAT_SCHEMA_ENUM_LIMIT` | `64` | Google 主机族：字符串枚举超过这么多个值就不发这个枚举；暂定值，改它等于换运行身份 |
 
 看用量：
 
@@ -3415,3 +3418,31 @@ ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h wor
   - 真正原因：拒答不重问，这是有意的。OpenAI 的两个协议里，拒答表现为「没有正文」加一个拒答标记（Responses 是 `type="refusal"` 的内容，Chat 是 `message.refusal` 或 `finish_reason=content_filter`），解析时先认拒答。只有真的没有正文、也没有拒答标记时才算回答不合格并重问；有拒答标记时即使带着正文也按拒答，不采用。
 
 维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 第二轮复审）：一条排错。
+
+### 2026-11-13 Chat 评分请求严格 Schema
+
+方案见 `docs/Chat评分请求严格Schema方案.md`。默认关闭，关闭时没有任何行为变化。
+
+环境变量：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `SCORING_CHAT_STRICT_SCHEMA_ENABLED` | `false` | Chat 协议的 Core 评分请求是否带严格 Schema。**打开前需要 Vertex 实测与真实留出集 QWK** |
+| `SCORING_CHAT_SCHEMA_ENUM_LIMIT` | `64` | Google 主机族：字符串枚举超过这么多个值就不发这个枚举。暂定值；改它等于换运行身份 |
+
+连接选项（Chat 连接的 `provider_options`，目前只能通过接口设置，界面没有入口）：`structured_output` 取 `json_schema` / `json_object` / `off`。总开关关闭时可以保存，但不生效。Responses 连接不接受这个选项（它始终带 Schema）。
+
+打开的顺序：app 与 worker 同时设 `SCORING_CHAT_STRICT_SCHEMA_ENABLED=true` 后重启，两边的值要一致。回滚：设回 `false` 重启，身份回到原值，原来的缓存与账本重新可用。
+
+怎么确认一个连接在发 Schema：评分记录里 `model_version` 以 `;schema=<方言>@<版本>` 结尾，例如 `chat-completions;schema=google@1/e64`。没有这个后缀就是没发。
+
+排错——打开后整篇论文的语义规则全部失败，错误码 `PROVIDER_INVALID_REQUEST`：
+
+- 报错指向哪里：错误码说的是“请求不合法”，容易去查模型名、`temperature`、`top_p`。
+- 真正的原因多半在哪里：厂商拒绝了 Schema。常见的是某条规则可引用的证据很多，枚举超过了厂商的复杂度上限；或者这个模型不支持 `json_schema`。
+- 怎么确认：看 worker 日志里 `llm_call_failed` 的 `status=400`，再看失败是不是集中在证据多的规则上。只有部分规则失败，是枚举太大，调低 `SCORING_CHAT_SCHEMA_ENUM_LIMIT`；全部失败，是模型或端点不支持，把连接的 `structured_output` 设为 `off`。
+- 系统不会自动退回不带 Schema 的请求（见 DECISIONS 同日条目）。
+
+排错——测试连接失败，但同一个地址、模型、Key 之前能用：连接设了 `structured_output=json_schema` 且总开关已打开时，测试请求也带一份小 Schema。接口不接受就在这里失败。把选项改成 `off` 再测一次即可区分。
+
+维护记录：2026-11-13 · Chat 评分请求严格 Schema：两个环境变量、一个连接选项、两条排错。
