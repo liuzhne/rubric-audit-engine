@@ -684,6 +684,11 @@ def test_the_paper_runtime_checks_the_group_entry_separately():
     [
         {"id": "r", "output": [{"type": "message", "content": [{"type": "refusal", "refusal": MARKER}]}]},
         {"id": "r", "output_text": "", "output": [{"content": [{"type": "refusal", "refusal": MARKER}]}]},
+        # 拒答标记与正文同时出现：正文是合法 JSON 也好、不是也好，都不采用。
+        {"id": "r", "output_text": "{\"ok\": true}", "output": [{"content": [{"type": "refusal", "refusal": MARKER}]}]},
+        {"id": "r", "output": [{"content": [
+            {"type": "output_text", "text": "{not json"}, {"type": "refusal", "refusal": MARKER},
+        ]}]},
     ],
 )
 def test_a_responses_refusal_is_a_refusal_not_an_empty_answer(body):
@@ -705,6 +710,9 @@ def test_a_responses_refusal_is_a_refusal_not_an_empty_answer(body):
         ({"message": {"role": "assistant", "content": None, "refusal": MARKER}}, "refused"),
         ({"finish_reason": "content_filter", "message": {"role": "assistant", "content": ""}}, "refused"),
         ({"finish_reason": "length", "message": {"role": "assistant", "content": "", "refusal": "x"}}, "output_truncated"),
+        # 拒答标记与正文同时出现：不采用正文。
+        ({"message": {"role": "assistant", "content": "{\"ok\": true}", "refusal": MARKER}}, "refused"),
+        ({"finish_reason": "content_filter", "message": {"role": "assistant", "content": "{not json"}}, "refused"),
         ({"message": {"role": "assistant", "content": "", "refusal": None}}, "empty_content"),
         ({"message": {"role": "assistant", "content": ""}}, "empty_content"),
     ],

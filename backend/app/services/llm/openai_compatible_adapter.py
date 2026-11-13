@@ -466,14 +466,16 @@ def _parse_chat_json_output(data):
     if not isinstance(message, dict):
         raise ChatJSONOutputError("missing_message")
     text = _message_content_to_text(message.get("content"))
+    # 有拒答标记就是拒答（``message.refusal`` 有内容，或被内容过滤拦下），即使同时带着正文也
+    # 不采用（失败关闭），不重问。截断仍按截断报：那时正文不全是容量问题。
+    refusal = message.get("refusal")
+    if not truncated and (
+        (isinstance(refusal, str) and refusal.strip())
+        or choice.get("finish_reason") == "content_filter"
+    ):
+        raise ChatJSONOutputError("refused")
     if not text.strip():
-        if truncated:
-            raise ChatJSONOutputError("output_truncated")
-        # 拒答先于「没有正文」：``message.refusal`` 有内容，或被内容过滤拦下。拒答不重问。
-        refusal = message.get("refusal")
-        if (isinstance(refusal, str) and refusal.strip()) or choice.get("finish_reason") == "content_filter":
-            raise ChatJSONOutputError("refused")
-        raise ChatJSONOutputError("empty_content")
+        raise ChatJSONOutputError("output_truncated" if truncated else "empty_content")
     try:
         return json.loads(_strip_json_fence(text))
     except json.JSONDecodeError as exc:

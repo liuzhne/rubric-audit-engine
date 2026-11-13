@@ -3412,6 +3412,6 @@ ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h wor
 
 - **材料报「模型按其安全策略拒绝评判部分规则」（`PROVIDER_OUTPUT_REFUSED`），但日志里没有 `rule_output_repair`**
   - 报错指向：看起来像重问没生效。
-  - 真正原因：拒答不重问，这是有意的。OpenAI 的两个协议里，拒答表现为「没有正文」加一个拒答标记（Responses 是 `type="refusal"` 的内容，Chat 是 `message.refusal` 或 `finish_reason=content_filter`），解析时先认拒答。只有真的没有正文、也没有拒答标记时才算回答不合格并重问。
+  - 真正原因：拒答不重问，这是有意的。OpenAI 的两个协议里，拒答表现为「没有正文」加一个拒答标记（Responses 是 `type="refusal"` 的内容，Chat 是 `message.refusal` 或 `finish_reason=content_filter`），解析时先认拒答。只有真的没有正文、也没有拒答标记时才算回答不合格并重问；有拒答标记时即使带着正文也按拒答，不采用。
 
 维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 第二轮复审）：一条排错。

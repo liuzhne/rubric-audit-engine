@@ -472,12 +472,13 @@ def _input_payload(paper, criterion, evidence_candidates, structure_checks, anch
 
 
 def _parse_json_output(data):
+    if _has_refusal(data.get("output") or []):
+        # 有拒答标记就是拒答，即使同时带着正文也不采用（失败关闭）：不重问，按
+        # PROVIDER_OUTPUT_REFUSED 报告，不带拒答原文。
+        raise ResponsesJSONOutputError("refused")
     text = data.get("output_text")
     if not text:
         text = _extract_output_text(data.get("output") or [])
-    if not text and _has_refusal(data.get("output") or []):
-        # 拒答先于「没有正文」：拒答不重问，按 PROVIDER_OUTPUT_REFUSED 报告。不带拒答原文。
-        raise ResponsesJSONOutputError("refused")
     if not text:
         # 带 reason：规则执行器据此认出「答了但不能用」，可以重问（与 Chat、Messages 一致）。
         raise ResponsesJSONOutputError(
