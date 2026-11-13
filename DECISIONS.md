@@ -3263,6 +3263,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 - **为兼容 Vertex 改 `core_view` 里的 Schema**：会同时改变 Responses 与 Claude 的请求，把一个主机族的限制扩散到所有协议。
 - **只开 `json_object`**：只保证是 JSON，不约束字段，“字段不对的 JSON”照样出现。
 - **总开关关闭时仍让连接选项生效**：那样一个连接可以绕过 QWK 门禁在生产打开。现在选项存着但不生效。
+- **顺手把 Responses 与 Claude 的 Schema 也计入输入估算**：它们一直在发 Schema 而没有计入，是已有的缺口。但计入会改变它们的证据选择，也就改变已有连接实际发出的请求，需要单独评估。这次只在 Chat 带 Schema 时计入（#104 复审）。
 - **把 `structured_output` 也用到 v1 兼容路径和 `complete_json`**：范围只限 Core 的两个请求，其它路径的请求不变。
 
 代价：

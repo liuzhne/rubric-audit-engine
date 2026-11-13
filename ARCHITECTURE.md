@@ -2116,6 +2116,7 @@ post_with_retry(call_context=…, output_limit_fallback=…)
   - 方言标签（如 `;schema=google@1/e64`）拼在 `model_version` 后面。
 - **调用链**：`OpenAICompatibleChatScorer.__init__` 解析出 `core_response_format` → `core_adapter.core_runtime_provider_contract` 把它记进信封的 `provider.response_format` → `_post_core_request` 按信封发 `response_format`。只影响 `score_core_envelope` 与 `score_core_group`；v1 兼容路径和 `complete_json` 仍只看 `response_format_json`。
 - **边界**：内核与 `core_view` 不知道方言；改写只发生在 Chat 适配器发送前。被放宽的约束仍由 `decode_core_response` 与 `normalize_core_provider_response` 校验。
+- **输入估算**：Chat 带 Schema 时，`core_view.request_input_estimate` 与 `estimate_view_input_tokens` 把 Schema 计入（`CoreProviderRequest.schema_counts_as_input`），证据选择与发送前检查量的都是实际发出的大小。按内核的原样 Schema 估算，是各方言的上界。Responses 与 Claude 的估算不变。
 - **测试连接**：`ai_connections._chat_schema_probe_fields` 在评分会带 Schema 时让探测也带一份小 Schema（同一个方言）。
 
 维护记录：2026-11-13 · Chat 评分请求严格 Schema：新模块与 Chat 适配器的输出约束，默认关闭。

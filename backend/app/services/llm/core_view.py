@@ -192,6 +192,8 @@ class CoreProviderRequest:
     rule_codes: tuple = ()
     # 回答不合格后的重问：追加在 ``user`` 之后的一条固定提示；首次请求为 None。
     repair_hint: str | None = None
+    # Chat 协议把 ``schema`` 放进请求体时为 True：它按输入计费，要算进输入估算。
+    schema_counts_as_input: bool = False
 
 
 def with_repair(request: CoreProviderRequest, repair) -> CoreProviderRequest:
@@ -422,6 +424,18 @@ def build_core_request(envelope) -> CoreProviderRequest:
     value = _core_envelope(envelope).to_mapping()
     rule = value["atomic_rule_snapshot"]
     view, alias_to_unit, decisions = _view(value, [rule])
+    return CoreProviderRequest(
+        system=_single_instructions(),
+        user=_dumps(view),
+        schema=_single_schema(rule, alias_to_unit),
+        alias_to_unit=alias_to_unit,
+        compression=decisions,
+        rule_codes=(rule["rule_code"],),
+        schema_counts_as_input=_schema_counts_as_input(value),
+    )
+
+
+def _single_schema(rule, alias_to_unit) -> dict:
     level_codes = sorted({item["level_code"] for item in rule.get("levels") or ()})
     schema = {
         "type": "object",
@@ -435,15 +449,48 @@ def build_core_request(envelope) -> CoreProviderRequest:
             "occurrences": _occurrences_schema(_allowed_finding_codes(rule), alias_to_unit),
         },
     }
-    _with_basis(schema, alias_to_unit)
-    return CoreProviderRequest(
-        system=_single_instructions(),
-        user=_dumps(view),
-        schema=schema,
-        alias_to_unit=alias_to_unit,
-        compression=decisions,
-        rule_codes=(rule["rule_code"],),
+    return _with_basis(schema, alias_to_unit)
+
+
+def _group_schema(rules, group_code, alias_to_unit) -> dict:
+    finding_codes = sorted({code for rule in rules for code in _allowed_finding_codes(rule)})
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schema_version", "group_code", "status", "selected_rule_code", "occurrences"],
+        "properties": {
+            "schema_version": {"type": "string", "enum": [GROUP_RESPONSE_SCHEMA]},
+            "group_code": {"type": "string", "enum": [group_code]},
+            "status": {"type": "string", "enum": _statuses()},
+            "selected_rule_code": {
+                "type": ["string", "null"],
+                "enum": [rule["rule_code"] for rule in rules] + [None],
+            },
+            "occurrences": _occurrences_schema(finding_codes, alias_to_unit),
+        },
+    }
+    return _with_basis(schema, alias_to_unit)
+
+
+def _schema_counts_as_input(value) -> bool:
+    """只有 Chat 协议带严格 Schema 时才计入（``SCORING_CHAT_STRICT_SCHEMA_ENABLED`` 打开之后）。
+
+    Responses 与 Claude 一直在发 Schema 而没有计入，这里不动它们：计入会改变它们的证据选择，
+    也就改变已有连接实际发出的请求。
+    """
+
+    identity = value.get("runtime_identity") if isinstance(value, Mapping) else None
+    provider = identity.get("provider") if isinstance(identity, Mapping) else None
+    return (
+        isinstance(provider, Mapping)
+        and provider.get("name") == "openai_compatible"
+        and provider.get("response_format") == "json_schema"
     )
+
+
+def _schema_estimate(schema) -> int:
+    # 按内核生成的原样 Schema 估算：各主机族的改写只会删减或等量替换，所以这是上界。
+    return conservative_token_estimate(_dumps(schema)) + _FRAMING_ALLOWANCE
 
 
 def _member_rules(envelopes) -> list[dict]:
@@ -464,31 +511,15 @@ def build_core_group_request(envelopes, *, group_code: str) -> CoreProviderReque
         if value["criterion_snapshot"] != first["criterion_snapshot"]:
             raise ValueError("group members must belong to one criterion")
     view, alias_to_unit, decisions = _view(first, rules, group_code=group_code)
-    finding_codes = sorted({code for rule in rules for code in _allowed_finding_codes(rule)})
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["schema_version", "group_code", "status", "selected_rule_code", "occurrences"],
-        "properties": {
-            "schema_version": {"type": "string", "enum": [GROUP_RESPONSE_SCHEMA]},
-            "group_code": {"type": "string", "enum": [group_code]},
-            "status": {"type": "string", "enum": _statuses()},
-            "selected_rule_code": {
-                "type": ["string", "null"],
-                "enum": [rule["rule_code"] for rule in rules] + [None],
-            },
-            "occurrences": _occurrences_schema(finding_codes, alias_to_unit),
-        },
-    }
-    _with_basis(schema, alias_to_unit)
     return CoreProviderRequest(
         system=_group_instructions(),
         user=_dumps(view),
-        schema=schema,
+        schema=_group_schema(rules, group_code, alias_to_unit),
         alias_to_unit=alias_to_unit,
         compression=decisions,
         group_code=group_code,
         rule_codes=tuple(rule["rule_code"] for rule in rules),
+        schema_counts_as_input=_schema_counts_as_input(first),
     )
 
 
@@ -503,6 +534,8 @@ def request_input_estimate(request: CoreProviderRequest) -> int:
     if request.repair_hint:
         # 重问多出的那条提示也算进去（另加一条消息的封装余量），预检量的才是实际发出的大小。
         estimate += conservative_token_estimate(request.repair_hint) + _FRAMING_ALLOWANCE
+    if request.schema_counts_as_input:
+        estimate += _schema_estimate(request.schema)
     return estimate
 
 
@@ -517,16 +550,22 @@ def estimate_view_input_tokens(value, rules) -> int:
     rules = list(rules)
     if len(rules) > 1:
         group_code = str(rules[0].get("mutex_group") or "group")
-        view, _aliases, _decisions = _view(value, rules, group_code=group_code)
+        view, aliases, _decisions = _view(value, rules, group_code=group_code)
         system = _group_instructions()
     else:
-        view, _aliases, _decisions = _view(value, rules)
+        view, aliases, _decisions = _view(value, rules)
         system = _single_instructions()
-    return (
+    estimate = (
         conservative_token_estimate(_dumps(view))
         + conservative_token_estimate(system)
         + _FRAMING_ALLOWANCE
     )
+    if _schema_counts_as_input(value):
+        schema = (
+            _group_schema(rules, group_code, aliases) if len(rules) > 1 else _single_schema(rules[0], aliases)
+        )
+        estimate += _schema_estimate(schema)
+    return estimate
 
 
 def preflight_core_request(envelope, request: CoreProviderRequest) -> int:

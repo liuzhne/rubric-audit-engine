@@ -152,6 +152,35 @@ def no_evidence_schema() -> dict:
     return schema
 
 
+def _completed(result) -> bool:
+    return bool(result) and result["http"] == 200 and result["finish"] != "length" and result["conforms"] is not None
+
+
+def enforcement_conclusion(outcomes: dict) -> str:
+    """只有对照成立时才下结论：不带 Schema 时模型照着违反了，带 Schema 时回答合规。"""
+
+    control = outcomes.get("violate no-schema")
+    constrained = {
+        name: result for name, result in outcomes.items()
+        if name.startswith("violate ") and name != "violate no-schema"
+    }
+    if not constrained:
+        return "结论：这次没有发「要求违反 Schema」的请求，不判断 Schema 是否被执行。"
+    if not _completed(control):
+        return "结论：没有结论。对照（violate no-schema）没有得到完整的回答，无法判断合规是不是 Schema 的作用。"
+    if control["conforms"]:
+        return "结论：没有结论。不带 Schema 时模型也没有照着违反，带 Schema 的合规说明不了问题。"
+    lines = []
+    for name, result in sorted(constrained.items()):
+        if not _completed(result):
+            lines.append("%s：没有结论（请求失败或被截断）" % name)
+        elif result["conforms"]:
+            lines.append("%s：Schema 被执行（对照违反了，带 Schema 时合规）" % name)
+        else:
+            lines.append("%s：Schema 没有被执行（只接受了参数）" % name)
+    return "结论：" + "；".join(lines)
+
+
 def _error_type(response) -> str:
     try:
         data = response.json()
@@ -227,6 +256,7 @@ def main(argv=None) -> int:
     endpoint = base_url + "/chat/completions"
     headers = openai_auth_headers(base_url, api_key)
     total_input = total_output = 0
+    outcomes = {}
     with httpx.Client(timeout=args.timeout, follow_redirects=False) as client:
         for name, schema, violate in cases:
             try:
@@ -234,6 +264,7 @@ def main(argv=None) -> int:
             except httpx.HTTPError as exc:
                 print("  %-24s transport_error=%s" % (name, type(exc).__name__))
                 continue
+            outcomes[name] = result
             total_input += result["input"]
             total_output += result["output"]
             print("  %-24s http=%s error=%s finish=%s conforms=%s input=%d output=%d" % (
@@ -241,7 +272,7 @@ def main(argv=None) -> int:
                 result["input"], result["output"],
             ))
     print("total input_tokens=%d output_tokens=%d" % (total_input, total_output))
-    print("violate 行 conforms=True 表示厂商执行了 Schema；False 表示只是接受了参数、没有约束生成；None 表示被截断，没有结论。")
+    print(enforcement_conclusion(outcomes))
     return 0
 
 

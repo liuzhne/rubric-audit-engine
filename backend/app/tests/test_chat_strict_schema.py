@@ -327,3 +327,64 @@ def test_the_probe_schema_has_the_shape_of_a_rule_schema_and_judges_answers():
     assert probe.conforms(good)
     assert not probe.conforms({**good, "status": "maybe"})
     assert not probe.conforms({**good, "note": "x"})
+
+
+def _outcome(conforms, *, http=200, finish="stop"):
+    return {"http": http, "finish": finish, "conforms": conforms}
+
+
+@pytest.mark.parametrize(
+    "outcomes, expected",
+    [
+        ({"violate raw": _outcome(True), "violate no-schema": _outcome(False)}, "Schema 被执行"),
+        ({"violate raw": _outcome(False), "violate no-schema": _outcome(False)}, "Schema 没有被执行"),
+        ({"violate raw": _outcome(True), "violate no-schema": _outcome(True)}, "没有结论"),
+        ({"violate raw": _outcome(True)}, "没有结论"),
+        ({"violate raw": _outcome(True), "violate no-schema": _outcome(None, finish="length")}, "没有结论"),
+        ({"violate raw": _outcome(None, http=400), "violate no-schema": _outcome(False)}, "没有结论"),
+        ({"aliases=8 raw": _outcome(True)}, "不判断"),
+    ],
+)
+def test_the_probe_only_concludes_enforcement_against_a_violating_control(outcomes, expected):
+    from backend.app.scripts import probe_chat_schema as probe
+
+    conclusion = probe.enforcement_conclusion(outcomes)
+    assert expected in conclusion
+    if expected != "Schema 被执行":
+        assert "Schema 被执行" not in conclusion
+
+
+# ---------------------------------------------------------------- 输入估算
+
+
+def test_the_schema_is_counted_as_input_only_when_chat_sends_it(enabled):
+    from backend.app.services.llm.core_view import estimate_view_input_tokens
+    from backend.app.services.llm.core_view import request_input_estimate
+
+    plain, _client = _scorer()
+    strict, _client = _scorer(structured_output="json_schema")
+    plain_envelope = adapter_tests._core_envelope(plain)
+    strict_envelope = adapter_tests._core_envelope(strict)
+
+    without = request_input_estimate(build_core_request(plain_envelope))
+    with_schema = request_input_estimate(build_core_request(strict_envelope))
+    assert with_schema > without
+
+    for envelope, expected in ((plain_envelope, without), (strict_envelope, with_schema)):
+        value = envelope.to_mapping()
+        assert estimate_view_input_tokens(value, [value["atomic_rule_snapshot"]]) == expected
+
+
+def test_responses_and_the_default_chat_estimate_are_unchanged():
+    from backend.app.services.llm.core_view import request_input_estimate
+    from backend.app.services.llm.openai_adapter import OpenAIResponsesScorer
+
+    responses = OpenAIResponsesScorer(
+        api_key="test-key", model_name="schema-test", client=adapter_tests._OpenAICoreClient(),
+    )
+    for scorer in (responses, _scorer(structured_output="json_schema")[0]):
+        request = build_core_request(adapter_tests._core_envelope(scorer))
+        assert request.schema_counts_as_input is False
+        assert request_input_estimate(request) == request_input_estimate(
+            type(request)(system=request.system, user=request.user, schema={}),
+        )
