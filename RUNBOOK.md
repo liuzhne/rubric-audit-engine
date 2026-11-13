@@ -1119,6 +1119,31 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 `pgs-production-migrate` 的最后一步用 `pgs_app` 复验，不是用 owner——owner 什么都读
 得到，证明不了应用能不能工作。0026/0027 的新表缺授权正是靠这一步才暴露（见 0029）。
 
+**部署会核对数据库版本（2026-11-12 起）**。`deploy-lightsail-production` 在切换版本之前有一步
+`Refuse to deploy ahead of the database migrations`：用本次要部署的镜像在实例上起一次性容器
+（`ops.sh <提交 SHA> python -m backend.app.scripts.production_migrate check`），读生产库的
+`alembic_version`，与镜像里迁移目录的 head 不一致就失败。失败时没有写 `.env`、没有切换，线上仍是
+原来的版本。它只核对、不迁移：迁移仍由手动的 `pgs-production-migrate` 执行。
+
+这一步失败时：
+
+1. 看日志里的“数据库为 …，本次部署需要 …”。
+2. 运行 `pgs-production-migrate`，分支选 **main**（代码已经合并，属于补跑），`expected_head` 填日志里
+   “需要”的那个版本，先 `dry_run=true`，再 `dry_run=false`。
+3. 回到失败的那次 `pgs-production-gates`，只重新运行失败的任务（Re-run failed jobs）。
+
+- 报错指向哪里：main 上的部署任务红了，看起来像部署坏了或实例连不上。
+- 真正的原因：发布 PR 合并之前没有跑迁移（3.0 第 6 条）。部署本身没有问题，线上也没有受影响。
+- 数据库版本比代码**新**也会被拦（例如 revert 掉一个已经执行的迁移）：先把数据库降级到代码的 head，
+  或把迁移文件留在仓库里。用 `deploy.sh <旧 SHA>` 在实例上回滚不经过这道门，回滚到迁移之前的版本
+  要自己确认旧代码能在新结构上运行。
+- `pgs-production-migrate` 的 `Show pending migrations` 打印的是全部迁移历史（`alembic history`），
+  不是只有待执行的；当前版本看 `Survey the database before migrating` 的 `current alembic head`。
+
+2026-11-12 的事故：发布 #101 含 0043、0044，合并前没有跑迁移；门禁全绿并完成部署，评分标准页
+报“数据库表尚未初始化或结构不匹配”（`atomic_rules.scope` 不存在）。当时部署只请求
+`/api/system/health`，它不比较版本，也不读那一列。
+
 ### 11.13 验收用例互相抢同一行种子数据
 
 **报错指向**：某个按钮 `locator.click` 等到超时，页面快照里那一行根本不存在。看起来
@@ -1316,6 +1341,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | 一条排错：拒答与回答不合格的区分；无新命令 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | 材料级说明不再写「已自动重问」，排错条目改为按 `attempt_count` 判断有没有重问过；无新命令 |
 | 2026-11-12 | 评分模型回答不合格的重问与报错 | 新环境变量 `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER`（默认 5，0 关闭）；新日志 `rule_output_repair`，`rule_execution_failed` 多了 `check` 与 `where`；两条排错；无迁移 |
+| 2026-11-12 | 部署前核对数据库版本 | 11.12 新增：部署任务切换前核对 `alembic_version` 与镜像的迁移 head，不一致就失败且不切换；写明失败后的三步（补跑迁移、重跑部署任务）、数据库比代码新也会被拦、`Show pending migrations` 打印的是全部历史；记录 2026-11-12 漏迁移的事故 |
 | 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | `SCORING_JUDGE_SCOPE_ENABLED` 含义改为按细则适用范围取证据（仍默认关，QWK 后再开）；排错补两种新的复核原因与“开了范围后转人工变多” |
 | 2026-11-11 | 评分细则适用范围（#99 第三轮复审） | 无新命令与排错；页面行为见 ARCHITECTURE 同日条目 |
 | 2026-11-11 | 评分细则适用范围（#99 第二轮复审） | 无新命令；面板说明改为“评分沿用现有取证逻辑” |
