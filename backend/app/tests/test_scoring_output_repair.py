@@ -713,6 +713,8 @@ def test_a_responses_refusal_is_a_refusal_not_an_empty_answer(body):
         # 拒答标记与正文同时出现：不采用正文。
         ({"message": {"role": "assistant", "content": "{\"ok\": true}", "refusal": MARKER}}, "refused"),
         ({"finish_reason": "content_filter", "message": {"role": "assistant", "content": "{not json"}}, "refused"),
+        # 截断 + 拒答标记 + 合法 JSON 正文：报截断，正文同样不采用。
+        ({"finish_reason": "length", "message": {"role": "assistant", "content": "{\"ok\": true}", "refusal": MARKER}}, "output_truncated"),
         ({"message": {"role": "assistant", "content": "", "refusal": None}}, "empty_content"),
         ({"message": {"role": "assistant", "content": ""}}, "empty_content"),
     ],
@@ -724,3 +726,35 @@ def test_a_chat_refusal_is_told_apart_from_an_empty_answer(choice, reason):
         _parse_chat_json_output({"id": "c", "choices": [choice]})
 
     assert caught.value.reason == reason and MARKER not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "body, reason",
+    [
+        ({"id": "r", "output": [{"content": [{"type": "refusal", "refusal": MARKER}]}]}, "refused"),
+        ({"id": "r", "output": []}, "empty_content"),
+        ({"id": "r", "output_text": "{not json"}, "invalid_json"),
+    ],
+)
+def test_responses_complete_json_keeps_the_parsed_classification(body, reason):
+    class _Client:
+        def post(self, url, headers, json):
+            return adapter_tests._Response(body)
+
+    scorer = OpenAIResponsesScorer(
+        api_key="test-key", model_name="gpt-core-test", client=_Client(), temperature=0,
+        max_output_tokens=900,
+    )
+
+    with pytest.raises(ProviderJSONOutputError) as caught:
+        scorer.complete_json("只输出 JSON。", {"q": 1})
+
+    # 拒答不能被改报成格式错误，否则归类等流程会把它当格式问题再问一次。
+    assert caught.value.reason == reason and MARKER not in str(caught.value)
+
+
+def test_a_truncated_chat_answer_without_a_refusal_marker_still_uses_valid_json():
+    from backend.app.services.llm.openai_compatible_adapter import _parse_chat_json_output
+
+    choice = {"finish_reason": "length", "message": {"role": "assistant", "content": "{\"ok\": true}"}}
+    assert _parse_chat_json_output({"id": "c", "choices": [choice]}) == {"ok": True}

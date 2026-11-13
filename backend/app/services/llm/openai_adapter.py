@@ -265,6 +265,9 @@ class OpenAIResponsesScorer(LLMScorer):
         _raise_if_incomplete(data)
         try:
             return _parse_json_output(data)
+        except ProviderJSONOutputError:
+            # 解析已经分好类（拒答、没有正文、非法 JSON）：原样上抛，不能把拒答改报成格式错误。
+            raise
         except ValueError as exc:
             raise ResponsesJSONOutputError("invalid_json") from exc
 

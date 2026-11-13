@@ -2100,6 +2100,6 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 
 ### 2026-11-13 评分模型回答不合格的重问与报错（#103 第二轮复审）
 
-回答解析的判断顺序（Responses 与 Chat 一致，Messages 原本就是）：截断 → 拒答 → 没有正文 → 不是合法 JSON。只有后两种（`empty_content`、`invalid_json`）会进执行器的重问；拒答报 `refused`，由 `failures` 投影为 `PROVIDER_OUTPUT_REFUSED`。Responses 看输出项里 `type="refusal"` 的内容，Chat 看 `message.refusal` 与 `finish_reason=content_filter`。有拒答标记时即使同时带着正文也按拒答，不采用正文。
+回答解析的判断顺序（Responses 与 Chat 一致，Messages 原本就是）：截断 → 拒答 → 没有正文 → 不是合法 JSON。只有后两种（`empty_content`、`invalid_json`）会进执行器的重问；拒答报 `refused`，由 `failures` 投影为 `PROVIDER_OUTPUT_REFUSED`。Responses 看输出项里 `type="refusal"` 的内容，Chat 看 `message.refusal` 与 `finish_reason=content_filter`。有拒答标记时即使同时带着正文也不采用正文：截断时报截断，否则报拒答。Responses 的 `complete_json` 原样上抛解析给出的分类。
 
 维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 第二轮复审）：回答解析先识别拒答。
