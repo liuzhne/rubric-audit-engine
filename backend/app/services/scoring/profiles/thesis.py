@@ -826,6 +826,8 @@ class ThesisProfile:
                 request_rules=selection_rules,
                 budget_target=settings.SCORING_TOKEN_BUDGET_TARGET,
                 judge_scope=settings.SCORING_JUDGE_SCOPE_ENABLED,
+                scope_char_budget=settings.SCORING_SCOPE_EVIDENCE_CHAR_BUDGET,
+                scope_context_window_tokens=settings.SCORING_SCOPE_CONTEXT_WINDOW_TOKENS,
                 selection_report=selection_report,
             )
             selected = envelope.to_mapping()["evidence_selection_identity"]

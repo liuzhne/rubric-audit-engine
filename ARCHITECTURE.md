@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-15 | 论文章节树与稳定前缀取证（阶段 1、2） | 新模块 `scoring/retrieval/section_tree`（读取时拼树、目录骨架、位置别名）；按范围取到的段落原样发出、“整章”按实际内容算；视图可改为证据在前的稳定前缀顺序；用量多一项缓存命中 token，迁移 `0045_cached_prompt_tokens` |
 | 2026-11-13 | Chat 评分请求严格 Schema | 新模块 `llm/schema_dialects`（输出约束解析 + 按主机族改写 Schema）；Chat 适配器新增 `core_response_format`，Core 的两个请求可带 `response_format: json_schema`；`core_adapter` 的身份字段读它；总开关默认关闭 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | `openai_adapter._parse_json_output` 与 `openai_compatible_adapter._parse_chat_json_output` 先识别拒答（`refused`）再报没有正文；拒答不进重问 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | `failures.OUTPUT_REPAIR_CHECKS` / `safe_output_check`：内核只认登记过的校验标识；运行时新增 `supports_group_repair`；`core_view.request_input_estimate` 计入重问提示；Responses 的 `_parse_json_output` 改抛带 `reason` 的 `ResponsesJSONOutputError` |
@@ -2120,3 +2121,19 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - **测试连接**：`ai_connections._chat_schema_probe_fields` 在评分会带 Schema 时让探测也带一份小 Schema（同一个方言）。
 
 维护记录：2026-11-13 · Chat 评分请求严格 Schema：新模块与 Chat 适配器的输出约束，默认关闭。
+
+### 2026-11-15 论文章节树与稳定前缀取证（阶段 1、2）
+
+方案见 [docs/论文章节树与稳定前缀取证方案.md](docs/论文章节树与稳定前缀取证方案.md)。阶段 3（分节摘要定位）与阶段 4（评分助手翻阅工具）没有做。
+
+- **章节树**：`scoring/retrieval/section_tree.py`。不存储：读取时按证据单元的 `section_path` 与章节、段落序号拼出（`build_tree`）；`outline` 是目录骨架（标题、层级、字数、段落数，最多 60 行、3 层）；`stable_alias` 按位置给证据起别名 `E<章节序号>.<段落序号>`。
+- **调用链（`SCORING_JUDGE_SCOPE_ENABLED` 打开时）**：
+  1. 执行器 `_section_role_map` 一篇论文算一次：`rule_scope_policy.section_role_map` 之外再调 `section_outline`，两者打包成 `_ScopeExtensions`，写进信封扩展的 `section_roles` 与 `section_outline`（都进入判定身份）。
+  2. `retrieval/selection.build_v4_envelope` 按范围选段时多两个参数：`scope_char_budget`（选出的段落合计字数上限，`judge_scope.select_scoped_units` 里截）与 `scope_context_window_tokens`（只对按范围取证的请求，取它与默认窗口中较大的）。
+  3. `llm/core_view._view`：信封的 `coverage_mode` 是 `section` / `cross_section` 时，段落按原文顺序、原样给出（`compress_evidence` 的上限换成范围字数预算），不再走“每段 400 字、合计 3000 字”；被截短或没放下的段落交给 `judge_scope.scope_view(reduced_unit_ids=…)`，所在章节标 `partial`。目录骨架放在 `paper.outline`。
+- **稳定前缀（`SCORING_STABLE_PREFIX_ENABLED`，默认关）**：视图顺序从 论文 → 评分项 → 上下文 → 范围 → 证据 → 规则 改为 论文 → 证据 → 评分项 → 上下文 → 范围 → 规则；证据按原文顺序列出、用位置别名。读同一章且整章放得下的规则，请求到证据结束为止逐字相同。全文范围的规则仍按规则选证与压缩，只改顺序与别名。
+- **版本**：提示词后缀 `+rule-scope@1` → `+rule-scope@2`，新增 `+stable-prefix@1`；选择器后缀 `judge-scope@2` → `judge-scope@3`。两个开关都关时请求、快照与判定身份与改动前逐字节相同。
+- **缓存命中计量**：`llm/usage.observed_usage` 多一个 `cached_tokens`（`reported_cached_tokens` 兼容 `prompt_tokens_details` / `input_tokens_details`、DeepSeek 与 Gemini 映射的顶层字段，Claude 取 `cache_read_input_tokens`），`UsageMeter` 累加，写进 `scoring_runs.cached_tokens` 与 `ai_usage_ledger.cached_tokens`，`llm_call` 日志与 Langfuse 用量同步带上。
+- **不变的**：Core 包仍不依赖检索模块（新判断走 `rule_scope_policy`）；论文快照与证据单元身份；引用校验；全文范围规则的选证。
+
+维护记录：2026-11-15 · 论文章节树与稳定前缀取证（阶段 1、2）：新增检索模块、视图顺序开关与缓存命中计量；迁移 head 为 `0045_cached_prompt_tokens`。

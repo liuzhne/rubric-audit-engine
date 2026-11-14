@@ -13,6 +13,11 @@ envelope:
 * the rule (or, for a mutex group, its ordered tiers).
 
 The order keeps the longest possible shared prefix for provider prompt caches.
+With ``SCORING_STABLE_PREFIX_ENABLED`` everything that changes per rule moves
+behind the evidence (paper → evidence → criterion → context → scope → rule),
+evidence is listed in document order and aliases come from the paragraph's
+position (``E<section>.<unit>``), so rules that read the same chapter share
+one prefix (docs/论文章节树与稳定前缀取证方案.md).
 Aliases are mapped back to authoritative evidence-unit ids before the existing
 fail-closed normalization, so quote and authorization checks are unchanged.
 """
@@ -36,8 +41,12 @@ from backend.app.services.scoring.core.contracts import WORDED_ATOMIC_RULE_SCHEM
 from backend.app.services.scoring.core.rule_context import derive_context_needs
 from backend.app.services.scoring.retrieval.compression import COMPRESSOR_VERSION
 from backend.app.services.scoring.retrieval.compression import compress_evidence
+from backend.app.services.scoring.retrieval.judge_scope import SCOPED
+from backend.app.services.scoring.retrieval.judge_scope import document_order
 from backend.app.services.scoring.retrieval.judge_scope import scope_view
 from backend.app.services.scoring.retrieval.section_roles import RoleResolver
+from backend.app.services.scoring.retrieval.section_tree import stable_alias
+from backend.app.services.scoring.retrieval.section_tree import unit_order
 from backend.app.services.scoring.retrieval.selection import TokenBudgetError
 from backend.app.services.scoring.retrieval.selection import conservative_token_estimate
 
@@ -79,13 +88,19 @@ _EVIDENCE_SENTENCE = "text 由原文连续片段组成，“…”表示省略�
 # 不随规则变化，便于厂商的提示词缓存。
 _SCOPE_SENTENCE = (
     "evidence 的 section 是该段落的完整标题路径，section_role 是它所属的章节角色。"
+    "paper.outline（如有）是系统从论文结构确定性提取的章节目录，每项有标题 title、层级 level、字数 chars 与"
+    "段落数 paragraphs，只用于了解全文结构和 evidence 在论文中的位置，不能作为证据。"
     "scope 说明本规则评价论文的哪一部分，由系统确定，你不得更改：type=document 时 evidence 是从全文按相关度"
-    "选出的段落，不是全文；type=section 时 evidence 只来自 scope.sections 列出的章节，coverage=complete 表示"
-    "给出了该章节的全部段落，partial 表示只给出了部分；type=cross_section 时规则要求对照多个章节。"
+    "选出的段落，不是全文；type=section 时 evidence 只来自 scope.sections 列出的章节，按论文原文顺序给出，"
+    "coverage=complete 表示原样给出了该章节的全部段落，partial 表示只给出了部分或有段落被截短；"
+    "type=cross_section 时规则要求对照多个章节。"
     "只依据 evidence 判断，不得推测范围外或未给出段落的内容。规则要求的内容在 evidence 里找不到时："
     "coverage=complete 可以判 triggered；coverage=partial 或 type=document 时判 insufficient_evidence，不能判缺失。"
     "cross_section 判 triggered 时，occurrences 必须分别引用至少两个不同章节的证据。"
 )
+# 稳定前缀（docs/论文章节树与稳定前缀取证方案.md 阶段 2）：证据别名改为按段落位置起名。
+_ALIAS_EXAMPLE = "ref（如 E1）"
+_STABLE_ALIAS_EXAMPLE = "ref（如 E3.2，表示第 3 个章节的第 2 段，序号从 0 起）"
 _NOT_TRIGGERED_SENTENCE = "not_triggered 表示证据显示不存在该缺陷，或现有证据不足以证明缺陷存在；"
 _REVIEW_STATUS_SENTENCE = (
     "not_triggered 表示证据覆盖了规则要检查的内容且显示不存在该缺陷；判 triggered 前先检查证据中作者"
@@ -117,6 +132,18 @@ def _judge_scope_enabled() -> bool:
     return bool(settings.SCORING_JUDGE_SCOPE_ENABLED)
 
 
+def _stable_prefix_enabled() -> bool:
+    from backend.app.core.config import settings
+
+    return bool(settings.SCORING_STABLE_PREFIX_ENABLED)
+
+
+def _scope_char_budget() -> int:
+    from backend.app.core.config import settings
+
+    return int(settings.SCORING_SCOPE_EVIDENCE_CHAR_BUDGET)
+
+
 def _insufficient_evidence_enabled() -> bool:
     """开了适用范围也允许“证据不足”：“整章 / 部分”的区分离不开它（方案第 8.4 节）。"""
 
@@ -140,6 +167,8 @@ def _basis_sentence() -> str:
 
 def _common_instructions() -> str:
     text = _COMMON_INSTRUCTIONS
+    if _stable_prefix_enabled():
+        text = text.replace(_ALIAS_EXAMPLE, _STABLE_ALIAS_EXAMPLE, 1)
     if _judge_scope_enabled():
         text = text.replace(_EVIDENCE_SENTENCE, _EVIDENCE_SENTENCE + _SCOPE_SENTENCE, 1)
     if _insufficient_evidence_enabled():
@@ -173,7 +202,10 @@ def provider_prompt_suffix() -> str:
 
     parts = []
     if _judge_scope_enabled():
-        parts.append("+rule-scope@1")
+        # @2：按范围取到的段落原样、按原文顺序给出，“整章”按实际发出的内容算，并带目录骨架。
+        parts.append("+rule-scope@2")
+    if _stable_prefix_enabled():
+        parts.append("+stable-prefix@1")
     if _insufficient_evidence_enabled():
         parts.append("+insufficient@1")
     if basis_enabled():
@@ -293,16 +325,35 @@ def _view(value, rules, *, group_code=None):
     wording = [text for rule in rules for text in _rule_wording(rule)]
     keep_captions = any(_CAPTION_MARKERS.search(text) for text in wording)
     query = "\n".join([criterion["name"], *wording])
-    shown, decisions = compress_evidence(
-        value["evidence_units"], query=query, keep_captions=keep_captions
-    )
+    scoped = _judge_scope_enabled()
+    stable = _stable_prefix_enabled()
+    # 按范围取到的段落（一章 / 多章对照）原样、按原文顺序给出：选证时已经按字数预算截好，
+    # 这里不再做“每段 400 字、合计 3000 字”的压缩，否则“整章”就不是真的。
+    whole = scoped and value.get("coverage_mode") in SCOPED
+    if whole:
+        budget = _scope_char_budget()
+        shown, decisions = compress_evidence(
+            document_order(value["evidence_units"]), query=query, keep_captions=True,
+            unit_cap=budget, total_cap=budget,
+        )
+    else:
+        shown, decisions = compress_evidence(
+            value["evidence_units"], query=query, keep_captions=keep_captions
+        )
+        if stable:
+            # 取舍仍按相关度（先压缩、后排序），显示按原文顺序。
+            shown = sorted(shown, key=lambda pair: unit_order(pair[0]))
+    reduced = [
+        item["evidence_unit_id"]
+        for item in decisions
+        if item["reducer"] != "kept" and item.get("reason") != "personal_information"
+    ] if whole else ()
     alias_to_unit = {}
     evidence = []
-    scoped = _judge_scope_enabled()
-    scope = scope_view(rules, value) if scoped else None
+    scope = scope_view(rules, value, reduced_unit_ids=reduced) if scoped else None
     resolver = RoleResolver.from_envelope(value) if scoped else None
     for index, (unit, text) in enumerate(shown, start=1):
-        alias = "E%d" % index
+        alias = stable_alias(unit) if stable else "E%d" % index
         alias_to_unit[alias] = unit["evidence_unit_id"]
         path = list(unit.get("section_path") or ())
         section = " › ".join(path) if scoped else (path[-1] if path else "")
@@ -312,9 +363,18 @@ def _view(value, rules, *, group_code=None):
         evidence.append(item)
 
     view = {}
+    paper = {}
     digest = extensions.get("paper_digest")
     if digest:
-        view["paper"] = {"digest": digest}
+        paper["digest"] = digest
+    outline = extensions.get("section_outline") if scoped else None
+    if isinstance(outline, Mapping) and outline.get("rows"):
+        paper["outline"] = outline["rows"]
+    if paper:
+        view["paper"] = paper
+    if stable:
+        # 随规则变化的内容全部放到证据之后：同一批证据的请求共用到证据为止的前缀。
+        view["evidence"] = evidence
     view["criterion"] = {
         "code": criterion["criterion_code"],
         "name": criterion["name"],
@@ -325,7 +385,8 @@ def _view(value, rules, *, group_code=None):
         view["context"] = context
     if scope:
         view["scope"] = scope
-    view["evidence"] = evidence
+    if not stable:
+        view["evidence"] = evidence
     if group_code is None:
         view["rule"] = _rule_view(rules[0])
     else:

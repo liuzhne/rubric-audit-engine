@@ -42,6 +42,7 @@ def langfuse_usage(usage):
             "output_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
             "reasoning_tokens": usage.get("reasoning_tokens") or None,
+            "cached_tokens": usage.get("cached_tokens") or None,
         }.items()
         if value is not None
     }

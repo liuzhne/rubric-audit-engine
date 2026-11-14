@@ -1313,6 +1313,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-15 | 论文章节树与稳定前缀取证（阶段 1、2） | 迁移 `0045_cached_prompt_tokens`（先跑迁移工作流再部署，有非零观测时拒绝降级）；新环境变量 `SCORING_SCOPE_EVIDENCE_CHAR_BUDGET`、`SCORING_SCOPE_CONTEXT_WINDOW_TOKENS`、`SCORING_STABLE_PREFIX_ENABLED`（默认关）；`llm_call` 日志新增 `cached_tokens`；三条排错 |
 | 2026-11-13 | Chat 评分请求严格 Schema | 新环境变量 `SCORING_CHAT_STRICT_SCHEMA_ENABLED`（默认关）与 `SCORING_CHAT_SCHEMA_ENUM_LIMIT`（默认 64，暂定）；Chat 连接选项 `structured_output`；一条排错；无迁移 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | 一条排错：拒答与回答不合格的区分；无新命令 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | 材料级说明不再写「已自动重问」，排错条目改为按 `attempt_count` 判断有没有重问过；无新命令 |
@@ -3446,3 +3447,36 @@ ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h wor
 排错——测试连接失败，但同一个地址、模型、Key 之前能用：连接设了 `structured_output=json_schema` 且总开关已打开时，测试请求也带一份小 Schema。接口不接受就在这里失败。把选项改成 `off` 再测一次即可区分。
 
 维护记录：2026-11-13 · Chat 评分请求严格 Schema：两个环境变量、一个连接选项、两条排错。
+
+### 2026-11-15 论文章节树与稳定前缀取证（阶段 1、2）
+
+方案见 `docs/论文章节树与稳定前缀取证方案.md`。发布：迁移 `0045_cached_prompt_tokens`（`scoring_runs` 与 `ai_usage_ledger` 各加一列 `cached_tokens`，不建表）。生产先从 develop 跑迁移工作流再合发布 PR；任一行有非零的 `cached_tokens` 时 0045 拒绝降级。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `SCORING_SCOPE_EVIDENCE_CHAR_BUDGET` | `8000` | 按范围取到的段落原样发给模型，合计最多多少字。只在 `SCORING_JUDGE_SCOPE_ENABLED=true` 时起作用 |
+| `SCORING_SCOPE_CONTEXT_WINDOW_TOKENS` | `14000` | 按范围取证的请求用的上下文窗口，取它与 `SCORING_CONTEXT_WINDOW_TOKENS` 中较大的；全文范围的规则不受影响 |
+| `SCORING_STABLE_PREFIX_ENABLED` | `false` | 视图改为证据在前、别名按段落位置起名。**改提示词与判定身份，打开前需要 QWK** |
+
+三个变量 app 与 worker 要一致。它们还没有登记到 `scripts/production_env.py`（`OPTIONAL_SWITCHES` 只带开关和枚举），现在只能取默认值；要在生产打开稳定前缀或调预算，先在那里和 `ci.yml` 的部署环境里登记。`SCORING_JUDGE_SCOPE_ENABLED` 打开后的行为也变了（提示词后缀 `+rule-scope@2`、选择器 `judge-scope@3`）：按范围取到的段落不再压缩。
+
+查缓存命中：`llm_call` 日志的 `cached_tokens`，或
+
+```sql
+select model_name, sum(prompt_tokens) as prompt, sum(cached_tokens) as cached
+from scoring_runs where created_at > now() - interval '1 day' group by model_name;
+```
+
+排错：
+
+- **`cached_tokens` 一直是 0**
+  - 报错指向：像是前缀没有命中，稳定前缀没起作用。
+  - 真正原因：三种情况都会是 0。厂商不上报这个字段（0 不等于没命中）；共同前缀短于厂商的最短缓存长度；`SCORING_STABLE_PREFIX_ENABLED` 没开，证据前面还有随规则变化的内容。另外只有读同一章、且整章放得下的规则才共用到证据为止的前缀，全文范围的规则各选各的证据。
+- **打开范围后，按章节评的规则大多转人工，判定是“证据不足”**
+  - 报错指向：像是模型不敢判。
+  - 真正原因：章节超过 `SCORING_SCOPE_EVIDENCE_CHAR_BUDGET`（或放不进范围窗口），视图里 `scope.sections[].coverage` 是 `partial`，提示词不允许在“部分”时判缺失。看规则任务的证据段数与章节字数；确实需要整章时调大预算与 `SCORING_SCOPE_CONTEXT_WINDOW_TOKENS`。
+- **按范围取证的请求被厂商拒绝（413 或请求体过大）**
+  - 报错指向：厂商报请求太大，像是论文本身有问题。
+  - 真正原因：范围请求的窗口默认 14000 token，比全文范围的 9040 大；有请求体上限的厂商放不下。把 `SCORING_SCOPE_CONTEXT_WINDOW_TOKENS` 调回 `SCORING_CONTEXT_WINDOW_TOKENS` 的值，章节会按较小的窗口截取并标为“部分”。
+
+维护记录：2026-11-15 · 论文章节树与稳定前缀取证（阶段 1、2）：记录迁移、三个环境变量、缓存命中的查法与三条排错。

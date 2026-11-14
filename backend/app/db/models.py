@@ -286,6 +286,10 @@ class AIUsageLedger(Base):
     truncated_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # 0045：厂商报告的缓存命中输入 token（已含在 prompt_tokens 里）。0 也可能是厂商不报。
+    cached_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     estimated_cost: Mapped[float | None] = mapped_column(Numeric(12, 6), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
@@ -2570,6 +2574,10 @@ class ScoringRun(Base):
         Integer, nullable=False, default=0, server_default="0"
     )
     truncated_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # 0045：厂商报告的缓存命中输入 token（已含在 prompt_tokens 里）。0 也可能是厂商不报。
+    cached_tokens: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
     # 篇章一致性发现（设计§8）：确定性（图表/引文）+ 语义（研究问题↔结论）合并，进报告、供人工复核。
