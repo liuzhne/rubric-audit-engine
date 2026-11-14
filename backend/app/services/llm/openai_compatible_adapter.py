@@ -28,6 +28,7 @@ from backend.app.services.llm.tool_calls import parse_chat_tool_response
 from backend.app.services.llm.transport import post_with_retry
 from backend.app.services.llm.usage import UsageMeter
 from backend.app.services.llm.usage import observed_usage
+from backend.app.services.llm.usage import reported_cached_tokens
 
 
 class OpenAICompatibleChatScorer(LLMScorer):
@@ -458,6 +459,7 @@ def _observed_usage_from_chat(data):
         truncated=finish_reason == "length",
         # 智谱只给思考文本、不报推理计数：正式输出按可见文字估算。
         answer_text=_message_content_to_text(message.get("content")),
+        cached=reported_cached_tokens(usage, "prompt_tokens_details"),
     )
 
 

@@ -4,6 +4,9 @@
 给出，人不指定；没有范围按全文。旧的按 ``applies_to``、人工判定范围与规则文字推断的做法删除。
 论文段落属于哪个章节角色由 ``section_roles`` 决定。范围只决定证据怎么取，不出分；
 推断规则的版本号 ``JUDGE_SCOPE_VERSION`` 进入证据选择身份。
+
+``@3``（docs/论文章节树与稳定前缀取证方案.md 阶段 1）：按范围取到的段落原样发给模型，不再经过
+“每段 400 字、合计 3000 字”的压缩，所以这里另设一个字数预算；“整章 / 部分”按实际发出的内容算。
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ from collections.abc import Mapping
 from backend.app.services.scoring.retrieval.section_roles import RoleResolver
 
 
-JUDGE_SCOPE_VERSION = "judge-scope@2"
+JUDGE_SCOPE_VERSION = "judge-scope@3"
 
 SECTION = "section"
 CROSS_SECTION = "cross_section"
@@ -22,6 +25,8 @@ SCOPED = (SECTION, CROSS_SECTION)
 # 一章或几章对照时最多给多少段：整章放得下就全部给出（coverage=complete），
 # 超过这个数或放不进预算才在章内排序截取（partial）。
 MAX_SCOPED_UNITS = 60
+# 按范围给出的段落合计最多多少字（``SCORING_SCOPE_EVIDENCE_CHAR_BUDGET`` 的默认值）。
+DEFAULT_SCOPE_CHAR_BUDGET = 8000
 
 
 def rule_scope(rule) -> dict:
@@ -47,10 +52,33 @@ def shared_rule(rules) -> dict:
     return min(rules, key=lambda item: item["rule_code"])
 
 
-def select_scoped_units(units, scope, *, rank, top_k, resolver: RoleResolver):
+def document_order(units) -> list:
+    """按论文原文顺序排（章节序号、段落序号）。"""
+
+    return sorted(units, key=lambda unit: (unit.get("section_ordinal", 0), unit.get("unit_ordinal", 0)))
+
+
+def _within_char_budget(selected, char_budget):
+    """从前往后累计到字数预算为止；至少留一段（单段超长时由视图截取并标为部分）。"""
+
+    kept = []
+    used = 0
+    for unit in selected:
+        size = len(unit.get("normalized_text") or "")
+        if kept and used + size > char_budget:
+            break
+        kept.append(unit)
+        used += size
+    return kept
+
+
+def select_scoped_units(
+    units, scope, *, rank, top_k, resolver: RoleResolver, char_budget: int = DEFAULT_SCOPE_CHAR_BUDGET,
+):
     """只在目标章节里选段；一章都找不到时按全文选（执行器随后不调用模型，转人工）。
 
     ``rank`` 给一组单元排序（BM25 + 章节多样性）。多章对照时各章交替取，保证每章先有代表。
+    选出的段落原样发给模型，所以合计不超过 ``char_budget`` 字。
     """
 
     limit = max(int(top_k), MAX_SCOPED_UNITS)
@@ -78,7 +106,7 @@ def select_scoped_units(units, scope, *, rank, top_k, resolver: RoleResolver):
         if not added:
             break
         depth += 1
-    return selected
+    return _within_char_budget(selected, max(1, int(char_budget)))
 
 
 def _coverage_by_target(value, targets, resolver):
@@ -115,13 +143,22 @@ def missing_targets(value) -> list[str]:
     return [target for target, item in coverage.items() if not item["available"]]
 
 
-def scope_view(rules, value) -> dict:
-    """告诉模型的范围：类型、每个目标章节对应的论文标题，以及给出的是整章还是部分。"""
+def scope_view(rules, value, *, reduced_unit_ids=()) -> dict:
+    """告诉模型的范围：类型、每个目标章节对应的论文标题，以及给出的是整章还是部分。
+
+    ``reduced_unit_ids`` 是视图里被截短或没放下的段落：它们所在的章节不能再说是“整章”。
+    """
 
     scope = rule_scope(shared_rule(rules))
     if value.get("coverage_mode") not in SCOPED or scope["scope"] not in SCOPED:
         return {"type": DOCUMENT}
-    coverage = _coverage_by_target(value, scope["targets"], RoleResolver.from_envelope(value))
+    resolver = RoleResolver.from_envelope(value)
+    coverage = _coverage_by_target(value, scope["targets"], resolver)
+    reduced = set(reduced_unit_ids)
+    for unit in (value.get("evidence_units") or ()) if reduced else ():
+        role = resolver.unit_role(unit)
+        if unit.get("evidence_unit_id") in reduced and role in coverage:
+            coverage[role]["complete"] = False
     return {
         "type": scope["scope"],
         "sections": [
@@ -140,10 +177,12 @@ def scope_view(rules, value) -> dict:
 
 __all__ = [
     "CROSS_SECTION",
+    "DEFAULT_SCOPE_CHAR_BUDGET",
     "DOCUMENT",
     "JUDGE_SCOPE_VERSION",
     "MAX_SCOPED_UNITS",
     "SECTION",
+    "document_order",
     "infer_judge_scope",
     "missing_targets",
     "rule_scope",

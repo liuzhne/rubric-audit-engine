@@ -143,6 +143,7 @@ def _run_provider_usage(run):
         "completion_tokens": int(run.completion_tokens or 0),
         "reasoning_tokens": int(getattr(run, "reasoning_tokens", 0) or 0),
         "truncated_count": int(getattr(run, "truncated_count", 0) or 0),
+        "cached_tokens": int(getattr(run, "cached_tokens", 0) or 0),
     }
 
 

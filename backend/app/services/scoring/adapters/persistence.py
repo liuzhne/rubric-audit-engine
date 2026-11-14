@@ -843,6 +843,7 @@ class CoreRunPersistence:
             total_tokens=int((usage or {}).get("total_tokens") or 0),
             reasoning_tokens=int((usage or {}).get("reasoning_tokens") or 0),
             truncated_count=int((usage or {}).get("truncated_count") or 0),
+            cached_tokens=int((usage or {}).get("cached_tokens") or 0),
             coherence_findings=stored_coherence_findings,
             format_findings=stored_format_findings,
             ai_total_score=(

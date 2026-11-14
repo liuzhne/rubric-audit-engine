@@ -27,6 +27,9 @@ USAGE_FIELDS = (
     "inferred_reasoning_requests",
     # 因输出上限结束的应答数（finish_reason=length / max_tokens / max_output_tokens）。
     "truncated_count",
+    # 厂商报告的缓存命中输入 token（已包含在 prompt_tokens 里，按折扣计费）。不报就是 0：
+    # 0 不等于没命中，也可能是厂商不报（docs/论文章节树与稳定前缀取证方案.md 阶段 2）。
+    "cached_tokens",
 )
 
 REASONING_REPORTED = "reported"
@@ -132,6 +135,7 @@ def observed_usage(
     finish_reason=None,
     truncated=False,
     answer_text=None,
+    cached=None,
 ) -> dict:
     """一次应答的中性用量与行为观测（只有计数和结束原因，不含任何内容）。
 
@@ -164,10 +168,32 @@ def observed_usage(
         "reasoning_source": source,
         "finish_reason": None if finish_reason is None else str(finish_reason),
         "truncated": bool(truncated),
+        # 缓存命中的输入 token；厂商没报时为 0。
+        "cached_tokens": _optional_count(cached) or 0,
         # 正式输出（事后统计，只进调用日志；估算值标 estimated）。
         "answer_tokens": answer,
         "answer_source": answer_source,
     }
+
+
+def reported_cached_tokens(usage, details_key: str):
+    """从厂商的 usage 里取缓存命中数；各家位置不同，都没有时返回 None。
+
+    OpenAI 兼容：``prompt_tokens_details.cached_tokens``（Responses 是 ``input_tokens_details``）；
+    DeepSeek：顶层 ``prompt_cache_hit_tokens``；Gemini 映射过来时可能是顶层 ``cached_tokens`` 或
+    ``cached_content_token_count``。
+    """
+
+    if not isinstance(usage, dict):
+        return None
+    details = usage.get(details_key)
+    if isinstance(details, dict) and _optional_count(details.get("cached_tokens")) is not None:
+        return _optional_count(details.get("cached_tokens"))
+    for name in ("cached_tokens", "prompt_cache_hit_tokens", "cached_content_token_count"):
+        value = _optional_count(usage.get(name))
+        if value is not None:
+            return value
+    return None
 
 
 def zero_usage() -> dict:
@@ -201,6 +227,7 @@ class UsageMeter:
                 self._totals["inferred_reasoning_requests"] += 1
             if usage.get("truncated"):
                 self._totals["truncated_count"] += 1
+            self._totals["cached_tokens"] += _count(usage.get("cached_tokens"))
 
     def record_failure(self) -> None:
         """Count one request that produced no usable answer (HTTP or transport)."""
