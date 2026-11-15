@@ -327,6 +327,45 @@ def test_migration_steps_each_get_only_their_own_connection(tmp_path):
     assert production_migrate.main(["survey"], environ={}, runner=runner) == 2
 
 
+def _versioned(path, *versions):
+    engine = create_engine("sqlite:///%s" % path)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(64) NOT NULL)"))
+        for version in versions:
+            connection.execute(text("INSERT INTO alembic_version VALUES (:v)"), {"v": version})
+    engine.dispose()
+    return {"RUNTIME_DATABASE_URL": "sqlite:///%s" % path}
+
+
+def test_deploy_check_passes_only_when_the_database_is_at_this_commits_head(tmp_path, capsys):
+    """部署前的门（2026-11-12 发布漏了迁移）：数据库版本与本提交的 head 不一致就返回 1。"""
+    head = production_migrate.code_head()
+    assert head == current_migration_head()
+    # 只用运行角色的连接串：部署任务不拿 owner。
+    assert production_migrate.CREDENTIAL["check"] == "RUNTIME_DATABASE_URL"
+
+    assert production_migrate.main(["check"], environ=_versioned(tmp_path / "ok.db", head)) == 0
+    assert head in capsys.readouterr().out
+
+    assert production_migrate.main(["check"], environ=_versioned(tmp_path / "old.db", "0042_assistant_message_client_id")) == 1
+    message = capsys.readouterr().err
+    # 说清数据库在哪、要到哪、接下来做什么。
+    assert "0042_assistant_message_client_id" in message and head in message
+    assert "pgs-production-migrate" in message and "没有切换版本" in message
+
+
+def test_deploy_check_refuses_an_empty_or_branched_database(tmp_path, capsys):
+    head = production_migrate.code_head()
+    empty = tmp_path / "empty.db"
+    create_engine("sqlite:///%s" % empty).connect().close()
+
+    assert production_migrate.main(["check"], environ={"RUNTIME_DATABASE_URL": "sqlite:///%s" % empty}) == 1
+    assert "没有 alembic_version" in capsys.readouterr().err
+    assert production_migrate.main(["check"], environ=_versioned(tmp_path / "none.db")) == 1
+    assert production_migrate.main(["check"], environ=_versioned(tmp_path / "two.db", head, "0001_initial_core")) == 1
+    assert production_migrate.main(["check"], environ={}) == 2
+
+
 # ---- 连接池 ----
 
 

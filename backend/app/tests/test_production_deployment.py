@@ -806,6 +806,26 @@ def test_lightsail_deploy_renders_both_env_files_for_the_instance_data_plane():
     assert "ops.sh" in lightsail[lightsail.index("- name: Ship the image and deployment files"):write]
 
 
+def test_lightsail_deploy_refuses_to_switch_ahead_of_the_database_migrations():
+    """2026-11-12：发布漏了迁移，新代码上线后读不存在的列。切换之前先核对数据库版本。"""
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    lightsail = workflow[workflow.index("  deploy-lightsail-production:"):]
+    ship = lightsail.index("- name: Ship the image and deployment files")
+    check = lightsail.index("- name: Refuse to deploy ahead of the database migrations")
+    write = lightsail.index("- name: Write the runtime environment")
+    switch = lightsail.index("- name: Switch to this version")
+    # 镜像与 ops.sh 送到之后、写 .env 与切换之前：不一致时实例上什么都没变。
+    assert ship < check < write < switch
+    step = lightsail[check:write]
+    # 用本次要部署的镜像里的迁移目录，不是 runner 上的检出，也不是实例上的旧版本。
+    assert "/opt/pgs/ops.sh ${GITHUB_SHA} python -m backend.app.scripts.production_migrate check" in step
+    assert '--kind ops --data-plane "$DATA_PLANE"' in step
+    # 只读一行版本号：只把运行角色的连接串交给容器，用完删除；这一步不能被跳过或放行。
+    assert "grep '^RUNTIME_DATABASE_URL=' \"$ops_file\" > \"$check_file\"" in step
+    assert '< "$check_file"' in step and "rm -f" in step and "umask 077" in step
+    assert "continue-on-error" not in step and "if:" not in step
+
+
 def test_empty_optional_settings_in_a_source_file_count_as_unset(tmp_path):
     """变量文件里写成 `NAME=` 的可选设置等于没设，与 --from-environment 一致，不挡住生成。"""
     script = _env_script()
