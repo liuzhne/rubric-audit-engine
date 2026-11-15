@@ -25,7 +25,7 @@ UNTITLED = "（无标题）"
 REDACTED_TITLE = "（已隐去）"
 
 
-def _outline_title(title: str) -> str:
+def outline_title(title: str) -> str:
     # 直接查个人信息字样，不用 classify_unit：它只把 80 字以内的段落算作个人信息，
     # 更长的标题里的名字会漏过去。
     if _PERSONAL_RE.search(title or ""):
@@ -92,7 +92,7 @@ def outline(units) -> list[dict]:
         rows = [node for node in rows if node["level"] <= level]
     return [
         {
-            "title": _outline_title(node["title"]),
+            "title": outline_title(node["title"]),
             "level": node["level"],
             "chars": node["chars"],
             "paragraphs": node["paragraphs"],

@@ -1313,6 +1313,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-15 | 分节摘要（阶段 3 的 PR A：生成与存储） | 迁移 `0046_document_derivations`（新表，已给 `pgs_app` 授权并建 RLS，降级直接删表）；新环境变量 `SCORING_SECTION_SUMMARY_CHAR_BUDGET`；新只读脚本 `estimate_section_summaries`；一条排错 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（#106 复审） | 无新命令；Langfuse 里 `input_tokens` 现在不含缓存命中部分（另见 `input_cached_tokens`），数据库与 `llm_call` 日志的 `prompt_tokens` 仍是全量；0045 降级在 Postgres 上先锁两张表 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（阶段 1、2） | 迁移 `0045_cached_prompt_tokens`（先跑迁移工作流再部署，有非零观测时拒绝降级）；新环境变量 `SCORING_SCOPE_EVIDENCE_CHAR_BUDGET`、`SCORING_SCOPE_CONTEXT_WINDOW_TOKENS`、`SCORING_STABLE_PREFIX_ENABLED`（默认关）；`llm_call` 日志新增 `cached_tokens`；三条排错 |
 | 2026-11-13 | Chat 评分请求严格 Schema | 新环境变量 `SCORING_CHAT_STRICT_SCHEMA_ENABLED`（默认关）与 `SCORING_CHAT_SCHEMA_ENUM_LIMIT`（默认 64，暂定）；Chat 连接选项 `structured_output`；一条排错；无迁移 |
@@ -3481,3 +3482,29 @@ from scoring_runs where created_at > now() - interval '1 day' group by model_nam
   - 真正原因：范围请求的窗口默认 14000 token，比全文范围的 9040 大；有请求体上限的厂商放不下。把 `SCORING_SCOPE_CONTEXT_WINDOW_TOKENS` 调回 `SCORING_CONTEXT_WINDOW_TOKENS` 的值，章节会按较小的窗口截取并标为“部分”。
 
 维护记录：2026-11-15 · 论文章节树与稳定前缀取证（阶段 1、2）：记录迁移、三个环境变量、缓存命中的查法与三条排错。
+
+### 2026-11-15 分节摘要（阶段 3 的 PR A：生成与存储）
+
+方案见 `docs/分节摘要定位方案.md`。发布：迁移 `0046_document_derivations`（新表 `document_derivations`；迁移里已给 `pgs_app` 授权并建 RLS，表已加进 `postgres_verifier.RUNTIME_ACCESS_TABLES`，迁移工作流的运行角色验证会读它）。生产先从 develop 跑迁移工作流再合发布 PR。表是缓存，降级直接删。
+
+评分行为没有变化：这一步没有开关，摘要只有被调用才会生成，而现在没有调用方。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `SCORING_SECTION_SUMMARY_CHAR_BUDGET` | `12000` | 一次摘要请求最多给多少字原文；一章超过时按节点拆成多次 |
+
+估算一篇论文做摘要的开销（只读数据库，不调模型）：
+
+```bash
+python -m backend.app.scripts.estimate_section_summaries <document_snapshot_id>
+```
+
+输出节点数、模型调用次数、发给模型的字数和节点标题；标题来自论文，真实论文的输出不要提交。
+
+排错：
+
+- **部署后评分报 `permission denied for table document_derivations`**
+  - 报错指向：像是应用代码或连接串的问题。
+  - 真正原因：迁移是在 `pgs_app` 角色还不存在的库上跑的（迁移里“角色不存在就跳过授权”），或者表是手工建的。授权不随表自动获得。用迁移工作流的 verify 步骤确认；缺的话以属主身份补 `GRANT SELECT, INSERT, UPDATE, DELETE` 并按 0046 建 RLS 策略。
+
+维护记录：2026-11-15 · 分节摘要（PR A）：记录迁移、一个环境变量、估算脚本与一条排错。

@@ -48,6 +48,7 @@ MIGRATION_SEQUENCE = (
     "0043_batch_owner_isolation",
     "0044_atomic_rule_scope",
     "0045_cached_prompt_tokens",
+    "0046_document_derivations",
 )
 EXPECTED_HEAD = MIGRATION_SEQUENCE[-1]
 ACTIVE_JOB_INDEX = "ix_batch_scoring_jobs_one_active_per_batch"
@@ -79,6 +80,7 @@ RUNTIME_ACCESS_TABLES = (
     "assistant_checkpoints",
     "assistant_checkpoint_writes",
     "site_leads",
+    "document_derivations",
 )
 
 
