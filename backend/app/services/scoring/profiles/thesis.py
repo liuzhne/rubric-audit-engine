@@ -540,6 +540,26 @@ class ThesisLLMRuntime:
             lambda: classify_headings(self.scorer, headings, profile_key), envelope=None
         )
 
+    def summarize_sections(self, *, units):
+        """一篇论文的分节摘要记录（docs/分节摘要定位方案.md 第 4 节）；评分器不能生成时返回 None。
+
+        每批一次模型调用，各自走评分调用的同一套计量（单篇输入上限、用量、思考守卫）。
+        Mock 或没有 ``complete_json`` 的评分器不生成。
+        """
+
+        from backend.app.core.config import settings
+        from backend.app.services.scoring.retrieval.section_summary import summarize_sections
+
+        if not callable(getattr(self.scorer, "complete_json", None)) or str(
+            getattr(self.scorer, "provider", "")
+        ).lower() == "mock":
+            return None
+        return summarize_sections(
+            self.scorer, units,
+            char_budget=settings.SCORING_SECTION_SUMMARY_CHAR_BUDGET,
+            call=lambda run: self._metered(run, envelope=None),
+        )
+
     @property
     def supports_group_repair(self) -> bool:
         """评分器的整组入口接不接受 ``repair``；不接受时执行器不重问互斥组（单条规则不受影响）。"""

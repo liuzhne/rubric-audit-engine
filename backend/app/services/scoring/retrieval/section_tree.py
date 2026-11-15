@@ -25,7 +25,7 @@ UNTITLED = "（无标题）"
 REDACTED_TITLE = "（已隐去）"
 
 
-def _outline_title(title: str) -> str:
+def outline_title(title: str) -> str:
     if classify_unit(title) == "personal":
         return REDACTED_TITLE
     return title[:MAX_OUTLINE_TITLE_CHARS]
@@ -90,7 +90,7 @@ def outline(units) -> list[dict]:
         rows = [node for node in rows if node["level"] <= level]
     return [
         {
-            "title": _outline_title(node["title"]),
+            "title": outline_title(node["title"]),
             "level": node["level"],
             "chars": node["chars"],
             "paragraphs": node["paragraphs"],
