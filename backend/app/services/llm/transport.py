@@ -35,14 +35,22 @@ from backend.app.services.llm_observability import observation
 
 
 def langfuse_usage(usage):
+    # Langfuse 把各项当成互不重叠的桶相加；prompt_tokens 已经包含缓存命中的部分，
+    # 所以有缓存命中时 input_tokens 只报没命中的那部分。
+    prompt = usage.get("prompt_tokens")
+    cached = usage.get("cached_tokens") or 0
+    if isinstance(prompt, int) and not isinstance(prompt, bool) and 0 < cached <= prompt:
+        prompt -= cached
+    else:
+        cached = 0
     return {
         key: value
         for key, value in {
-            "input_tokens": usage.get("prompt_tokens"),
+            "input_tokens": prompt,
             "output_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
             "reasoning_tokens": usage.get("reasoning_tokens") or None,
-            "cached_tokens": usage.get("cached_tokens") or None,
+            "input_cached_tokens": cached or None,
         }.items()
         if value is not None
     }

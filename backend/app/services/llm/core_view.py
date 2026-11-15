@@ -43,7 +43,10 @@ from backend.app.services.scoring.retrieval.compression import COMPRESSOR_VERSIO
 from backend.app.services.scoring.retrieval.compression import compress_evidence
 from backend.app.services.scoring.retrieval.judge_scope import SCOPED
 from backend.app.services.scoring.retrieval.judge_scope import document_order
+from backend.app.services.scoring.retrieval.judge_scope import rule_scope
 from backend.app.services.scoring.retrieval.judge_scope import scope_view
+from backend.app.services.scoring.retrieval.judge_scope import scoped_unit_cap
+from backend.app.services.scoring.retrieval.judge_scope import shared_rule
 from backend.app.services.scoring.retrieval.section_roles import RoleResolver
 from backend.app.services.scoring.retrieval.section_tree import stable_alias
 from backend.app.services.scoring.retrieval.section_tree import unit_order
@@ -332,9 +335,11 @@ def _view(value, rules, *, group_code=None):
     whole = scoped and value.get("coverage_mode") in SCOPED
     if whole:
         budget = _scope_char_budget()
+        targets = rule_scope(shared_rule(rules))["targets"]
         shown, decisions = compress_evidence(
             document_order(value["evidence_units"]), query=query, keep_captions=True,
-            unit_cap=budget, total_cap=budget,
+            unit_cap=scoped_unit_cap(value["evidence_units"], budget, len(targets)),
+            total_cap=budget, keep_fitting=True,
         )
     else:
         shown, decisions = compress_evidence(

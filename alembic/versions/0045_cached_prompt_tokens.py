@@ -47,6 +47,10 @@ def upgrade():
 
 def downgrade():
     connection = op.get_bind()
+    if connection.dialect.name == "postgresql":
+        # 先锁表再计数：否则计数返回 0 之后、删列之前提交的观测会被一起删掉。
+        for table in TABLES:
+            op.execute("LOCK TABLE %s IN ACCESS EXCLUSIVE MODE" % table)
     for table in TABLES:
         observed = connection.execute(
             sa.text("SELECT count(*) FROM %s WHERE cached_tokens <> 0" % table)

@@ -1313,6 +1313,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-15 | 论文章节树与稳定前缀取证（#106 复审） | 无新命令；Langfuse 里 `input_tokens` 现在不含缓存命中部分（另见 `input_cached_tokens`），数据库与 `llm_call` 日志的 `prompt_tokens` 仍是全量；0045 降级在 Postgres 上先锁两张表 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（阶段 1、2） | 迁移 `0045_cached_prompt_tokens`（先跑迁移工作流再部署，有非零观测时拒绝降级）；新环境变量 `SCORING_SCOPE_EVIDENCE_CHAR_BUDGET`、`SCORING_SCOPE_CONTEXT_WINDOW_TOKENS`、`SCORING_STABLE_PREFIX_ENABLED`（默认关）；`llm_call` 日志新增 `cached_tokens`；三条排错 |
 | 2026-11-13 | Chat 评分请求严格 Schema | 新环境变量 `SCORING_CHAT_STRICT_SCHEMA_ENABLED`（默认关）与 `SCORING_CHAT_SCHEMA_ENUM_LIMIT`（默认 64，暂定）；Chat 连接选项 `structured_output`；一条排错；无迁移 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | 一条排错：拒答与回答不合格的区分；无新命令 |

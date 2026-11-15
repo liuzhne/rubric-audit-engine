@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-15 | 论文章节树与稳定前缀取证（#106 复审） | `section_tree.outline` 隐去像个人信息的标题；`judge_scope._within_char_budget` 必留每个目标章节的第一段，`scoped_unit_cap` 在放不下时按章节数平分；`compress_evidence(keep_fitting=…)`；`transport.langfuse_usage` 把缓存命中与未命中分成两个桶 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（阶段 1、2） | 新模块 `scoring/retrieval/section_tree`（读取时拼树、目录骨架、位置别名）；按范围取到的段落原样发出、“整章”按实际内容算；视图可改为证据在前的稳定前缀顺序；用量多一项缓存命中 token，迁移 `0045_cached_prompt_tokens` |
 | 2026-11-13 | Chat 评分请求严格 Schema | 新模块 `llm/schema_dialects`（输出约束解析 + 按主机族改写 Schema）；Chat 适配器新增 `core_response_format`，Core 的两个请求可带 `response_format: json_schema`；`core_adapter` 的身份字段读它；总开关默认关闭 |
 | 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | `openai_adapter._parse_json_output` 与 `openai_compatible_adapter._parse_chat_json_output` 先识别拒答（`refused`）再报没有正文；拒答不进重问 |

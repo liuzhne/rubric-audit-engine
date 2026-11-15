@@ -12,12 +12,23 @@
 
 from __future__ import annotations
 
+from backend.app.services.scoring.retrieval.compression import classify_unit
+
 
 SECTION_TREE_VERSION = "section-tree@1"
 MAX_OUTLINE_ROWS = 60
 MAX_OUTLINE_LEVEL = 3
 MAX_OUTLINE_TITLE_CHARS = 30
 UNTITLED = "（无标题）"
+# 标题本身像个人信息（“学生姓名：……”“指导教师 ……”）时目录里不显示原文：这类段落在证据里
+# 也是整段去掉的，不能从目录这条路发给模型。
+REDACTED_TITLE = "（已隐去）"
+
+
+def _outline_title(title: str) -> str:
+    if classify_unit(title) == "personal":
+        return REDACTED_TITLE
+    return title[:MAX_OUTLINE_TITLE_CHARS]
 
 
 def unit_order(unit) -> tuple:
@@ -79,7 +90,7 @@ def outline(units) -> list[dict]:
         rows = [node for node in rows if node["level"] <= level]
     return [
         {
-            "title": node["title"][:MAX_OUTLINE_TITLE_CHARS],
+            "title": _outline_title(node["title"]),
             "level": node["level"],
             "chars": node["chars"],
             "paragraphs": node["paragraphs"],

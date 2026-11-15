@@ -58,18 +58,33 @@ def document_order(units) -> list:
     return sorted(units, key=lambda unit: (unit.get("section_ordinal", 0), unit.get("unit_ordinal", 0)))
 
 
-def _within_char_budget(selected, char_budget):
-    """从前往后累计到字数预算为止；至少留一段（单段超长时由视图截取并标为部分）。"""
+def _size(unit) -> int:
+    return len(unit.get("normalized_text") or "")
 
-    kept = []
-    used = 0
-    for unit in selected:
-        size = len(unit.get("normalized_text") or "")
-        if kept and used + size > char_budget:
+
+def _within_char_budget(selected, char_budget, *, required=0):
+    """前 ``required`` 段（每个目标章节排第一的那段）一定保留，其余按顺序放到字数预算为止。
+
+    必留的段落加起来超过预算时不再放别的，由视图按章节数平分预算截短并标为“部分”
+    （``scoped_unit_cap``）：多章对照不能因为某一章的一段很长就丢掉另一章。
+    """
+
+    kept = list(selected[:max(1, required)])
+    used = sum(_size(unit) for unit in kept)
+    for unit in selected[len(kept):]:
+        if used + _size(unit) > char_budget:
             break
         kept.append(unit)
-        used += size
+        used += _size(unit)
     return kept
+
+
+def scoped_unit_cap(units, char_budget: int, target_count: int) -> int:
+    """视图里每段最多显示多少字：放得下时是整个预算（原样），放不下时按目标章节数平分。"""
+
+    if sum(_size(unit) for unit in units) <= char_budget:
+        return char_budget
+    return max(1, char_budget // max(1, target_count))
 
 
 def select_scoped_units(
@@ -106,7 +121,8 @@ def select_scoped_units(
         if not added:
             break
         depth += 1
-    return _within_char_budget(selected, max(1, int(char_budget)))
+    # 交替取的第一轮正好是每个有内容的目标章节各一段。
+    return _within_char_budget(selected, max(1, int(char_budget)), required=len(pools))
 
 
 def _coverage_by_target(value, targets, resolver):
@@ -187,6 +203,7 @@ __all__ = [
     "missing_targets",
     "rule_scope",
     "scope_view",
+    "scoped_unit_cap",
     "select_scoped_units",
     "shared_rule",
 ]

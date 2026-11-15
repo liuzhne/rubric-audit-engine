@@ -270,3 +270,56 @@ def test_cached_prompt_tokens_are_read_from_each_protocol_and_summed():
     for usage in (chat, deepseek, silent):
         meter.record_success(usage)
     assert meter.snapshot()["cached_tokens"] == 1152
+
+
+# ── #106 复审修正 ─────────────────────────────────────────────────
+
+
+def test_outline_hides_headings_that_look_like_personal_information():
+    rows = section_tree.outline(_units([
+        (["学生姓名：张三"], ["封面信息"]),
+        (["第1章 绪论"], ["本文研究校园互助平台。"]),
+    ]))
+    assert [row["title"] for row in rows] == [section_tree.REDACTED_TITLE, "第1章 绪论"]
+
+
+def test_cross_section_keeps_a_paragraph_of_every_target_even_over_budget(monkeypatch):
+    monkeypatch.setattr(settings, "SCORING_JUDGE_SCOPE_ENABLED", True)
+    monkeypatch.setattr(settings, "SCORING_SCOPE_EVIDENCE_CHAR_BUDGET", 1000)
+    units = _units([
+        (["第1章 绪论"], [_paragraph(0, 950)]),
+        (["第5章 结论"], ["本文完成了平台实现，回应了绪论提出的问题。" * 5]),
+    ])
+    envelope = build_v4_envelope(_thesis(units, _scoped_rule("cross_section", ["绪论", "结论"])),
+                                 top_k=3, judge_scope=True, scope_char_budget=1000, **BUDGET)
+    view = json.loads(core_view.build_core_request(envelope).user)
+
+    # 绪论那段 950 字，加上结论就超过 1000 字的预算：两章都要留，长的那段按章节数平分预算截短。
+    assert {item["section_role"] for item in view["evidence"]} == {"绪论", "结论"}
+    assert sum(len(item["text"]) for item in view["evidence"]) <= 1000
+    coverage = {item["role"]: item["coverage"] for item in view["scope"]["sections"]}
+    assert coverage == {"绪论": "partial", "结论": "complete"}
+
+
+def test_a_short_last_paragraph_is_kept_when_it_still_fits():
+    from backend.app.services.scoring.retrieval.compression import compress_evidence
+
+    units = [{"evidence_unit_id": "a", "normalized_text": "甲" * 990},
+             {"evidence_unit_id": "b", "normalized_text": "结论成立。"}]
+    shown, decisions = compress_evidence(units, query="", keep_captions=True,
+                                         unit_cap=1000, total_cap=1000, keep_fitting=True)
+    assert [text for _unit, text in shown] == ["甲" * 990, "结论成立。"]
+    assert {item["reducer"] for item in decisions} == {"kept"}
+    # 默认路径不变：剩余不足 40 字时这段不放。
+    default, _ = compress_evidence(units, query="", keep_captions=True, unit_cap=1000, total_cap=1000)
+    assert len(default) == 1
+
+
+def test_langfuse_usage_reports_cached_and_uncached_input_as_separate_buckets():
+    from backend.app.services.llm.transport import langfuse_usage
+
+    assert langfuse_usage({"prompt_tokens": 900, "completion_tokens": 20, "total_tokens": 920,
+                           "cached_tokens": 640}) == {
+        "input_tokens": 260, "input_cached_tokens": 640, "output_tokens": 20, "total_tokens": 920}
+    assert langfuse_usage({"prompt_tokens": 900, "completion_tokens": 20, "total_tokens": 920}) == {
+        "input_tokens": 900, "output_tokens": 20, "total_tokens": 920}

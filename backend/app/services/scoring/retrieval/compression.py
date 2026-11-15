@@ -119,13 +119,16 @@ def compress_unit(text: str, *, kind: str, terms: set[str], cap: int) -> tuple[s
 
 def compress_evidence(
     units, *, query: str, keep_captions: bool,
-    unit_cap: int = UNIT_CHAR_CAP, total_cap: int = EVIDENCE_CHAR_CAP,
+    unit_cap: int = UNIT_CHAR_CAP, total_cap: int = EVIDENCE_CHAR_CAP, keep_fitting: bool = False,
 ):
     """Compress units (already in priority order) under per-unit and total caps.
 
     Returns ``(shown, decisions)`` where ``shown`` lists ``(unit, text)`` pairs
     for the units that remain visible.  Scoped requests pass larger caps so a
     chapter that fits its budget is shown verbatim (every reducer is ``kept``).
+    ``keep_fitting`` keeps a unit that fits the remaining budget even when less
+    than ``MIN_UNIT_CHARS`` remain (a short last paragraph of a chapter); the
+    default path keeps its previous behaviour.
     """
 
     terms = set(query_terms(query))
@@ -147,7 +150,7 @@ def compress_evidence(
             decisions.append({**decision, "reducer": "dropped", "after_chars": 0, "reason": "caption_not_needed"})
             continue
         cap = min(unit_cap, remaining)
-        if cap < MIN_UNIT_CHARS:
+        if cap < MIN_UNIT_CHARS and not (keep_fitting and 0 < len(text) <= cap):
             decisions.append({**decision, "reducer": "dropped", "after_chars": 0, "reason": "evidence_budget"})
             continue
         shown_text, reducer = compress_unit(text, kind=kind, terms=terms, cap=cap)
