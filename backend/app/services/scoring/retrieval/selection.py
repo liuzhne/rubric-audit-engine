@@ -293,6 +293,8 @@ def build_v4_envelope(
     budget_target: str = "envelope",
     judge_scope: bool = False,
     selection_report: dict | None = None,
+    scope_char_budget: int | None = None,
+    scope_context_window_tokens: int | None = None,
 ):
     """Select whole authoritative units and prove the final request fits.
 
@@ -304,6 +306,9 @@ def build_v4_envelope(
     request (the mutex group, else this rule); ``budget_target="provider_view"``
     measures that request's view instead of the whole identity envelope.
     ``judge_scope`` restricts section / cross-section rules to their sections.
+    Their paragraphs are sent verbatim, so they get their own character budget
+    (``scope_char_budget``) and, when larger, their own context window
+    (``scope_context_window_tokens``); other rules are unaffected.
 
     ``selection_report`` (a dict, optional) receives how many units the
     document had, how many the ranking asked for and how many fit the budget.
@@ -326,6 +331,7 @@ def build_v4_envelope(
     selector_version = SELECTOR_VERSION
     if scope is not None:
         from backend.app.services.scoring.retrieval.judge_scope import (
+            DEFAULT_SCOPE_CHAR_BUDGET,
             JUDGE_SCOPE_VERSION,
             select_scoped_units,
         )
@@ -339,7 +345,10 @@ def build_v4_envelope(
             rank=lambda units: _diversify(_rank(units, query)),
             top_k=top_k,
             resolver=RoleResolver.from_envelope(base),
+            char_budget=scope_char_budget or DEFAULT_SCOPE_CHAR_BUDGET,
         )
+        if scope_context_window_tokens:
+            context_window_tokens = max(context_window_tokens, int(scope_context_window_tokens))
     else:
         coverage_mode = _coverage_mode(base, _structural_query(base, selection_rules))
         ranked = _diversify(_rank(list(base["evidence_units"]), query))

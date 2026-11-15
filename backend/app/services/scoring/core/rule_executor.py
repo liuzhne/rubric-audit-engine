@@ -12,6 +12,7 @@ from copy import deepcopy
 from decimal import Decimal
 import inspect
 import logging
+from typing import NamedTuple
 
 from backend.app.services.scoring.core.canonical import canonical_sha256
 from backend.app.services.scoring.core.contracts import (
@@ -171,7 +172,11 @@ def _with_section_roles(extensions, section_roles):
 
     if section_roles is None or not isinstance(extensions, dict):
         return extensions
-    return {**extensions, "section_roles": deepcopy(section_roles)}
+    additions = {"section_roles": deepcopy(section_roles.roles)}
+    if section_roles.outline is not None:
+        # 目录骨架（章节树）：同一篇论文所有规则共用的请求开头，同样进入判定身份。
+        additions["section_outline"] = deepcopy(section_roles.outline)
+    return {**extensions, **additions}
 
 
 def _scope_policy(profile):
@@ -180,15 +185,24 @@ def _scope_policy(profile):
     return getattr(profile, "rule_scope_policy", None)
 
 
+class _ScopeExtensions(NamedTuple):
+    """一篇论文算一次、所有规则共用的范围扩展：章节角色归类与目录骨架。"""
+
+    roles: dict
+    outline: dict | None
+
+
 def _section_role_map(value, nodes_by_code, llm_runtime, profile):
     policy = _scope_policy(profile)
     if policy is None:
         return None
-    return policy.section_role_map(
-        value=value,
-        rules=[node["atomic_rule_snapshot"] for node in nodes_by_code.values()],
-        llm_runtime=llm_runtime,
-    )
+    rules = [node["atomic_rule_snapshot"] for node in nodes_by_code.values()]
+    roles = policy.section_role_map(value=value, rules=rules, llm_runtime=llm_runtime)
+    if roles is None:
+        return None
+    build_outline = getattr(policy, "section_outline", None)
+    outline = build_outline(value=value, rules=rules) if callable(build_outline) else None
+    return _ScopeExtensions(roles=roles, outline=outline)
 
 
 def _same_scope_rules(rules, rule):

@@ -171,6 +171,8 @@ def test_complete_json_returns_the_object_and_meters_usage(protocol):
         "request_count": 1, "failure_count": 0,
         "reasoning_tokens": 0, "reasoning_requests": 1 if thought else 0,
         "inferred_reasoning_requests": 0, "truncated_count": 0,
+        # Claude 的夹具带 cache_read_input_tokens=6（已含在输入里）；另两种协议的夹具不报缓存。
+        "cached_tokens": 6 if protocol.name == "anthropic_messages" else 0,
     }
 
 

@@ -1,9 +1,10 @@
-"""评分时应用适用范围的三个判断，由 Profile 注入 Core 规则执行器（docs/评分细则适用范围方案.md 第 8 节）。
+"""评分时应用适用范围的几个判断，由 Profile 注入 Core 规则执行器（docs/评分细则适用范围方案.md 第 8 节）。
 
 Core 包不依赖检索与词表模块（``test_m2_import_boundary``），所以执行器只认 Profile 上的
 ``rule_scope_policy``：
 
 - ``section_role_map``：一篇论文算一次章节角色归类（词表 + 模型归类对不上的一级标题）；
+- ``section_outline``：一篇论文算一次目录骨架（docs/论文章节树与稳定前缀取证方案.md 阶段 1）；
 - ``missing_sections``：目标章节在论文里一段都没有 → 执行器不调用模型、转人工；
 - ``citations_cover_targets``：多章对照判 triggered 时引用是否覆盖至少两个目标章节。
 """
@@ -17,6 +18,7 @@ from backend.app.services.scoring.retrieval.judge_scope import missing_targets
 from backend.app.services.scoring.retrieval.judge_scope import rule_scope
 from backend.app.services.scoring.retrieval.section_roles import RoleResolver
 from backend.app.services.scoring.retrieval.section_roles import section_role_map
+from backend.app.services.scoring.retrieval.section_tree import section_outline
 
 
 def _mapping(envelope):
@@ -43,6 +45,13 @@ class RuleScopePolicy:
             def classify(headings):
                 return classify_runtime(headings=headings, profile_key=profile_key)
         return section_role_map(value["document"]["evidence_units"], profile_key, classify)
+
+    def section_outline(self, *, value, rules):
+        """有语义规则要看章节时返回本篇的目录骨架（由代码从证据单元拼出），否则返回 None。"""
+
+        if not any(rule.get("judge_type") == "semantic" and _scoped(rule) for rule in rules):
+            return None
+        return section_outline(value["document"]["evidence_units"])
 
     def missing_sections(self, envelope) -> list[str]:
         return missing_targets(_mapping(envelope))

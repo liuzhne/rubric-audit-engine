@@ -158,6 +158,15 @@ class Settings(BaseSettings):
     # 按细则的适用范围取证据（docs/评分细则适用范围方案.md 第 8 节）：规则快照升 @5、只给范围内的段落、
     # 找不到章节转人工，并允许“证据不足”。改变评分，QWK 评测后再打开。
     SCORING_JUDGE_SCOPE_ENABLED: bool = False
+    # 按范围取到的段落原样发给模型（不再压缩），合计最多多少字；整章放得下才算“整章”
+    # （docs/论文章节树与稳定前缀取证方案.md 阶段 1）。只在上面的开关打开时起作用。
+    SCORING_SCOPE_EVIDENCE_CHAR_BUDGET: int = Field(default=8000, ge=500, le=60000)
+    # 按范围取证的请求用的上下文窗口：默认窗口的输入预算（约 6000 token）放不下 8000 字的整章。
+    # 取它与 SCORING_CONTEXT_WINDOW_TOKENS 中较大的一个；全文范围的规则不受影响。
+    SCORING_SCOPE_CONTEXT_WINDOW_TOKENS: int = Field(default=14000, ge=1024)
+    # 稳定前缀（同一方案的阶段 2）：视图顺序改为 论文 → 证据 → 评分项 → 上下文 → 范围 → 规则，
+    # 证据按原文顺序、用位置别名。改提示词与判定身份，评测后再打开。
+    SCORING_STABLE_PREFIX_ENABLED: bool = False
     # off = 证据不足并入 not_triggered（现状）；review = 模型可回 insufficient_evidence，评分项转人工。
     SCORING_INSUFFICIENT_EVIDENCE_MODE: Literal["off", "review"] = "off"
     # off = 提示词不变；cite = 要求每条语义判定给依据引文与一句理由（漏写不判失败；docs/评分证据与理由改造方案.md G5）。

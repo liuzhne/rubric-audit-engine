@@ -1768,3 +1768,48 @@ def test_0040_refuses_to_downgrade_with_observations(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="ai_usage_ledger"):
         command.downgrade(config, "0039_site_leads")
+
+
+def test_0045_adds_cached_tokens_and_downgrades_when_all_zero(monkeypatch, tmp_path):
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "cached-empty.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0044_atomic_rule_scope")
+    engine = create_engine(url)
+    try:
+        _seed_connection(engine, connection_id="conn-0045", provider_type="openai_compatible")
+        command.upgrade(config, "0045_cached_prompt_tokens")
+        for table in ("scoring_runs", "ai_usage_ledger"):
+            columns = {column["name"]: column for column in inspect(engine).get_columns(table)}
+            assert columns["cached_tokens"]["nullable"] is False
+        with engine.connect() as db:
+            # 已有的用量行补 0，而不是 NULL。
+            assert db.execute(text("SELECT cached_tokens FROM ai_usage_ledger")).scalar_one() == 0
+        command.downgrade(config, "0044_atomic_rule_scope")
+        assert "cached_tokens" not in {
+            column["name"] for column in inspect(engine).get_columns("ai_usage_ledger")
+        }
+        command.upgrade(config, "head")
+    finally:
+        engine.dispose()
+
+
+def test_0045_refuses_to_downgrade_with_observations(monkeypatch, tmp_path):
+    """观测事后无法重建：有非零值时拒绝降级。"""
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "cached-data.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0044_atomic_rule_scope")
+    engine = create_engine(url)
+    try:
+        _seed_connection(engine, connection_id="conn-0045", provider_type="openai_compatible")
+        command.upgrade(config, "0045_cached_prompt_tokens")
+        with engine.begin() as db:
+            db.execute(text("UPDATE ai_usage_ledger SET cached_tokens = 9"))
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="ai_usage_ledger"):
+        command.downgrade(config, "0044_atomic_rule_scope")

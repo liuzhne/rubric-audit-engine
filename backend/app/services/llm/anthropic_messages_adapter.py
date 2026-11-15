@@ -192,6 +192,8 @@ def observed_usage_from_messages(data):
             for block in content
             if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
         ),
+        cached=(data.get("usage") or {}).get("cache_read_input_tokens")
+        if isinstance(data.get("usage"), dict) else None,
     )
 
 

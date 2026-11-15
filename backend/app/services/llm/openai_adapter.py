@@ -22,6 +22,7 @@ from backend.app.services.llm.legacy_prompts import strip_json_fence as _strip_j
 from backend.app.services.llm.transport import post_with_retry
 from backend.app.services.llm.usage import UsageMeter
 from backend.app.services.llm.usage import observed_usage
+from backend.app.services.llm.usage import reported_cached_tokens
 
 
 class ResponsesJSONOutputError(ProviderJSONOutputError):
@@ -393,6 +394,7 @@ def _observed_usage_from_responses(data):
         finish_reason=incomplete or data.get("status"),
         truncated=truncated,
         answer_text=_answer_text(data, output),
+        cached=reported_cached_tokens(usage, "input_tokens_details"),
     )
 
 

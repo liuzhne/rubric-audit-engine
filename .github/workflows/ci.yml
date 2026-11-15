@@ -123,7 +123,8 @@ jobs:
             0041_assistant_agent_state \
             0042_assistant_message_client_id \
             0043_batch_owner_isolation \
-            0044_atomic_rule_scope
+            0044_atomic_rule_scope \
+            0045_cached_prompt_tokens
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done
