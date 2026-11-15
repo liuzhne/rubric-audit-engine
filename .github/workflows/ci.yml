@@ -50,7 +50,10 @@ jobs:
     uses: ./.github/workflows/tests.yml
 
   postgres-migrations-constraints-and-restore:
-    runs-on: ubuntu-latest
+    # 固定镜像：ubuntu-latest 已切到 26.04，自带的 pg_dump 比服务端新，导出里带
+    # transaction_timeout，Postgres 16 的 pg_restore 不认。客户端大版本必须与
+    # postgres:16 服务、生产镜像（Dockerfile POSTGRES_MAJOR）一致。
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
       postgres:
@@ -83,7 +86,10 @@ jobs:
       - name: Install PostgreSQL client and locked dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          sudo apt-get install -y postgresql-client-16
+          # 同一台机器上若装了多个大版本，pg_wrapper 可能挑到更新的那个；显式放到 PATH 前面。
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/16/bin/pg_dump --version | grep -E ' 16\.'
           uv sync --locked
       - name: Exercise every production migration boundary
         run: |
