@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from backend.app.services.scoring.retrieval.compression import classify_unit
+from backend.app.services.scoring.retrieval.compression import _PERSONAL_RE
 
 
 SECTION_TREE_VERSION = "section-tree@1"
@@ -26,7 +26,9 @@ REDACTED_TITLE = "（已隐去）"
 
 
 def _outline_title(title: str) -> str:
-    if classify_unit(title) == "personal":
+    # 直接查个人信息字样，不用 classify_unit：它只把 80 字以内的段落算作个人信息，
+    # 更长的标题里的名字会漏过去。
+    if _PERSONAL_RE.search(title or ""):
         return REDACTED_TITLE
     return title[:MAX_OUTLINE_TITLE_CHARS]
 

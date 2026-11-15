@@ -278,9 +278,11 @@ def test_cached_prompt_tokens_are_read_from_each_protocol_and_summed():
 def test_outline_hides_headings_that_look_like_personal_information():
     rows = section_tree.outline(_units([
         (["学生姓名：张三"], ["封面信息"]),
+        (["学生姓名：张三" + "甲" * 81], ["封面信息"]),
         (["第1章 绪论"], ["本文研究校园互助平台。"]),
     ]))
-    assert [row["title"] for row in rows] == [section_tree.REDACTED_TITLE, "第1章 绪论"]
+    assert [row["title"] for row in rows] == [
+        section_tree.REDACTED_TITLE, section_tree.REDACTED_TITLE, "第1章 绪论"]
 
 
 def test_cross_section_keeps_a_paragraph_of_every_target_even_over_budget(monkeypatch):
