@@ -580,6 +580,40 @@ def test_several_rubrics_while_waiting_for_files_say_where_to_switch(client, age
     assert len(text.splitlines()) == 3 and "换一份" not in text
 
 
+def test_rubric_chosen_by_ordinal_while_waiting_for_files_switches_the_rubric(client, agent, monkeypatch):  # noqa: F811
+    # 11-16 生产：列出两份标准后老师回“2”，被当成名称去找，回“没有找到”；即使找到了，
+    # 等选文件时再进流程也只回“正在等你选择文件”，老师选的标准被悄悄丢掉。
+    rubric_id, _name = _seed_published_rubric(client)
+    _published_rubrics(monkeypatch, [{"id": "rubric-report", "name": "课程报告评分标准", "version": "v2.0",
+                                      "business_profile_key": "general_document"}])
+    conversation_id = _wait_for_files(client)
+    for said in ("2", "第二个", "用2"):
+        agent(step(("action_start_grading", {"rubric_name": said})))
+        body = _say(client, conversation_id, said)
+        assert body["pending"]["kind"] == "pick_files", said
+        card = _cards(body, "pick_files")[0]
+        assert card["rubric_id"] == "rubric-report" and card["rubric_preset"] is True, said
+    assert _texts(body)[-2:] == ["好的，换评分标准。", "现在用的就是《课程报告评分标准》v2.0，接着选择待评分的文件。"]
+
+    agent(step(("action_start_grading", {"rubric_name": "1"})))
+    body = _say(client, conversation_id, "1")
+    assert _cards(body, "pick_files")[0]["rubric_id"] == rubric_id
+    assert _texts(body)[-1].startswith("已换成《")
+
+    # 序号超出列表：照旧给出可选的标准，不进流程、不换。
+    model = agent(step(("action_start_grading", {"rubric_name": "3"})), reply("没有第 3 份，用哪一份？"))
+    _say(client, conversation_id, "3")
+    result = _last_tool_result(model)
+    assert "没有“3”" in result["提示"] and len(result["rubrics"]) == 2
+
+
+def test_rubric_list_tells_the_model_not_to_ask_for_refs(client, agent):  # noqa: F811
+    _seed_published_rubric(client)
+    model = agent(*_list_rubrics_then(reply("可以用的评分标准有：", cards=["r1"])))
+    _say(client, _conversation(client), "有哪些评分标准")
+    assert "不要写“用 r1”" in _last_tool_result(model)["说明"]
+
+
 def test_no_published_rubric_is_said_plainly_never_left_after_a_colon(client, agent, monkeypatch):  # noqa: F811
     from backend.app.services.assistant import tools as assistant_tools
 

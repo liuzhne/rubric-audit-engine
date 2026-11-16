@@ -186,12 +186,13 @@ def wait_files(state: FlowState, runtime: Runtime[RunContext]):
         if chosen is None:
             ctx.say("这份评分标准不可用（未发布或无权访问），请换一份。")
             return {"next": "wait_files"}
+        same = chosen["id"] == state.get("rubric_id")
         changed = {**_rubric_state(chosen), "preset_rubric_id": chosen["id"]}
         ctx.patch_card(card["message_id"], card["card_id"], {
             **_rubric_fields({**state, **changed}),
         })
         plan.update(ctx, state.get("plan"), {"rubric": ("done", _rubric_detail(chosen, preset=True))})
-        ctx.say("已换成《%s》%s，接着选择待评分的文件。" % (chosen["name"], chosen["version"]))
+        ctx.say("%s《%s》%s，接着选择待评分的文件。" % ("现在用的就是" if same else "已换成", chosen["name"], chosen["version"]))
         return {**changed, "next": "wait_files"}
     names = [str(name)[:200] for name in value.get("names", [])][:MAX_FILES]
     count = int(value["count"])

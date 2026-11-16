@@ -225,6 +225,12 @@ def _start_flow(ctx: RunContext, saver: SqlCheckpointSaver, flow_input: dict) ->
                     [quick_actions_card(["query_progress"])])
             return
         if kind == "pick_files" and flow_input.get("mode") == "grading" and not flow_input.get("file_count"):
+            if flow_input.get("preset_rubric_id"):
+                # 等选文件时老师点名了评分标准：就是换标准，和右侧“评分标准”里换一份走同一条路。
+                # 以前这里只回“正在等你选择文件”，老师选的标准被悄悄丢掉（11-16 生产）。
+                _resume_flow(ctx, saver, pending["card_id"],
+                             {"action": "change_rubric", "rubric_id": flow_input["preset_rubric_id"]})
+                return
             # 已经在等选文件，再说一次“开始评分”就是同一件事，不必问要不要放弃。
             ctx.say("上面那张卡片正在等你选择待评分的文件，选好就能开始。")
             return

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 
 from pydantic import BaseModel
@@ -570,7 +571,8 @@ def _rubric_list(turn: TurnContext, _params: RubricListParams) -> dict:
     shown = rubrics[:LIST_LIMIT]
     result = {
         "rubrics": [_rubric_entry(turn, item) for item in shown],
-        "说明": "已发布、工作台能评的评分标准，最新发布的在前。",
+        "说明": "已发布、工作台能评的评分标准，最新发布的在前。老师看不到 ref：请老师说名称或序号，"
+                "不要写“用 r1”；老师回了序号就把序号原样填进 action_start_grading 的 rubric_name。",
     }
     if len(rubrics) > len(shown):
         result["还有"] = len(rubrics) - len(shown)
@@ -619,10 +621,16 @@ def _action_start_grading(turn: TurnContext, params: StartGradingParams) -> dict
         flow["preset_rubric_id"] = turn.refs.resolve(params.rubric_ref, "r")
     elif (params.rubric_name or "").strip():
         # 老师点了评分标准的名字（或文档类型，如“通用文档”）：在已发布的里找，一步出卡片，不用先查 rubric_list。
-        needle = params.rubric_name.strip()
+        needle = _rubric_needle(params.rubric_name)
         rubrics = tools.call(turn.run, "list_published_rubrics")
-        hits = [item for item in rubrics
-                if needle in item["name"] or needle in document_type_label(item["business_profile_key"])]
+        ordinal = _ordinal(needle)
+        if ordinal is not None:
+            # 老师按上一条回复的序号回答（“2”“第二个”）：列表与 rubric_list 同序（最新发布的在前）。
+            # 以前把“2”当名称去找，回“没有找到”（11-16 生产）。
+            hits = [rubrics[ordinal - 1]] if 1 <= ordinal <= len(rubrics) else []
+        else:
+            hits = [item for item in rubrics
+                    if needle in item["name"] or needle in document_type_label(item["business_profile_key"])]
         if len(hits) == 1:
             flow["preset_rubric_id"] = hits[0]["id"]
         elif hits:
@@ -631,7 +639,31 @@ def _action_start_grading(turn: TurnContext, params: StartGradingParams) -> dict
         else:
             return {"提示": "已发布的评分标准里没有“%s”：请老师从下面选一份，或不指定（用最新发布的）。" % needle[:20],
                     "rubrics": [_rubric_entry(turn, item) for item in rubrics[:LIST_LIMIT]]}
-    return {"proposal": {"flow": flow, "text": "好的，开始评分。"}}
+    text = "好的，开始评分。"
+    if flow.get("preset_rubric_id") and (turn.run.conversation.pending or {}).get("kind") == "pick_files":
+        text = "好的，换评分标准。"  # 已经在等选文件：是换标准，不是再开一次评分
+    return {"proposal": {"flow": flow, "text": text}}
+
+
+_CHINESE_DIGITS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+_ORDINAL = re.compile(r"^第?([0-9]{1,2}|[一二两三四五六七八九十])(?:个|份|项|号|条)?$")
+
+
+def _rubric_needle(said: str) -> str:
+    """去掉“用”“《》”与句末语气：老师说“用2”“用《开题报告》”时只留名称或序号。"""
+
+    needle = said.strip().strip("。！!，,")
+    if needle.startswith("用") and len(needle) > 1:
+        needle = needle[1:]
+    return needle.strip("《》 ")
+
+
+def _ordinal(needle: str) -> int | None:
+    found = _ORDINAL.match(needle)
+    if not found:
+        return None
+    value = found.group(1)
+    return int(value) if value.isdigit() else _CHINESE_DIGITS[value]
 
 
 register(AgentTool(
