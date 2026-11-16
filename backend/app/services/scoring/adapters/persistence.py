@@ -337,7 +337,35 @@ _STATUS_LABELS = {
 }
 
 
-def core_item_reason(rule_results, review_issues=None) -> str:
+# M4 结果的评分项聚合版本。@3：命中扣分合计超过满分时扣到 0 为止（docs/扣分合计超满分封底方案.md）；
+# @2 是旧算法（判无效）。不进模型请求信封，所以升它不让已有判定失效。
+CORE_AGGREGATION_SCHEMA_VERSION = "criterion-aggregation@3"
+
+
+def _floor_note(rule_results, review_issues, *, snapshots, max_score) -> str:
+    """扣到 0 分时追加在评分项说明后的一句；没有封底时返回空串。"""
+
+    from backend.app.services.scoring.core.rule_executor import DEDUCTION_FLOORED_CODE
+    from backend.app.services.scoring.core.rule_executor import nominal_deduction_amounts
+
+    if not any(issue.get("code") == DEDUCTION_FLOORED_CODE for issue in review_issues or ()):
+        return ""
+    nominal = Decimal("0")
+    for result in rule_results or ():
+        rule = snapshots.get(result.get("rule_code")) or {}
+        if result.get("status") != "triggered" or rule.get("direction") != "deduct":
+            continue
+        nominal -= sum(
+            nominal_deduction_amounts(rule, len(result.get("occurrences") or ())),
+            Decimal("0"),
+        )
+    return "命中扣分合计 %s 分，超过满分 %s 分，已扣至 0 分。" % (
+        _points_text(nominal),
+        _points_text(max_score),
+    )
+
+
+def core_item_reason(rule_results, review_issues=None, *, floor_note="") -> str:
     """评分项的一句话说明：按几条规则判定、各是什么结果（代码写，不是模型写）。
 
     “证据不足”在判定里记为 not_triggered 并另加一条复核问题，这里按复核问题
@@ -367,7 +395,7 @@ def core_item_reason(rule_results, review_issues=None) -> str:
     if not counts:
         return "没有可执行的规则。"
     parts = "、".join("%s %d 条" % (label, count) for label, count in counts.items())
-    return "按 %d 条规则判定：%s。" % (sum(counts.values()), parts)
+    return "按 %d 条规则判定：%s。%s" % (sum(counts.values()), parts, floor_note)
 
 
 def _score_items(
@@ -396,7 +424,12 @@ def _score_items(
     items = []
     m4 = outcome["schema_version"] == "scoring-outcome@2"
     rule_results_schema = "rule-results@2" if m4 else "rule-results@1"
-    aggregation_schema = "criterion-aggregation@2" if m4 else "criterion-aggregation@1"
+    aggregation_schema = CORE_AGGREGATION_SCHEMA_VERSION if m4 else "criterion-aggregation@1"
+    snapshots = {
+        node["rule_code"]: node["atomic_rule_snapshot"]
+        for node in request["plan"]["nodes"]
+        if node.get("atomic_rule_snapshot")
+    }
     for criterion in sorted(
         outcome["criterion_outcomes"],
         key=lambda item: item["criterion_code"],
@@ -454,7 +487,14 @@ def _score_items(
                 ),
                 evidence_sufficient=status == "calculated",
                 reason=core_item_reason(
-                    rule_results.get(code, []), issues_by_criterion.get(code)
+                    rule_results.get(code, []),
+                    issues_by_criterion.get(code),
+                    floor_note=_floor_note(
+                        rule_results.get(code, []),
+                        issues_by_criterion.get(code),
+                        snapshots=snapshots,
+                        max_score=criterion["max_score"],
+                    ),
                 ),
                 deductions=deductions,
                 deduction_items=[

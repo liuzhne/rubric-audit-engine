@@ -55,7 +55,19 @@ def _level_text(rule, level_code) -> str:
     return level_code
 
 
-def _row(result, rule, *, insufficient, frozen, units):
+def _nominal_deduction(rule, result):
+    """按规则配置应扣的分（正数）；规则快照不全（旧评分）时返回 ``None``。"""
+
+    from backend.app.services.scoring.core.rule_executor import nominal_deduction_amounts
+
+    try:
+        amounts = nominal_deduction_amounts(rule, len(result.get("occurrences") or ()))
+    except (KeyError, TypeError, ValueError, InvalidOperation):
+        return None
+    return -sum(amounts, Decimal("0"))
+
+
+def _row(result, rule, *, insufficient, frozen, units, item_scored=True):
     status = result.get("status")
     name = rule.get("name") or result.get("rule_code")
     contributions = result.get("score_contributions") or ()
@@ -73,8 +85,16 @@ def _row(result, rule, *, insufficient, frozen, units):
         elif deducted > 0:
             outcome, label = "deducted", "扣分"
             effect = "扣 %s 分" % _points(deducted)
+            nominal = _nominal_deduction(rule, result)
+            if nominal is not None and nominal > deducted:
+                # 扣到 0 为止：这一条只扣了剩下的分（docs/扣分合计超满分封底方案.md）。
+                label = "扣分（已扣至 0 分）"
+                effect = "扣 %s 分（原应扣 %s 分）" % (_points(deducted), _points(nominal))
+        elif item_scored:
+            outcome, label = "triggered", "命中（该项已扣至 0 分，未再扣分）"
         else:
-            outcome, label = "triggered", "命中（已达扣分上限，未再扣分）"
+            # 旧算法下扣分合计超满分会让整项判无效，命中的规则都没有入账。
+            outcome, label = "triggered", "命中（该项未计分）"
     elif status == "not_triggered":
         outcome, label = (
             ("insufficient", "证据不足") if insufficient else ("not_triggered", "未发现问题")
@@ -203,6 +223,7 @@ def build_judgement_view(run, item, *, frozen, snapshots=None):
             insufficient=result.get("rule_code") in insufficient,
             frozen=frozen,
             units=units,
+            item_scored=getattr(item, "auto_score_status", None) not in {"invalid", "blocked"},
         )
         for result in results
     ]

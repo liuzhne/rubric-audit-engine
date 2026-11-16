@@ -1425,8 +1425,14 @@ def test_repeat_policy_allocates_only_rule_authorized_points(
     )
 
 
+def _deductions(result: dict) -> list[dict]:
+    return [item for item in result["score_contributions"] if item["kind"] == "deduction"]
+
+
 @requires_rule_executor
-def test_per_occurrence_runtime_overflow_is_invalid_and_never_clamped():
+def test_per_occurrence_runtime_overflow_floors_at_zero():
+    # 扣到 0 为止（docs/扣分合计超满分封底方案.md）：40 × 3 超过满分 100，
+    # 前两次全额入账，第三次只扣剩下的 20 分，该项得 0 分并正常出分。
     rule = _deduct_rule(repeat_policy="per_occurrence", max_points="40")
     request = _request_for((_criterion(), rule))
     response = _semantic_response(
@@ -1438,17 +1444,27 @@ def test_per_occurrence_runtime_overflow_is_invalid_and_never_clamped():
         request, semantic_responses={rule["rule_code"]: response}
     )
 
-    assert result["status"] == "blocked"
-    assert _decision(result)["status"] == "invalid"
-    assert _criterion_outcome(result)["auto_score"] is None
-    assert _issues(result, "DEDUCTION_EXCEEDS_CRITERION_MAX")
-    assert not any(
-        item["kind"] == "deduction" for item in result["score_contributions"]
-    )
+    assert result["status"] == "completed"
+    assert _decision(result)["status"] == "triggered"
+    assert _decision(result)["calculated_effect"] == "-100"
+    outcome = _criterion_outcome(result)
+    assert outcome["status"] == "calculated"
+    assert outcome["auto_score"] == "0"
+    assert outcome["final_score"] == "0"
+    assert [Decimal(item["amount"]) for item in _deductions(result)] == [
+        Decimal("-40"),
+        Decimal("-40"),
+        Decimal("-20"),
+    ]
+    assert not _issues(result, "DEDUCTION_EXCEEDS_CRITERION_MAX")
+    [issue] = _issues(result, "DEDUCTION_FLOORED_AT_ZERO")
+    assert issue["severity"] == "info"
+    assert issue["criterion_code"] == CRITERION_CODE
+    assert "120" in issue["message"] and "100" in issue["message"]
 
 
 @requires_rule_executor
-def test_multiple_rules_cannot_cumulatively_drive_criterion_below_zero():
+def test_multiple_rules_floor_cumulative_deductions_at_zero():
     rule_a = _deduct_rule(
         code="proposal.cumulative_a.v1",
         judge_type="deterministic",
@@ -1459,11 +1475,17 @@ def test_multiple_rules_cannot_cumulatively_drive_criterion_below_zero():
         judge_type="deterministic",
         max_points="60",
     )
+    rule_c = _deduct_rule(
+        code="proposal.cumulative_c.v1",
+        judge_type="deterministic",
+        max_points="10",
+    )
     criterion = _criterion(max_score="100")
     request = _request_for(
         (criterion, rule_a),
         (criterion, rule_b),
-        dependency_order=[rule_a["rule_code"], rule_b["rule_code"]],
+        (criterion, rule_c),
+        dependency_order=[rule_a["rule_code"], rule_b["rule_code"], rule_c["rule_code"]],
     )
     observations = {
         rule_a["rule_code"]: _checker_result(
@@ -1472,17 +1494,73 @@ def test_multiple_rules_cannot_cumulatively_drive_criterion_below_zero():
         rule_b["rule_code"]: _checker_result(
             _observation(request, finding_code="GAP_B", index=1)
         ),
+        rule_c["rule_code"]: _checker_result(
+            _observation(request, finding_code="GAP_C", index=2)
+        ),
     }
 
     result, _, _ = _execute(request, checker_results=observations)
 
-    assert result["status"] == "blocked"
-    assert _criterion_outcome(result)["auto_score"] is None
+    assert result["status"] == "completed"
+    assert _criterion_outcome(result)["auto_score"] == "0"
+    assert _criterion_outcome(result)["status"] == "calculated"
     assert _decision(result, rule_a["rule_code"])["calculated_effect"] == "-60"
-    assert _decision(result, rule_b["rule_code"])["status"] == "invalid"
-    assert _decision(result, rule_b["rule_code"])["calculated_effect"] is None
-    assert _issues(result, "DEDUCTION_EXCEEDS_CRITERION_MAX")
-    assert result["score_contributions"] == []
+    # 第二条只扣剩下的 40 分；第三条命中但已无分可扣，记 0、不产生扣分条目。
+    assert _decision(result, rule_b["rule_code"])["status"] == "triggered"
+    assert _decision(result, rule_b["rule_code"])["calculated_effect"] == "-40"
+    assert _decision(result, rule_c["rule_code"])["status"] == "triggered"
+    assert _decision(result, rule_c["rule_code"])["calculated_effect"] == "0"
+    assert [
+        (item["rule_code"], Decimal(item["amount"])) for item in _deductions(result)
+    ] == [
+        (rule_a["rule_code"], Decimal("-60")),
+        (rule_b["rule_code"], Decimal("-40")),
+    ]
+    # 审计可对账：基础分加全部扣分等于该项分数。
+    assert sum(Decimal(item["amount"]) for item in result["score_contributions"]) == 0
+    [issue] = _issues(result, "DEDUCTION_FLOORED_AT_ZERO")
+    assert "130" in issue["message"]
+
+
+@requires_rule_executor
+def test_capped_rule_floors_within_remaining_score():
+    rule = _deduct_rule(
+        repeat_policy="capped", max_points="4", cap_points="10"
+    )
+    request = _request_for((_criterion(max_score="6"), rule))
+    response = _semantic_response(
+        rule["rule_code"],
+        occurrences=[_quote_occurrence(request, index) for index in range(3)],
+    )
+
+    result, _, _ = _execute(
+        request, semantic_responses={rule["rule_code"]: response}
+    )
+
+    assert _criterion_outcome(result)["auto_score"] == "0"
+    assert [Decimal(item["amount"]) for item in _deductions(result)] == [
+        Decimal("-4"),
+        Decimal("-2"),
+    ]
+    assert _issues(result, "DEDUCTION_FLOORED_AT_ZERO")
+
+
+@requires_rule_executor
+def test_deductions_within_max_score_are_unchanged_and_not_flagged():
+    rule = _deduct_rule(repeat_policy="per_occurrence", max_points="40")
+    request = _request_for((_criterion(), rule))
+    response = _semantic_response(
+        rule["rule_code"],
+        occurrences=[_quote_occurrence(request, index) for index in range(2)],
+    )
+
+    result, _, _ = _execute(
+        request, semantic_responses={rule["rule_code"]: response}
+    )
+
+    assert _criterion_outcome(result)["auto_score"] == "20"
+    assert _decision(result)["calculated_effect"] == "-80"
+    assert not _issues(result, "DEDUCTION_FLOORED_AT_ZERO")
 
 
 @requires_rule_executor

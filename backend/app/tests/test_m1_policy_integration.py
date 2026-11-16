@@ -200,8 +200,8 @@ def _item_contributions(item) -> list[dict]:
     """Read the immutable M4 automatic-score contribution audit."""
 
     aggregation = _field(item, "aggregation")
-    assert _field(item, "aggregation_schema_version") == "criterion-aggregation@2"
-    assert _field(aggregation, "schema_version") == "criterion-aggregation@2"
+    assert _field(item, "aggregation_schema_version") == "criterion-aggregation@3"
+    assert _field(aggregation, "schema_version") == "criterion-aggregation@3"
     assert _field(aggregation, "criterion_code") == _field(item, "criterion_code")
     contributions = _field(aggregation, "contributions")
     assert isinstance(contributions, list)

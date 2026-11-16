@@ -811,9 +811,28 @@ def _incomplete_scoring_error(rule_tasks):
             message = f"评分模型调用失败（{code}）；请检查模型连接后重试。"
         return IncompleteScoringResultError(code, message, failure_kind="llm")
     if failed:
+        # 不是模型调用失败：同样的评分标准和论文重试，判定会被复用，结果不变。
+        # 只列编码（不含正文），让管理员能直接定位到规则。
+        named = sorted(
+            {
+                (str(task.criterion_code), str(task.rule_code))
+                for task in failed
+                if getattr(task, "criterion_code", None) and getattr(task, "rule_code", None)
+            }
+        )
+        listed = "、".join(
+            "%s 的 %s" % (criterion_code, rule_code)
+            for criterion_code, rule_code in named[:3]
+        )
+        if len(named) > 3:
+            listed += " 等 %d 条" % len(named)
+        where = "（%s）" % listed if listed else ""
         return IncompleteScoringResultError(
             "RULE_EXECUTION_FAILED",
-            "评分规则执行失败；请查看规则任务错误码或 Worker 安全日志后重试。",
+            (
+                "评分规则判定无效%s，不是模型调用失败；同样的评分标准和论文重试结果不变。"
+                "请把评分项与规则编码告诉管理员排查。" % where
+            ),
             failure_kind="checker",
         )
     return IncompleteScoringResultError(

@@ -314,6 +314,7 @@ export LANGFUSE_RELEASE=<deployment-commit>
 | 规则显示 `CONTEXT_LENGTH_EXCEEDED` / `TOKEN_BUDGET_UNSATISFIABLE` | PromptEnvelope schema、selection/budget identity、context window、输出预留、完整 EvidenceUnit 大小 | 保持 V4，检查规则 coverage 与证据块粒度；不要退回发送全文或截断引用。必需规则转人工复核 |
 | 生产迁移工作流报 `tenant/user postgres.<ref> not found` | Supabase 项目状态（控制台或 `get_project`） | 不是连接串或密码错误：免费项目闲置会被暂停（INACTIVE）。恢复项目并等到 ACTIVE_HEALTHY 后，从试运行重来；不要改 `MIGRATION_DATABASE_URL` |
 | 多个规则出现 429/498/5xx 或 `PROVIDER_CIRCUIT_OPEN` | AI connection、service tier、批并发、熔断阈值、Provider 状态 | 暂停新批次并降低外层并发；遵守 Retry-After。401/403 先重认证连接；实例重启只清进程内 circuit，不代表故障已恢复 |
+| 材料报“评分规则执行失败”/`RULE_EXECUTION_FAILED`，重试后一模一样 | 工作台 `/api/scoring-runs/{run}/items?include_view=true` 里 `judgement_view.rules` 中 `outcome=invalid` 的规则；对照 `/api/rubrics/{id}/review-workspace` 的 `max_points` | 报错指向“规则执行失败、请看日志后重试”，2026-11-16 前的版本里真正原因常是**命中扣分合计超过该项满分**（`DEDUCTION_EXCEEDS_CRITERION_MAX`），不是模型或系统故障；判定被复用，所以重试结果不变。新版本扣到 0 为止，对这类论文点「重试失败项」即可出分、不调用模型。v2 的 `/api/v2/scoring-runs/{id}/rule-tasks` 对论文运行返回 404，别在那里找 |
 | 评分返回部分结果但总分/等级为空 | `RuleScoringTask` failed/review_required 与 open/claimed blocking `ManualReviewTask` | 这是 fail-closed 预期；由授权教师领取并依据冻结原文解决，不要用普通整体复核强行发布总分 |
 | 结果意外来自 Mock | `LLM_PROVIDER`、`LLM_FALLBACK_TO_MOCK`、集成状态 | 正式评估设 fallback=false；检查日志中的 provider identity，不要把 Mock 结果当质量证据 |
 | 缓存结果疑似陈旧 | `PROMPT_VERSION`、模型/采样/RubricVersion/anchor identity | 修复输入构造时 bump Core 与 cache 的 prompt 版本；不要只删除用户数据或扩大 cache key 复用 |
@@ -1338,6 +1339,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-16 | 扣分合计超满分封底于 0 | 无迁移、无新环境变量；第 6 节新增一条排错（“评分规则执行失败”重试不变）；上线后对已失败的论文点「重试失败项」 |
 | 2026-11-15 | 分节摘要（阶段 3 的 PR A：生成与存储） | 迁移 `0046_document_derivations`（新表，已给 `pgs_app` 授权并建 RLS，降级直接删表）；新环境变量 `SCORING_SECTION_SUMMARY_CHAR_BUDGET`；新只读脚本 `estimate_section_summaries`；一条排错 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（#106 复审） | 无新命令；Langfuse 里 `input_tokens` 现在不含缓存命中部分（另见 `input_cached_tokens`），数据库与 `llm_call` 日志的 `prompt_tokens` 仍是全量；0045 降级在 Postgres 上先锁两张表 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（阶段 1、2） | 迁移 `0045_cached_prompt_tokens`（先跑迁移工作流再部署，有非零观测时拒绝降级）；新环境变量 `SCORING_SCOPE_EVIDENCE_CHAR_BUDGET`、`SCORING_SCOPE_CONTEXT_WINDOW_TOKENS`、`SCORING_STABLE_PREFIX_ENABLED`（默认关）；`llm_call` 日志新增 `cached_tokens`；三条排错 |
@@ -3534,3 +3536,19 @@ python -m backend.app.scripts.estimate_section_summaries <document_snapshot_id>
   - 真正原因：迁移是在 `pgs_app` 角色还不存在的库上跑的（迁移里“角色不存在就跳过授权”），或者表是手工建的。授权不随表自动获得。用迁移工作流的 verify 步骤确认；缺的话以属主身份补 `GRANT SELECT, INSERT, UPDATE, DELETE` 并按 0046 建 RLS 策略。
 
 维护记录：2026-11-15 · 分节摘要（PR A）：记录迁移、一个环境变量、估算脚本与一条排错。
+
+### 2026-11-16 扣分合计超满分封底于 0
+
+方案见 `docs/扣分合计超满分封底方案.md`。无迁移、无环境变量、不调用模型。
+
+上线后：此前因扣分溢出失败的论文，在评分任务里点「重试失败项」。判定全部从账本复用，预期该项得 0 分、整篇出总分，这次运行的输出 token 为 0。
+
+排错：
+
+- **重试后仍报“评分规则判定无效（T03 的 manual.t03.deduct.8.v1 …）”**
+  - 报错指向：像是扣分溢出没修好。
+  - 真正原因：封底只处理多条累计溢出；剩下的判无效来自单条规则自身（配置越界、矩阵非法、确定性检查器输出不合格等）。按报错里的规则编码，在 `judgement_view.rules` 与评分标准里看这一条。
+- **评分项分数是 0，老师问为什么**
+  - 看评分项说明句末的“命中扣分合计 X 分，超过满分 Y 分，已扣至 0 分”，以及判定视图里标“扣分（已扣至 0 分）”的那条。这是“扣完为止”，不是故障。
+
+维护记录：2026-11-16 · 扣分合计超满分封底于 0：记录上线后的处理与两条排错。
