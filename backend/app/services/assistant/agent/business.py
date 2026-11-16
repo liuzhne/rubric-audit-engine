@@ -634,8 +634,10 @@ def _action_start_grading(turn: TurnContext, params: StartGradingParams) -> dict
         if len(hits) == 1:
             flow["preset_rubric_id"] = hits[0]["id"]
         elif hits:
-            return {"提示": "符合“%s”的评分标准不止一份：请老师选一份，或用候选里的 ref 再调用。" % needle[:20],
-                    "候选": [_rubric_entry(turn, item) for item in hits[:LIST_LIMIT]]}
+            # 候选是筛过的子集：带上它在完整列表里的序号，老师回序号时按完整列表取才对得上（#111 复审）。
+            return {"提示": "符合“%s”的评分标准不止一份：请老师按候选的“序号”选一份，或用候选里的 ref 再调用。" % needle[:20],
+                    "候选": [{**_rubric_entry(turn, item), "序号": rubrics.index(item) + 1}
+                             for item in hits[:LIST_LIMIT]]}
         else:
             return {"提示": "已发布的评分标准里没有“%s”：请老师从下面选一份，或不指定（用最新发布的）。" % needle[:20],
                     "rubrics": [_rubric_entry(turn, item) for item in rubrics[:LIST_LIMIT]]}
