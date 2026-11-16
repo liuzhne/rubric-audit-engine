@@ -12,12 +12,14 @@ from backend.app.services.llm.core_view import build_core_request
 from backend.app.services.llm.core_view import compression_summary
 from backend.app.services.llm.core_view import decode_core_group_response
 from backend.app.services.llm.core_view import decode_core_response
+from backend.app.services.llm.core_view import with_repair
 from backend.app.services.llm.core_view import preflight_core_request
 from backend.app.services.llm.errors import ProviderJSONOutputError
 from backend.app.services.llm.legacy_prompts import chat_envelope_instructions as _envelope_instructions
 from backend.app.services.llm.legacy_prompts import chat_input_payload as _input_payload
 from backend.app.services.llm.legacy_prompts import chat_instructions as _instructions
 from backend.app.services.llm.legacy_prompts import strip_json_fence as _strip_json_fence
+from backend.app.services.llm import schema_dialects
 from backend.app.services.llm import thinking_capabilities as thinking
 from backend.app.services.llm.hosts import OPENROUTER
 from backend.app.services.llm.hosts import host_family
@@ -26,13 +28,14 @@ from backend.app.services.llm.tool_calls import parse_chat_tool_response
 from backend.app.services.llm.transport import post_with_retry
 from backend.app.services.llm.usage import UsageMeter
 from backend.app.services.llm.usage import observed_usage
+from backend.app.services.llm.usage import reported_cached_tokens
 
 
 class OpenAICompatibleChatScorer(LLMScorer):
     provider = "openai_compatible"
     model_version = "chat-completions"
 
-    def __init__(self, api_key=None, base_url=None, model_name=None, provider_name=None, client=None, timeout_seconds=None, max_tokens=None, temperature=None, top_p=None, response_format_json=None, thinking_type=None, service_tier=None):
+    def __init__(self, api_key=None, base_url=None, model_name=None, provider_name=None, client=None, timeout_seconds=None, max_tokens=None, temperature=None, top_p=None, response_format_json=None, thinking_type=None, service_tier=None, structured_output=None):
         self.api_key = api_key or settings.OPENAI_COMPATIBLE_API_KEY
         if not self.api_key:
             raise ValueError("OPENAI_COMPATIBLE_API_KEY is required when LLM_PROVIDER=openai_compatible")
@@ -52,6 +55,14 @@ class OpenAICompatibleChatScorer(LLMScorer):
         # (Bailian kimi-k3 rejects 1.0 but accepts 0.95).
         self.top_p = float(top_p if top_p is not None else 1)
         self.response_format_json = settings.OPENAI_COMPATIBLE_RESPONSE_FORMAT_JSON if response_format_json is None else bool(response_format_json)
+        # Core 评分请求的输出约束（docs/Chat评分请求严格Schema方案.md）。只管 Core 的两个请求；
+        # v1 兼容路径与 complete_json 仍只看 response_format_json。总开关关闭时与改动前相同。
+        self.structured_output = str(structured_output or "").strip() or None
+        self.core_response_format = schema_dialects.resolve_chat_response_format(
+            self.base_url,
+            structured_output=self.structured_output,
+            response_format_json=self.response_format_json,
+        )
         configured_thinking = settings.OPENAI_COMPATIBLE_THINKING_TYPE if thinking_type is None else thinking_type
         self.configured_thinking_type = str(configured_thinking or "").strip()
         # 按模型能力表决定思考（docs/模型思考能力表方案.md）：辅助计划给 AI 任务与评分助手，
@@ -63,7 +74,7 @@ class OpenAICompatibleChatScorer(LLMScorer):
         self.thinking_type = self.scoring_thinking_plan.identity_type
         self.model_version = type(self).model_version + thinking.model_version_suffix(
             self.scoring_thinking_plan, max_tokens_explicit=self.max_tokens_explicit,
-        )
+        ) + schema_dialects.model_version_suffix(self.core_response_format, self.base_url)
         self.service_tier = (
             settings.OPENAI_COMPATIBLE_SERVICE_TIER
             if service_tier is None
@@ -162,13 +173,13 @@ class OpenAICompatibleChatScorer(LLMScorer):
 
     def _validated_core(self, envelope):
         envelope, provider = validated_core_envelope_provider(self, envelope)
-        if provider["response_format"] not in {"none", "json_object"}:
+        if provider["response_format"] not in {"none", "json_object", "json_schema"}:
             raise ValueError(
                 "OpenAI-compatible PromptEnvelopeV3 response_format is unsupported"
             )
         return envelope, provider
 
-    def _post_core_request(self, envelope, provider, request):
+    def _post_core_request(self, envelope, provider, request, *, schema_name):
         """Send exactly the provider view (never the identity envelope)."""
 
         preflight_core_request(envelope, request)
@@ -186,11 +197,19 @@ class OpenAICompatibleChatScorer(LLMScorer):
             # 信封记正式输出预算（Core 证据预算按它扣）；思考开着时实发上限放到封顶值，写在 model_version 里。
             "max_tokens": self._envelope_max_tokens(provider),
         }
+        if request.repair_hint:
+            # 重问：原来的两条消息一字不改，修正提示另起一条。
+            payload["messages"].append({"role": "user", "content": request.repair_hint})
         if sampling["seed"] is not None:
             payload["seed"] = sampling["seed"]
         payload.update(self._envelope_thinking_fields(provider))
         if provider["response_format"] == "json_object":
             payload["response_format"] = {"type": "json_object"}
+        elif provider["response_format"] == "json_schema":
+            # 规则的严格 Schema 按主机族改写后交给厂商；被拒绝（400）照常报错，不退回 json_object 重发。
+            payload["response_format"] = schema_dialects.chat_response_format(
+                self.base_url, name=schema_name, schema=request.schema,
+            )
         if self.service_tier:
             payload["service_tier"] = self.service_tier
 
@@ -199,21 +218,23 @@ class OpenAICompatibleChatScorer(LLMScorer):
         response.raise_for_status()
         return _parse_chat_json_output(response.json())
 
-    def score_core_envelope(self, *, envelope):
+    def score_core_envelope(self, *, envelope, repair=None):
         """Score one immutable PromptEnvelopeV3/V4 semantic rule via its view."""
 
         envelope, provider = self._validated_core(envelope)
-        request = build_core_request(envelope)
-        raw = self._post_core_request(envelope, provider, request)
+        request = with_repair(build_core_request(envelope), repair)
+        raw = self._post_core_request(envelope, provider, request, schema_name="semantic_rule_response")
         return decode_core_response(envelope, raw, request)
 
-    def score_core_group(self, *, envelopes, group_code):
+    def score_core_group(self, *, envelopes, group_code, repair=None):
         """Judge every tier of one mutex group in a single request."""
 
         validated = [self._validated_core(envelope) for envelope in envelopes]
         envelopes = [envelope for envelope, _provider in validated]
-        request = build_core_group_request(envelopes, group_code=group_code)
-        raw = self._post_core_request(envelopes[0], validated[0][1], request)
+        request = with_repair(build_core_group_request(envelopes, group_code=group_code), repair)
+        raw = self._post_core_request(
+            envelopes[0], validated[0][1], request, schema_name="semantic_group_response",
+        )
         return decode_core_group_response(envelopes, raw, request)
 
     def complete_json(self, instructions, payload, *, response_schema=None, default_max_tokens=None, attempts_limit=None, default_timeout_seconds=None, rate_limit_retries=None, deadline=None, scoring=False):
@@ -438,6 +459,7 @@ def _observed_usage_from_chat(data):
         truncated=finish_reason == "length",
         # 智谱只给思考文本、不报推理计数：正式输出按可见文字估算。
         answer_text=_message_content_to_text(message.get("content")),
+        cached=reported_cached_tokens(usage, "prompt_tokens_details"),
     )
 
 
@@ -462,6 +484,11 @@ def _parse_chat_json_output(data):
     if not isinstance(message, dict):
         raise ChatJSONOutputError("missing_message")
     text = _message_content_to_text(message.get("content"))
+    # 有拒答标记（``message.refusal`` 有内容，或被内容过滤拦下）时，即使同时带着正文也不采用
+    # （失败关闭）：截断时报截断，否则报拒答，拒答不重问。
+    refusal = message.get("refusal")
+    if (isinstance(refusal, str) and refusal.strip()) or choice.get("finish_reason") == "content_filter":
+        raise ChatJSONOutputError("output_truncated" if truncated else "refused")
     if not text.strip():
         raise ChatJSONOutputError("output_truncated" if truncated else "empty_content")
     try:

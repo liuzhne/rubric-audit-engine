@@ -13,6 +13,11 @@ envelope:
 * the rule (or, for a mutex group, its ordered tiers).
 
 The order keeps the longest possible shared prefix for provider prompt caches.
+With ``SCORING_STABLE_PREFIX_ENABLED`` everything that changes per rule moves
+behind the evidence (paper → evidence → criterion → context → scope → rule),
+evidence is listed in document order and aliases come from the paragraph's
+position (``E<section>.<unit>``), so rules that read the same chapter share
+one prefix (docs/论文章节树与稳定前缀取证方案.md).
 Aliases are mapped back to authoritative evidence-unit ids before the existing
 fail-closed normalization, so quote and authorization checks are unchanged.
 """
@@ -23,18 +28,28 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 import json
 import re
 
 from backend.app.services.llm.core_adapter import _allowed_finding_codes
 from backend.app.services.llm.core_adapter import _core_envelope
 from backend.app.services.llm.core_adapter import normalize_core_provider_response
+from backend.app.services.llm.core_adapter import output_repair_hint
+from backend.app.services.llm.errors import CoreResponseInvalidError
 from backend.app.services.scoring.core.contracts import WORDED_ATOMIC_RULE_SCHEMAS
 from backend.app.services.scoring.core.rule_context import derive_context_needs
 from backend.app.services.scoring.retrieval.compression import COMPRESSOR_VERSION
 from backend.app.services.scoring.retrieval.compression import compress_evidence
+from backend.app.services.scoring.retrieval.judge_scope import SCOPED
+from backend.app.services.scoring.retrieval.judge_scope import document_order
+from backend.app.services.scoring.retrieval.judge_scope import rule_scope
 from backend.app.services.scoring.retrieval.judge_scope import scope_view
+from backend.app.services.scoring.retrieval.judge_scope import scoped_unit_cap
+from backend.app.services.scoring.retrieval.judge_scope import shared_rule
 from backend.app.services.scoring.retrieval.section_roles import RoleResolver
+from backend.app.services.scoring.retrieval.section_tree import stable_alias
+from backend.app.services.scoring.retrieval.section_tree import unit_order
 from backend.app.services.scoring.retrieval.selection import TokenBudgetError
 from backend.app.services.scoring.retrieval.selection import conservative_token_estimate
 
@@ -76,13 +91,19 @@ _EVIDENCE_SENTENCE = "text 由原文连续片段组成，“…”表示省略�
 # 不随规则变化，便于厂商的提示词缓存。
 _SCOPE_SENTENCE = (
     "evidence 的 section 是该段落的完整标题路径，section_role 是它所属的章节角色。"
+    "paper.outline（如有）是系统从论文结构确定性提取的章节目录，每项有标题 title、层级 level、字数 chars 与"
+    "段落数 paragraphs，只用于了解全文结构和 evidence 在论文中的位置，不能作为证据。"
     "scope 说明本规则评价论文的哪一部分，由系统确定，你不得更改：type=document 时 evidence 是从全文按相关度"
-    "选出的段落，不是全文；type=section 时 evidence 只来自 scope.sections 列出的章节，coverage=complete 表示"
-    "给出了该章节的全部段落，partial 表示只给出了部分；type=cross_section 时规则要求对照多个章节。"
+    "选出的段落，不是全文；type=section 时 evidence 只来自 scope.sections 列出的章节，按论文原文顺序给出，"
+    "coverage=complete 表示原样给出了该章节的全部段落，partial 表示只给出了部分或有段落被截短；"
+    "type=cross_section 时规则要求对照多个章节。"
     "只依据 evidence 判断，不得推测范围外或未给出段落的内容。规则要求的内容在 evidence 里找不到时："
     "coverage=complete 可以判 triggered；coverage=partial 或 type=document 时判 insufficient_evidence，不能判缺失。"
     "cross_section 判 triggered 时，occurrences 必须分别引用至少两个不同章节的证据。"
 )
+# 稳定前缀（docs/论文章节树与稳定前缀取证方案.md 阶段 2）：证据别名改为按段落位置起名。
+_ALIAS_EXAMPLE = "ref（如 E1）"
+_STABLE_ALIAS_EXAMPLE = "ref（如 E3.2，表示第 3 个章节的第 2 段，序号从 0 起）"
 _NOT_TRIGGERED_SENTENCE = "not_triggered 表示证据显示不存在该缺陷，或现有证据不足以证明缺陷存在；"
 _REVIEW_STATUS_SENTENCE = (
     "not_triggered 表示证据覆盖了规则要检查的内容且显示不存在该缺陷；判 triggered 前先检查证据中作者"
@@ -114,6 +135,18 @@ def _judge_scope_enabled() -> bool:
     return bool(settings.SCORING_JUDGE_SCOPE_ENABLED)
 
 
+def _stable_prefix_enabled() -> bool:
+    from backend.app.core.config import settings
+
+    return bool(settings.SCORING_STABLE_PREFIX_ENABLED)
+
+
+def _scope_char_budget() -> int:
+    from backend.app.core.config import settings
+
+    return int(settings.SCORING_SCOPE_EVIDENCE_CHAR_BUDGET)
+
+
 def _insufficient_evidence_enabled() -> bool:
     """开了适用范围也允许“证据不足”：“整章 / 部分”的区分离不开它（方案第 8.4 节）。"""
 
@@ -137,6 +170,8 @@ def _basis_sentence() -> str:
 
 def _common_instructions() -> str:
     text = _COMMON_INSTRUCTIONS
+    if _stable_prefix_enabled():
+        text = text.replace(_ALIAS_EXAMPLE, _STABLE_ALIAS_EXAMPLE, 1)
     if _judge_scope_enabled():
         text = text.replace(_EVIDENCE_SENTENCE, _EVIDENCE_SENTENCE + _SCOPE_SENTENCE, 1)
     if _insufficient_evidence_enabled():
@@ -170,7 +205,10 @@ def provider_prompt_suffix() -> str:
 
     parts = []
     if _judge_scope_enabled():
-        parts.append("+rule-scope@1")
+        # @2：按范围取到的段落原样、按原文顺序给出，“整章”按实际发出的内容算，并带目录骨架。
+        parts.append("+rule-scope@2")
+    if _stable_prefix_enabled():
+        parts.append("+stable-prefix@1")
     if _insufficient_evidence_enabled():
         parts.append("+insufficient@1")
     if basis_enabled():
@@ -187,6 +225,21 @@ class CoreProviderRequest:
     compression: list = field(default_factory=list)
     group_code: str | None = None
     rule_codes: tuple = ()
+    # 回答不合格后的重问：追加在 ``user`` 之后的一条固定提示；首次请求为 None。
+    repair_hint: str | None = None
+    # Chat 协议把 ``schema`` 放进请求体时为 True：它按输入计费，要算进输入估算。
+    schema_counts_as_input: bool = False
+
+
+def with_repair(request: CoreProviderRequest, repair) -> CoreProviderRequest:
+    """重问用的请求：``system`` 与 ``user`` 一字不改，只多一条固定的修正提示。"""
+
+    if repair is None:
+        return request
+    hint = output_repair_hint(repair)
+    if hint is None:
+        raise ValueError("unknown output repair check")
+    return replace(request, repair_hint=hint)
 
 
 def _rule_wording(rule) -> list[str]:
@@ -275,16 +328,37 @@ def _view(value, rules, *, group_code=None):
     wording = [text for rule in rules for text in _rule_wording(rule)]
     keep_captions = any(_CAPTION_MARKERS.search(text) for text in wording)
     query = "\n".join([criterion["name"], *wording])
-    shown, decisions = compress_evidence(
-        value["evidence_units"], query=query, keep_captions=keep_captions
-    )
+    scoped = _judge_scope_enabled()
+    stable = _stable_prefix_enabled()
+    # 按范围取到的段落（一章 / 多章对照）原样、按原文顺序给出：选证时已经按字数预算截好，
+    # 这里不再做“每段 400 字、合计 3000 字”的压缩，否则“整章”就不是真的。
+    whole = scoped and value.get("coverage_mode") in SCOPED
+    if whole:
+        budget = _scope_char_budget()
+        targets = rule_scope(shared_rule(rules))["targets"]
+        shown, decisions = compress_evidence(
+            document_order(value["evidence_units"]), query=query, keep_captions=True,
+            unit_cap=scoped_unit_cap(value["evidence_units"], budget, len(targets)),
+            total_cap=budget, keep_fitting=True,
+        )
+    else:
+        shown, decisions = compress_evidence(
+            value["evidence_units"], query=query, keep_captions=keep_captions
+        )
+        if stable:
+            # 取舍仍按相关度（先压缩、后排序），显示按原文顺序。
+            shown = sorted(shown, key=lambda pair: unit_order(pair[0]))
+    reduced = [
+        item["evidence_unit_id"]
+        for item in decisions
+        if item["reducer"] != "kept" and item.get("reason") != "personal_information"
+    ] if whole else ()
     alias_to_unit = {}
     evidence = []
-    scoped = _judge_scope_enabled()
-    scope = scope_view(rules, value) if scoped else None
+    scope = scope_view(rules, value, reduced_unit_ids=reduced) if scoped else None
     resolver = RoleResolver.from_envelope(value) if scoped else None
     for index, (unit, text) in enumerate(shown, start=1):
-        alias = "E%d" % index
+        alias = stable_alias(unit) if stable else "E%d" % index
         alias_to_unit[alias] = unit["evidence_unit_id"]
         path = list(unit.get("section_path") or ())
         section = " › ".join(path) if scoped else (path[-1] if path else "")
@@ -294,9 +368,18 @@ def _view(value, rules, *, group_code=None):
         evidence.append(item)
 
     view = {}
+    paper = {}
     digest = extensions.get("paper_digest")
     if digest:
-        view["paper"] = {"digest": digest}
+        paper["digest"] = digest
+    outline = extensions.get("section_outline") if scoped else None
+    if isinstance(outline, Mapping) and outline.get("rows"):
+        paper["outline"] = outline["rows"]
+    if paper:
+        view["paper"] = paper
+    if stable:
+        # 随规则变化的内容全部放到证据之后：同一批证据的请求共用到证据为止的前缀。
+        view["evidence"] = evidence
     view["criterion"] = {
         "code": criterion["criterion_code"],
         "name": criterion["name"],
@@ -307,7 +390,8 @@ def _view(value, rules, *, group_code=None):
         view["context"] = context
     if scope:
         view["scope"] = scope
-    view["evidence"] = evidence
+    if not stable:
+        view["evidence"] = evidence
     if group_code is None:
         view["rule"] = _rule_view(rules[0])
     else:
@@ -406,6 +490,18 @@ def build_core_request(envelope) -> CoreProviderRequest:
     value = _core_envelope(envelope).to_mapping()
     rule = value["atomic_rule_snapshot"]
     view, alias_to_unit, decisions = _view(value, [rule])
+    return CoreProviderRequest(
+        system=_single_instructions(),
+        user=_dumps(view),
+        schema=_single_schema(rule, alias_to_unit),
+        alias_to_unit=alias_to_unit,
+        compression=decisions,
+        rule_codes=(rule["rule_code"],),
+        schema_counts_as_input=_schema_counts_as_input(value),
+    )
+
+
+def _single_schema(rule, alias_to_unit) -> dict:
     level_codes = sorted({item["level_code"] for item in rule.get("levels") or ()})
     schema = {
         "type": "object",
@@ -419,15 +515,48 @@ def build_core_request(envelope) -> CoreProviderRequest:
             "occurrences": _occurrences_schema(_allowed_finding_codes(rule), alias_to_unit),
         },
     }
-    _with_basis(schema, alias_to_unit)
-    return CoreProviderRequest(
-        system=_single_instructions(),
-        user=_dumps(view),
-        schema=schema,
-        alias_to_unit=alias_to_unit,
-        compression=decisions,
-        rule_codes=(rule["rule_code"],),
+    return _with_basis(schema, alias_to_unit)
+
+
+def _group_schema(rules, group_code, alias_to_unit) -> dict:
+    finding_codes = sorted({code for rule in rules for code in _allowed_finding_codes(rule)})
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schema_version", "group_code", "status", "selected_rule_code", "occurrences"],
+        "properties": {
+            "schema_version": {"type": "string", "enum": [GROUP_RESPONSE_SCHEMA]},
+            "group_code": {"type": "string", "enum": [group_code]},
+            "status": {"type": "string", "enum": _statuses()},
+            "selected_rule_code": {
+                "type": ["string", "null"],
+                "enum": [rule["rule_code"] for rule in rules] + [None],
+            },
+            "occurrences": _occurrences_schema(finding_codes, alias_to_unit),
+        },
+    }
+    return _with_basis(schema, alias_to_unit)
+
+
+def _schema_counts_as_input(value) -> bool:
+    """只有 Chat 协议带严格 Schema 时才计入（``SCORING_CHAT_STRICT_SCHEMA_ENABLED`` 打开之后）。
+
+    Responses 与 Claude 一直在发 Schema 而没有计入，这里不动它们：计入会改变它们的证据选择，
+    也就改变已有连接实际发出的请求。
+    """
+
+    identity = value.get("runtime_identity") if isinstance(value, Mapping) else None
+    provider = identity.get("provider") if isinstance(identity, Mapping) else None
+    return (
+        isinstance(provider, Mapping)
+        and provider.get("name") == "openai_compatible"
+        and provider.get("response_format") == "json_schema"
     )
+
+
+def _schema_estimate(schema) -> int:
+    # 按内核生成的原样 Schema 估算：各主机族的改写只会删减或等量替换，所以这是上界。
+    return conservative_token_estimate(_dumps(schema)) + _FRAMING_ALLOWANCE
 
 
 def _member_rules(envelopes) -> list[dict]:
@@ -448,42 +577,32 @@ def build_core_group_request(envelopes, *, group_code: str) -> CoreProviderReque
         if value["criterion_snapshot"] != first["criterion_snapshot"]:
             raise ValueError("group members must belong to one criterion")
     view, alias_to_unit, decisions = _view(first, rules, group_code=group_code)
-    finding_codes = sorted({code for rule in rules for code in _allowed_finding_codes(rule)})
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["schema_version", "group_code", "status", "selected_rule_code", "occurrences"],
-        "properties": {
-            "schema_version": {"type": "string", "enum": [GROUP_RESPONSE_SCHEMA]},
-            "group_code": {"type": "string", "enum": [group_code]},
-            "status": {"type": "string", "enum": _statuses()},
-            "selected_rule_code": {
-                "type": ["string", "null"],
-                "enum": [rule["rule_code"] for rule in rules] + [None],
-            },
-            "occurrences": _occurrences_schema(finding_codes, alias_to_unit),
-        },
-    }
-    _with_basis(schema, alias_to_unit)
     return CoreProviderRequest(
         system=_group_instructions(),
         user=_dumps(view),
-        schema=schema,
+        schema=_group_schema(rules, group_code, alias_to_unit),
         alias_to_unit=alias_to_unit,
         compression=decisions,
         group_code=group_code,
         rule_codes=tuple(rule["rule_code"] for rule in rules),
+        schema_counts_as_input=_schema_counts_as_input(first),
     )
 
 
 def request_input_estimate(request: CoreProviderRequest) -> int:
     """Conservative size of exactly what is sent (system + view + framing)."""
 
-    return (
+    estimate = (
         conservative_token_estimate(request.user)
         + conservative_token_estimate(request.system)
         + _FRAMING_ALLOWANCE
     )
+    if request.repair_hint:
+        # 重问多出的那条提示也算进去（另加一条消息的封装余量），预检量的才是实际发出的大小。
+        estimate += conservative_token_estimate(request.repair_hint) + _FRAMING_ALLOWANCE
+    if request.schema_counts_as_input:
+        estimate += _schema_estimate(request.schema)
+    return estimate
 
 
 def estimate_view_input_tokens(value, rules) -> int:
@@ -497,16 +616,22 @@ def estimate_view_input_tokens(value, rules) -> int:
     rules = list(rules)
     if len(rules) > 1:
         group_code = str(rules[0].get("mutex_group") or "group")
-        view, _aliases, _decisions = _view(value, rules, group_code=group_code)
+        view, aliases, _decisions = _view(value, rules, group_code=group_code)
         system = _group_instructions()
     else:
-        view, _aliases, _decisions = _view(value, rules)
+        view, aliases, _decisions = _view(value, rules)
         system = _single_instructions()
-    return (
+    estimate = (
         conservative_token_estimate(_dumps(view))
         + conservative_token_estimate(system)
         + _FRAMING_ALLOWANCE
     )
+    if _schema_counts_as_input(value):
+        schema = (
+            _group_schema(rules, group_code, aliases) if len(rules) > 1 else _single_schema(rules[0], aliases)
+        )
+        estimate += _schema_estimate(schema)
+    return estimate
 
 
 def preflight_core_request(envelope, request: CoreProviderRequest) -> int:
@@ -524,15 +649,19 @@ def _map_evidence_refs(response, alias_to_unit):
     if not isinstance(response, Mapping):
         return response
     mapped = deepcopy(dict(response))
-    for occurrence in mapped.get("occurrences") or ():
+    # 容器类型不对（occurrences 是数字、evidence 是字符串等）时不在这里遍历：原样交给
+    # 归一化，由它按「回答不合格」拒绝，而不是在这里抛 TypeError。
+    occurrences = mapped.get("occurrences")
+    for occurrence in occurrences if isinstance(occurrences, list) else ():
         if not isinstance(occurrence, dict):
             continue
-        for item in occurrence.get("evidence") or ():
+        evidence = occurrence.get("evidence")
+        for item in evidence if isinstance(evidence, list) else ():
             if isinstance(item, dict) and "evidence_ref" in item:
                 ref = item.pop("evidence_ref")
                 unit_id = alias_to_unit.get(ref) if isinstance(ref, str) else None
                 if unit_id is None:
-                    raise ValueError("Core provider response cited an unknown evidence ref")
+                    raise CoreResponseInvalidError("evidence", "Core provider response cited an unknown evidence ref")
                 item["evidence_unit_id"] = unit_id
     basis = mapped.get("basis")
     if isinstance(basis, dict) and isinstance(basis.get("evidence"), list):
@@ -556,7 +685,7 @@ def _request_allows_basis(request: CoreProviderRequest) -> bool:
 def decode_core_response(envelope, response, request: CoreProviderRequest) -> dict:
     allowed = _request_statuses(request)
     if isinstance(response, Mapping) and response.get("status") not in allowed:
-        raise ValueError("Core provider response status is invalid")
+        raise CoreResponseInvalidError("status", "Core provider response status is invalid")
     return normalize_core_provider_response(
         envelope,
         _map_evidence_refs(response, request.alias_to_unit),
@@ -569,30 +698,30 @@ def decode_core_group_response(envelopes, response, request: CoreProviderRequest
     """Project one group decision onto every member rule (fail closed)."""
 
     if not isinstance(response, Mapping):
-        raise TypeError("Core group response must be an object")
+        raise CoreResponseInvalidError("fields", "Core group response must be an object")
     required = {"schema_version", "group_code", "status", "selected_rule_code", "occurrences"}
     keys = set(response)
     allow_basis = _request_allows_basis(request)
     if allow_basis:
         keys.discard("basis")
     if keys != required:
-        raise ValueError("Core group response has invalid fields")
+        raise CoreResponseInvalidError("fields", "Core group response has invalid fields")
     if response["schema_version"] != GROUP_RESPONSE_SCHEMA:
-        raise ValueError("Core group response schema_version is unsupported")
+        raise CoreResponseInvalidError("fields", "Core group response schema_version is unsupported")
     if response["group_code"] != request.group_code:
-        raise ValueError("Core group response named another group")
+        raise CoreResponseInvalidError("rule_code", "Core group response named another group")
     status = response["status"]
     if status not in _request_statuses(request):
-        raise ValueError("Core group response status is invalid")
+        raise CoreResponseInvalidError("status", "Core group response status is invalid")
     selected = response["selected_rule_code"]
     occurrences = response["occurrences"]
     if not isinstance(occurrences, list):
-        raise TypeError("Core group response occurrences must be an array")
+        raise CoreResponseInvalidError("fields", "Core group response occurrences must be an array")
     if status == "triggered":
         if selected not in request.rule_codes:
-            raise ValueError("Core group response selected an unauthorized tier")
+            raise CoreResponseInvalidError("rule_code", "Core group response selected an unauthorized tier")
     elif selected is not None or occurrences:
-        raise ValueError("non-triggered Core group response must not contain a decision")
+        raise CoreResponseInvalidError("non_triggered_has_decision", "non-triggered Core group response must not contain a decision")
 
     decoded = {}
     for envelope in envelopes:
@@ -649,4 +778,5 @@ __all__ = [
     "preflight_core_request",
     "provider_prompt_suffix",
     "request_input_estimate",
+    "with_repair",
 ]

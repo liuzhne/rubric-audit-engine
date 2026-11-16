@@ -88,6 +88,18 @@ class ProviderJSONOutputError(ValueError):
         super().__init__(message or reason)
 
 
+class CoreResponseInvalidError(ProviderJSONOutputError):
+    """模型答了、也是 JSON，但没有通过 Core 回答校验（docs/评分模型回答不合格的重问与报错方案.md）。
+
+    ``check`` 是固定的短标识（见 ``core_adapter.OUTPUT_REPAIR_HINTS``），说明是哪一类校验没过；
+    日志与重问只用它，不用异常消息，也绝不带模型正文。
+    """
+
+    def __init__(self, check, message=None):
+        self.check = str(check)
+        super().__init__("output_invalid", message or self.check)
+
+
 class PlatformModelMissingError(RuntimeError):
     """受保护部署既没有绑定的私有连接，也没有管理员配置的平台模型（D-028）。
 

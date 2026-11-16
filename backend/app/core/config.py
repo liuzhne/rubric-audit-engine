@@ -158,6 +158,18 @@ class Settings(BaseSettings):
     # 按细则的适用范围取证据（docs/评分细则适用范围方案.md 第 8 节）：规则快照升 @5、只给范围内的段落、
     # 找不到章节转人工，并允许“证据不足”。改变评分，QWK 评测后再打开。
     SCORING_JUDGE_SCOPE_ENABLED: bool = False
+    # 按范围取到的段落原样发给模型（不再压缩），合计最多多少字；整章放得下才算“整章”
+    # （docs/论文章节树与稳定前缀取证方案.md 阶段 1）。只在上面的开关打开时起作用。
+    SCORING_SCOPE_EVIDENCE_CHAR_BUDGET: int = Field(default=8000, ge=500, le=60000)
+    # 按范围取证的请求用的上下文窗口：默认窗口的输入预算（约 6000 token）放不下 8000 字的整章。
+    # 取它与 SCORING_CONTEXT_WINDOW_TOKENS 中较大的一个；全文范围的规则不受影响。
+    SCORING_SCOPE_CONTEXT_WINDOW_TOKENS: int = Field(default=14000, ge=1024)
+    # 稳定前缀（同一方案的阶段 2）：视图顺序改为 论文 → 证据 → 评分项 → 上下文 → 范围 → 规则，
+    # 证据按原文顺序、用位置别名。改提示词与判定身份，评测后再打开。
+    SCORING_STABLE_PREFIX_ENABLED: bool = False
+    # 分节摘要（docs/分节摘要定位方案.md）：一次摘要请求最多给多少字原文；一章超过时按节点拆成多次。
+    # 目前只有生成与存储，评分还不读摘要。
+    SCORING_SECTION_SUMMARY_CHAR_BUDGET: int = Field(default=12000, ge=200, le=60000)
     # off = 证据不足并入 not_triggered（现状）；review = 模型可回 insufficient_evidence，评分项转人工。
     SCORING_INSUFFICIENT_EVIDENCE_MODE: Literal["off", "review"] = "off"
     # off = 提示词不变；cite = 要求每条语义判定给依据引文与一句理由（漏写不判失败；docs/评分证据与理由改造方案.md G5）。
@@ -177,6 +189,16 @@ class Settings(BaseSettings):
     # cap and the per-paper estimate are checked before a job starts; the
     # per-paper cap is also enforced on actual usage while a paper is scored.
     SCORING_MAX_INPUT_TOKENS_PER_PAPER: int = Field(default=0, ge=0)
+    # 模型回答没通过校验时，带固定修正提示重问：每条规则（或互斥组）最多 1 次，每篇论文
+    # 最多这么多次；0 关闭重问（docs/评分模型回答不合格的重问与报错方案.md）。
+    SCORING_OUTPUT_REPAIR_MAX_PER_PAPER: int = Field(default=5, ge=0, le=50)
+    # Chat 协议的 Core 评分请求是否把规则的严格 Schema 交给厂商（response_format: json_schema）。
+    # 关闭时请求与身份逐字节不变，连接上的 structured_output 存着但不生效；打开前需要真实留出集 QWK
+    # （docs/Chat评分请求严格Schema方案.md）。
+    SCORING_CHAT_STRICT_SCHEMA_ENABLED: bool = False
+    # Google 主机族：字符串枚举超过这么多个值就不发这个枚举（Vertex 会以「Schema 太复杂」拒绝）。
+    # 暂定值，等对真实接口实测后再定；它写在 model_version 里，改了等于换运行身份。
+    SCORING_CHAT_SCHEMA_ENUM_LIMIT: int = Field(default=64, ge=1, le=2000)
     # 一次「AI 起草扣分细则」请求的总时间预算（秒）。Vercel 函数最长 300 秒，留出合并、
     # 校验与返回的余量；没有函数时长限制的自部署可以调大，0 表示不限。
     RUBRIC_AI_DRAFT_TIME_BUDGET_SECONDS: float = Field(default=260.0, ge=0)

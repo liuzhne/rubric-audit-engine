@@ -62,7 +62,7 @@ def test_usage_meter_counts_tokens_requests_and_failures():
         "reasoning_tokens": 0,
         "reasoning_requests": 0,
         "inferred_reasoning_requests": 0,
-        "truncated_count": 0,
+        "truncated_count": 0, "cached_tokens": 0,
     }
     assert usage_delta(meter.snapshot(), before) == {
         "prompt_tokens": 0,
@@ -73,7 +73,7 @@ def test_usage_meter_counts_tokens_requests_and_failures():
         "reasoning_tokens": 0,
         "reasoning_requests": 0,
         "inferred_reasoning_requests": 0,
-        "truncated_count": 0,
+        "truncated_count": 0, "cached_tokens": 0,
     }
 
 
@@ -115,7 +115,7 @@ def test_compatible_adapter_meters_answered_and_rejected_requests():
         "reasoning_tokens": 0,
         "reasoning_requests": 0,
         "inferred_reasoning_requests": 0,
-        "truncated_count": 0,
+        "truncated_count": 0, "cached_tokens": 0,
     }
     rate_limit.reset_provider_runtime_for_tests()
 

@@ -452,7 +452,7 @@ class ThesisLLMRuntime:
         # 一篇论文一个守卫：身份声明不思考、模型却在思考时，本篇其余调用不再发出。
         self.thinking_guard = ThinkingConsistencyGuard()
 
-    def score(self, *, envelope):
+    def score(self, *, envelope, repair=None):
         from backend.app.services.llm_observability import observation
 
         value = envelope.to_mapping()
@@ -476,7 +476,26 @@ class ThesisLLMRuntime:
                 ).get("policy_hash"),
             },
         ):
-            return self._score(envelope=envelope, value=value, rule=rule)
+            return self._score(envelope=envelope, value=value, rule=rule, repair=repair)
+
+    @property
+    def output_repair_limit(self) -> int:
+        """本篇最多重问几次（回答不合格后带固定修正提示再问）；0 表示不重问。
+
+        评分器的 Core 入口不接受 ``repair``（Mock、旧评分器）时为 0。执行器只读这个数，
+        不直接读配置。
+        """
+
+        import inspect
+
+        from backend.app.core.config import settings
+
+        explicit = getattr(self.scorer, "score_core_envelope", None)
+        try:
+            supported = callable(explicit) and "repair" in inspect.signature(explicit).parameters
+        except (TypeError, ValueError):
+            supported = False
+        return max(0, int(settings.SCORING_OUTPUT_REPAIR_MAX_PER_PAPER)) if supported else 0
 
     def _metered(self, call, *, envelope):
         """Enforce the paper input cap and the thinking check, then attribute usage."""
@@ -521,7 +540,39 @@ class ThesisLLMRuntime:
             lambda: classify_headings(self.scorer, headings, profile_key), envelope=None
         )
 
-    def score_group(self, *, envelopes, group_code):
+    def summarize_sections(self, *, units):
+        """一篇论文的分节摘要记录（docs/分节摘要定位方案.md 第 4 节）；评分器不能生成时返回 None。
+
+        每批一次模型调用，各自走评分调用的同一套计量（单篇输入上限、用量、思考守卫）。
+        Mock 或没有 ``complete_json`` 的评分器不生成。
+        """
+
+        from backend.app.core.config import settings
+        from backend.app.services.scoring.retrieval.section_summary import summarize_sections
+
+        if not callable(getattr(self.scorer, "complete_json", None)) or str(
+            getattr(self.scorer, "provider", "")
+        ).lower() == "mock":
+            return None
+        return summarize_sections(
+            self.scorer, units,
+            char_budget=settings.SCORING_SECTION_SUMMARY_CHAR_BUDGET,
+            call=lambda run: self._metered(run, envelope=None),
+        )
+
+    @property
+    def supports_group_repair(self) -> bool:
+        """评分器的整组入口接不接受 ``repair``；不接受时执行器不重问互斥组（单条规则不受影响）。"""
+
+        import inspect
+
+        explicit = getattr(self.scorer, "score_core_group", None)
+        try:
+            return callable(explicit) and "repair" in inspect.signature(explicit).parameters
+        except (TypeError, ValueError):
+            return False
+
+    def score_group(self, *, envelopes, group_code, repair=None):
         """One provider call for every tier of a mutex group.
 
         Returns ``None`` when the scorer cannot judge groups (e.g. the Mock), so
@@ -532,16 +583,18 @@ class ThesisLLMRuntime:
         self.last_call_usage = None
         if not callable(explicit):
             return None
+        extra = {"repair": repair} if repair else {}
         return self._metered(
-            lambda: explicit(envelopes=envelopes, group_code=group_code),
+            lambda: explicit(envelopes=envelopes, group_code=group_code, **extra),
             envelope=envelopes[0] if envelopes else None,
         )
 
-    def _score(self, *, envelope, value, rule):
+    def _score(self, *, envelope, value, rule, repair=None):
         self.last_call_usage = None
         explicit = getattr(self.scorer, "score_core_envelope", None)
         if callable(explicit):
-            return self._metered(lambda: explicit(envelope=envelope), envelope=value)
+            extra = {"repair": repair} if repair else {}
+            return self._metered(lambda: explicit(envelope=envelope, **extra), envelope=value)
         if getattr(self.scorer, "provider", None) != "mock":
             raise LLMScoringError(
                 "selected provider does not implement PromptEnvelopeV3 Core scoring"
@@ -793,6 +846,8 @@ class ThesisProfile:
                 request_rules=selection_rules,
                 budget_target=settings.SCORING_TOKEN_BUDGET_TARGET,
                 judge_scope=settings.SCORING_JUDGE_SCOPE_ENABLED,
+                scope_char_budget=settings.SCORING_SCOPE_EVIDENCE_CHAR_BUDGET,
+                scope_context_window_tokens=settings.SCORING_SCOPE_CONTEXT_WINDOW_TOKENS,
                 selection_report=selection_report,
             )
             selected = envelope.to_mapping()["evidence_selection_identity"]

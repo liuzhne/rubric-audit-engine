@@ -226,7 +226,7 @@ def test_cross_section_selection_takes_evidence_from_each_target_first():
                               top_k=3, judge_scope=True, **BUDGET).to_mapping()
 
     assert value["coverage_mode"] == "cross_section"
-    assert value["evidence_selection_identity"]["selector_version"].endswith("+judge-scope@2")
+    assert value["evidence_selection_identity"]["selector_version"].endswith("+judge-scope@3")
     first_two = [unit["section_path"][0] for unit in value["evidence_units"][:2]]
     assert first_two == ["第1章 绪论", "第5章 结论"]
     assert all("系统设计" not in unit["section_path"][0] for unit in value["evidence_units"])
@@ -436,7 +436,7 @@ def test_insufficient_evidence_with_a_finding_is_invalid():
 def test_prompt_suffix_covers_both_switches(monkeypatch):
     monkeypatch.setattr(settings, "SCORING_JUDGE_SCOPE_ENABLED", True)
     monkeypatch.setattr(settings, "SCORING_INSUFFICIENT_EVIDENCE_MODE", "review")
-    assert core_view.provider_prompt_suffix() == "+rule-scope@1+insufficient@1"
+    assert core_view.provider_prompt_suffix() == "+rule-scope@2+insufficient@1"
     group = core_view._group_instructions()
     assert group.endswith(core_view._GROUP_INSTRUCTIONS[len(core_view._COMMON_INSTRUCTIONS):])
     assert deepcopy(core_view._statuses())[-1] == "insufficient_evidence"

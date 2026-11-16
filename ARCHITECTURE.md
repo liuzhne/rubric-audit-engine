@@ -592,6 +592,14 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-15 | 分节摘要（阶段 3 的 PR A：生成与存储） | 新模块 `scoring/retrieval/section_summary`（节点、分批、提示词、校验）与 `scoring/adapters/derivations`（存取）；新表 `document_derivations`（迁移 `0046`）；运行时入口 `summarize_sections`；评分还不读摘要 |
+| 2026-11-15 | 论文章节树与稳定前缀取证（#106 复审） | `section_tree.outline` 隐去像个人信息的标题；`judge_scope._within_char_budget` 必留每个目标章节的第一段，`scoped_unit_cap` 在放不下时按章节数平分；`compress_evidence(keep_fitting=…)`；`transport.langfuse_usage` 把缓存命中与未命中分成两个桶 |
+| 2026-11-15 | 论文章节树与稳定前缀取证（阶段 1、2） | 新模块 `scoring/retrieval/section_tree`（读取时拼树、目录骨架、位置别名）；按范围取到的段落原样发出、“整章”按实际内容算；视图可改为证据在前的稳定前缀顺序；用量多一项缓存命中 token，迁移 `0045_cached_prompt_tokens` |
+| 2026-11-13 | Chat 评分请求严格 Schema | 新模块 `llm/schema_dialects`（输出约束解析 + 按主机族改写 Schema）；Chat 适配器新增 `core_response_format`，Core 的两个请求可带 `response_format: json_schema`；`core_adapter` 的身份字段读它；总开关默认关闭 |
+| 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | `openai_adapter._parse_json_output` 与 `openai_compatible_adapter._parse_chat_json_output` 先识别拒答（`refused`）再报没有正文；拒答不进重问 |
+| 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | `failures.OUTPUT_REPAIR_CHECKS` / `safe_output_check`：内核只认登记过的校验标识；运行时新增 `supports_group_repair`；`core_view.request_input_estimate` 计入重问提示；Responses 的 `_parse_json_output` 改抛带 `reason` 的 `ResponsesJSONOutputError` |
+| 2026-11-12 | 评分模型回答不合格的重问与报错 | 规则执行器在回答不合格时带固定修正提示重问 1 次（`_RepairBudget`，上限来自运行时的 `output_repair_limit`）；适配器的回答校验改抛 `CoreResponseInvalidError`（带 `check`）；`failures` 新增 `PROVIDER_OUTPUT_INVALID` 与出错位置 `where`；无迁移 |
+| 2026-11-12 | 部署前核对数据库版本 | 部署链多一步：`deploy-lightsail-production` 送完镜像后、写 `.env` 与 `deploy.sh` 切换前，经 `ops.sh` 用本次镜像跑 `production_migrate check`（运行角色，只读 `alembic_version`），与镜像迁移目录的 head 不一致即失败。迁移仍只由手动的 `pgs-production-migrate` 执行；模块边界与数据流不变 |
 | 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | 新增 `scoring/retrieval/section_roles.py`（标题对到章节角色）与 `scope_policy.py`（Profile 注入 Core 的三个判断）；`judge_scope.py` 改为只读 `@5` 的 `scope`；规则快照 `@4` 删除、`@5` 新增；执行器加缺章短路与多章引用检查。开关默认关，见 §2026-11-11 小节 |
 | 2026-11-11 | 评分细则适用范围（#99 第三轮复审） | 识别完成只重读审查工作区、不重建编辑表单；规则编辑器的范围显示改取工作区（`ruleScopes`），不放进编辑表单 |
 | 2026-11-11 | 评分细则适用范围（#99 第二轮复审） | 范围移出 `rule_content`（不进 `content_token` 与审查签名），审查工作区单独给出；重新编译时 `review_carry.carry_rule_scopes` 把内容未变的规则的范围带过去；前端没有进行中的识别任务时一律重新识别 |
@@ -2059,3 +2067,91 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - 不变的：v1 兼容路径按 `applies_to` 取章节文本块的逻辑；开关关闭时的提示词、快照与判定身份。
 
 维护记录：2026-11-11 · 评分细则适用范围（分期 B）：新增两个检索模块、执行器的两处检查与快照 @5；无迁移，head 仍为 `0044_atomic_rule_scope`。
+
+### 2026-11-12 评分模型回答不合格的重问与报错
+
+方案见 `docs/评分模型回答不合格的重问与报错方案.md`。调用链在「规则执行器 → 运行时 → 适配器」这一段多了一步：
+
+1. 适配器的回答校验（`llm/core_view.decode_core_response` / `decode_core_group_response`、`llm/core_adapter.normalize_core_provider_response`）不再抛裸 `ValueError` / `TypeError`，改抛 `llm/errors.CoreResponseInvalidError`：`reason="output_invalid"`，`check` 是固定的校验标识。它仍是 `ValueError` 的子类。
+2. `scoring/core/rule_executor` 的 `_semantic_decision_for_envelope`（单条）与 `_judge_semantic_group`（互斥组）：第一次请求与以前逐字节相同；模型答了但不合格（适配器抛上面的异常、`invalid_json` / `empty_content`，或执行器校验返回 `failures.OUTPUT_INVALID_CHECKS` 里的 5 个码）时，向 `_RepairBudget` 要一个名额，再调一次 `llm_runtime.score(envelope=…, repair=<check>)` / `score_group(…, repair=…)`。
+3. 名额：每条规则（或每个互斥组）1 次，全篇不超过 `llm_runtime.output_repair_limit`。两个 Profile 的运行时从 `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER` 读这个数；评分器的 `score_core_envelope` 不接受 `repair`（Mock、旧评分器）时为 0。**内核不读配置。**
+4. 适配器收到 `repair` 时用 `core_view.with_repair` 给请求加一条固定提示（`core_adapter.OUTPUT_REPAIR_HINTS`）：Chat 追加第三条消息，Responses 把 `input` 变成两条用户消息，Messages 在同一条用户消息里加第二个文本块。原有的系统消息与用户消息不变。
+5. 重问走同一套计量（单篇输入上限、用量账本、思考守卫）。重问因输入上限没发出时，报告第一次的不合格。
+
+不变的：
+
+- 判定身份、`CORE_PROVIDER_PROMPT_VERSION`、判定账本的读写时机；重问得到的合格判定照常入账。
+- 截断、拒答、思考不一致、熔断、HTTP 错误的处理；确定性规则；复用账本判定的路径。
+- 仍不合格的规则判 `invalid`，规则任务 `failed_exhausted`，评分项不出分（D-016）。
+
+持久化与报错：
+
+- `RuleCallJournal.record_provider_attempt` 改为累加；规则任务 `attempt_count` 可以是 2，`max_attempts = max(1, attempt_count)`。
+- `scoring/core/failures`：`reason` 为 `output_invalid` / `invalid_json` / `empty_content` → `PROVIDER_OUTPUT_INVALID`；其余异常的消息带 `where=<模块>:<行号>`（`failure_site`，取调用栈最靠内的本项目代码帧）。
+- `adapters/persistence`：语义规则且确实发过请求时，执行器的 5 个校验码也写进规则任务的 `provider_error`。
+- `batch_scoring/jobs._incomplete_scoring_error` 把这 6 个码统一报成 `PROVIDER_OUTPUT_INVALID`（类别 `llm`）；`assistant/views.DIAGNOSES` 有对应的卡片文案。
+
+维护记录：2026-11-12 · 评分模型回答不合格的重问与报错：执行器增加重问一步，新增异常类型、错误码与出错位置；无迁移。
+
+### 2026-11-13 评分模型回答不合格的重问与报错（#103 复审）
+
+- `scoring/core/failures.OUTPUT_REPAIR_CHECKS` 是全部校验标识，`safe_output_check` 把不在其中的值归为 `fields`。执行器（重问、日志）与失败投影都经过它；它与 `llm/core_adapter.OUTPUT_REPAIR_HINTS` 的键一致由测试保证。
+- 论文运行时新增 `supports_group_repair`（看评分器 `score_core_group` 的签名）；执行器在重问互斥组前检查它，没有这个属性的运行时按支持处理。
+- `core_view.request_input_estimate` 把 `repair_hint` 与一条消息的封装余量算进去，`preflight_core_request` 因此量的是重问时实际发出的大小。
+- `core_view._map_evidence_refs` 只遍历数组类型的 `occurrences` / `evidence`，其它类型原样交给归一化拒绝；`core_adapter.normalize_core_provider_response` 对 `status`、`level_code`、`finding_code`、证据编号先查类型再查集合。
+- `llm/openai_adapter._parse_json_output` 改抛 `ResponsesJSONOutputError`（`invalid_json` / `empty_content`，消息不变）。
+
+维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 复审）：校验标识集合、整组重问的签名检查、输入估算与两处类型检查。
+
+### 2026-11-13 评分模型回答不合格的重问与报错（#103 第二轮复审）
+
+回答解析的判断顺序（Responses 与 Chat 一致，Messages 原本就是）：截断 → 拒答 → 没有正文 → 不是合法 JSON。只有后两种（`empty_content`、`invalid_json`）会进执行器的重问；拒答报 `refused`，由 `failures` 投影为 `PROVIDER_OUTPUT_REFUSED`。Responses 看输出项里 `type="refusal"` 的内容，Chat 看 `message.refusal` 与 `finish_reason=content_filter`。有拒答标记时即使同时带着正文也不采用正文：截断时报截断，否则报拒答。Responses 的 `complete_json` 原样上抛解析给出的分类。
+
+维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 第二轮复审）：回答解析先识别拒答。
+
+### 2026-11-13 Chat 评分请求严格 Schema
+
+方案见 `docs/Chat评分请求严格Schema方案.md`。总开关 `SCORING_CHAT_STRICT_SCHEMA_ENABLED` 默认关闭，关闭时请求与运行身份逐字节不变。
+
+- **Schema 从哪来**：不变。`core_view.build_core_request` / `build_core_group_request` 为每条规则（每个互斥组）生成 `request.schema`，Responses 与 Claude 一直在用。
+- **新模块 `llm/schema_dialects`**：
+  - `resolve_chat_response_format` 决定 Chat 的 Core 请求发什么约束：连接选项 `structured_output` > 旧的 `response_format_json` > 核实过的主机族清单 `VERIFIED_STRICT_SCHEMA_FAMILIES`（目前为空）。
+  - `apply(dialect, schema)` 按主机族改写：Google（Vertex、Gemini API）把可空类型写成 `nullable`、枚举去掉 `null`、枚举值超过 `SCORING_CHAT_SCHEMA_ENUM_LIMIT` 时去掉枚举、删 `minLength`、必须为空的数组不带空对象定义；其它主机族原样。
+  - 方言标签（如 `;schema=google@1/e64`）拼在 `model_version` 后面。
+- **调用链**：`OpenAICompatibleChatScorer.__init__` 解析出 `core_response_format` → `core_adapter.core_runtime_provider_contract` 把它记进信封的 `provider.response_format` → `_post_core_request` 按信封发 `response_format`。只影响 `score_core_envelope` 与 `score_core_group`；v1 兼容路径和 `complete_json` 仍只看 `response_format_json`。
+- **边界**：内核与 `core_view` 不知道方言；改写只发生在 Chat 适配器发送前。被放宽的约束仍由 `decode_core_response` 与 `normalize_core_provider_response` 校验。
+- **输入估算**：Chat 带 Schema 时，`core_view.request_input_estimate` 与 `estimate_view_input_tokens` 把 Schema 计入（`CoreProviderRequest.schema_counts_as_input`），证据选择与发送前检查量的都是实际发出的大小。按内核的原样 Schema 估算，是各方言的上界。Responses 与 Claude 的估算不变。
+- **测试连接**：`ai_connections._chat_schema_probe_fields` 在评分会带 Schema 时让探测也带一份小 Schema（同一个方言）。
+
+维护记录：2026-11-13 · Chat 评分请求严格 Schema：新模块与 Chat 适配器的输出约束，默认关闭。
+
+### 2026-11-15 论文章节树与稳定前缀取证（阶段 1、2）
+
+方案见 [docs/论文章节树与稳定前缀取证方案.md](docs/论文章节树与稳定前缀取证方案.md)。阶段 3（分节摘要定位）与阶段 4（评分助手翻阅工具）没有做。
+
+- **章节树**：`scoring/retrieval/section_tree.py`。不存储：读取时按证据单元的 `section_path` 与章节、段落序号拼出（`build_tree`）；`outline` 是目录骨架（标题、层级、字数、段落数，最多 60 行、3 层）；`stable_alias` 按位置给证据起别名 `E<章节序号>.<段落序号>`。
+- **调用链（`SCORING_JUDGE_SCOPE_ENABLED` 打开时）**：
+  1. 执行器 `_section_role_map` 一篇论文算一次：`rule_scope_policy.section_role_map` 之外再调 `section_outline`，两者打包成 `_ScopeExtensions`，写进信封扩展的 `section_roles` 与 `section_outline`（都进入判定身份）。
+  2. `retrieval/selection.build_v4_envelope` 按范围选段时多两个参数：`scope_char_budget`（选出的段落合计字数上限，`judge_scope.select_scoped_units` 里截）与 `scope_context_window_tokens`（只对按范围取证的请求，取它与默认窗口中较大的）。
+  3. `llm/core_view._view`：信封的 `coverage_mode` 是 `section` / `cross_section` 时，段落按原文顺序、原样给出（`compress_evidence` 的上限换成范围字数预算），不再走“每段 400 字、合计 3000 字”；被截短或没放下的段落交给 `judge_scope.scope_view(reduced_unit_ids=…)`，所在章节标 `partial`。目录骨架放在 `paper.outline`。
+- **稳定前缀（`SCORING_STABLE_PREFIX_ENABLED`，默认关）**：视图顺序从 论文 → 评分项 → 上下文 → 范围 → 证据 → 规则 改为 论文 → 证据 → 评分项 → 上下文 → 范围 → 规则；证据按原文顺序列出、用位置别名。读同一章且整章放得下的规则，请求到证据结束为止逐字相同。全文范围的规则仍按规则选证与压缩，只改顺序与别名。
+- **版本**：提示词后缀 `+rule-scope@1` → `+rule-scope@2`，新增 `+stable-prefix@1`；选择器后缀 `judge-scope@2` → `judge-scope@3`。两个开关都关时请求、快照与判定身份与改动前逐字节相同。
+- **缓存命中计量**：`llm/usage.observed_usage` 多一个 `cached_tokens`（`reported_cached_tokens` 兼容 `prompt_tokens_details` / `input_tokens_details`、DeepSeek 与 Gemini 映射的顶层字段，Claude 取 `cache_read_input_tokens`），`UsageMeter` 累加，写进 `scoring_runs.cached_tokens` 与 `ai_usage_ledger.cached_tokens`，`llm_call` 日志与 Langfuse 用量同步带上。
+- **不变的**：Core 包仍不依赖检索模块（新判断走 `rule_scope_policy`）；论文快照与证据单元身份；引用校验；全文范围规则的选证。
+
+维护记录：2026-11-15 · 论文章节树与稳定前缀取证（阶段 1、2）：新增检索模块、视图顺序开关与缓存命中计量；迁移 head 为 `0045_cached_prompt_tokens`。
+
+### 2026-11-15 分节摘要（阶段 3 的 PR A：生成与存储）
+
+方案见 [docs/分节摘要定位方案.md](docs/分节摘要定位方案.md)。这一步只有“生成并存下摘要”，**评分调用链没有变**：执行器不调用它，判定请求里也没有摘要。定位与取证在 PR B。
+
+- **`scoring/retrieval/section_summary.py`**（不碰数据库）：
+  - `summary_nodes`：从章节树取层级 ≤ 2 的节点，编号 `N1…`，最多 60 个；更深的小节并进所在的二级节点。
+  - `summary_batches`：一章一批，超过 `SCORING_SECTION_SUMMARY_CHAR_BUDGET` 时按节点拆开，单个节点超过时取开头与结尾；个人信息段不放进正文。
+  - `summarize_sections(scorer, units, call=…)`：每批一次 `complete_json`（严格 Schema，节点编号用枚举），`parse_summaries` 丢掉编号外、重复、空白和像注入指令的项。
+  - `summary_key_hash`：快照哈希 + 树版本 + `section-summary@1` + 模型。
+- **`scoring/adapters/derivations.py`**：`get_derivation` / `put_derivation`（唯一约束冲突时读回先写入的那条）与 `ensure_section_summaries`（先查后生成）。
+- **运行时**：`ThesisLLMRuntime.summarize_sections` 给每批套上 `_metered`（单篇输入上限、用量、思考守卫）；Mock 与没有 `complete_json` 的评分器返回 None。
+- **持久化边界**：新表 `document_derivations`（`document_snapshot_id` + `kind` + `key_hash` 唯一）。它是缓存，不是论文快照的一部分；快照仍不可变。记录里没有论文正文，只有节点标题、计数、段落编号与摘要。
+
+维护记录：2026-11-15 · 分节摘要（PR A）：新增两个模块、一张表与运行时入口；迁移 head 为 `0046_document_derivations`。

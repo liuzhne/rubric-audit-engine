@@ -10,7 +10,11 @@
 - ``RUNTIME_DATABASE_URL``：运行角色 ``pgs_app``，verify 只用它。owner 什么都读得到，证明不了应用
   能不能工作——0026/0027 的新表缺授权，就是只有用运行角色验证才暴露出来（见 0029）。
 
-    python -m backend.app.scripts.production_migrate survey|pending|upgrade|verify
+    python -m backend.app.scripts.production_migrate survey|pending|upgrade|verify|check
+
+``check`` 是部署任务（ci.yml 的 deploy-lightsail-production）切换版本前的门：数据库的版本与本镜像
+迁移目录的 head 不一致就返回 1，部署停在切换之前，线上继续跑旧版本。它只读一行版本号，用运行
+角色（``alembic_version`` 对 ``pgs_app`` 只给了 SELECT），部署任务因此不需要 owner 连接串。
 
 只打印版本、角色名、表名与行数，不打印行内容（生产库含学生 PII），也不打印连接串。
 """
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pathlib
 import subprocess
 import sys
 
@@ -33,14 +38,17 @@ from backend.app.db.session import engine_options
 from backend.app.services.deployment.postgres_verifier import RUNTIME_ACCESS_TABLES
 
 
-COMMANDS = ("survey", "pending", "upgrade", "verify")
+COMMANDS = ("survey", "pending", "upgrade", "verify", "check")
 #: 每个子命令用哪一个连接串。
 CREDENTIAL = {
     "survey": "MIGRATION_DATABASE_URL",
     "pending": "MIGRATION_DATABASE_URL",
     "upgrade": "MIGRATION_DATABASE_URL",
     "verify": "RUNTIME_DATABASE_URL",
+    "check": "RUNTIME_DATABASE_URL",
 }
+#: 迁移目录按本文件定位：镜像里是 /app/alembic，与当前目录无关。
+ALEMBIC_DIRECTORY = pathlib.Path(__file__).resolve().parents[3] / "alembic"
 
 
 def _url(raw: str) -> str:
@@ -98,6 +106,42 @@ def verify(url, runner=subprocess.run) -> int:
     return 0
 
 
+def code_head() -> str:
+    """本镜像（本提交）迁移目录的 head。"""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config()
+    config.set_main_option("script_location", str(ALEMBIC_DIRECTORY))
+    return ScriptDirectory.from_config(config).get_current_head()
+
+
+def check(url, expected=None) -> int:
+    """数据库版本与本镜像的 head 一致才返回 0。只读，不改任何东西。"""
+    expected = expected or code_head()
+    engine = _engine(url)
+    try:
+        with engine.connect() as connection:
+            if inspect(connection).has_table("alembic_version"):
+                found = sorted(connection.execute(text("SELECT version_num FROM alembic_version")).scalars())
+            else:
+                found = []
+            connection.rollback()
+    finally:
+        engine.dispose()
+    if found == [expected]:
+        print("数据库版本与本次部署一致：%s" % expected)
+        return 0
+    print(
+        "数据库版本与本次部署不一致：数据库为 %s，本次部署需要 %s。\n"
+        "没有切换版本，线上仍是原来的版本。先运行 pgs-production-migrate"
+        "（分支选 main，expected_head=%s，先 dry_run 再正式执行），然后重新运行这个部署任务。"
+        % ("、".join(found) or "空（没有 alembic_version）", expected, expected),
+        file=sys.stderr,
+    )
+    return 1
+
+
 def main(argv=None, environ=None, runner=subprocess.run) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=COMMANDS)
@@ -113,6 +157,8 @@ def main(argv=None, environ=None, runner=subprocess.run) -> int:
             return survey(url)
         if args.command == "pending":
             return _run(["alembic", "history", "--indicate-current"], url, runner)
+        if args.command == "check":
+            return check(url)
         if args.command == "upgrade":
             return _run(["alembic", "upgrade", "head"], url, runner)
         return verify(url, runner)

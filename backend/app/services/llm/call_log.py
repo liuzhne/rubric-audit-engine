@@ -74,7 +74,7 @@ def log_call_succeeded(provider, model, data, *, elapsed_ms, attempt, usage=None
         "llm_call provider=%s model=%s routed_model=%s upstream=%s elapsed_ms=%d attempt=%d "
         "finish_reason=%s prompt_tokens=%d completion_tokens=%d reasoning_tokens=%d reasoning=%s "
         "answer_tokens=%s answer=%s thinking=%s effort=%s thinking_source=%s entry=%s "
-        "answer_budget=%s max_tokens=%s",
+        "answer_budget=%s max_tokens=%s cached_tokens=%d",
         _field(provider), _field(model), _field(routed), _field(upstream), elapsed_ms, attempt + 1,
         _field(usage.get("finish_reason")), _token(usage.get("prompt_tokens")),
         _token(usage.get("completion_tokens")), _token(usage.get("reasoning_tokens")),
@@ -82,7 +82,7 @@ def log_call_succeeded(provider, model, data, *, elapsed_ms, attempt, usage=None
         _optional_token(usage.get("answer_tokens")), _field(usage.get("answer_source")),
         _field(context.get("thinking")), _field(context.get("effort")), _field(context.get("source")),
         _field(context.get("entry")), _optional_token(context.get("answer_budget")),
-        _optional_token(context.get("max_tokens")),
+        _optional_token(context.get("max_tokens")), _token(usage.get("cached_tokens")),
     )
 
 

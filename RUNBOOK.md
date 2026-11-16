@@ -1119,6 +1119,31 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 `pgs-production-migrate` 的最后一步用 `pgs_app` 复验，不是用 owner——owner 什么都读
 得到，证明不了应用能不能工作。0026/0027 的新表缺授权正是靠这一步才暴露（见 0029）。
 
+**部署会核对数据库版本（2026-11-12 起）**。`deploy-lightsail-production` 在切换版本之前有一步
+`Refuse to deploy ahead of the database migrations`：用本次要部署的镜像在实例上起一次性容器
+（`ops.sh <提交 SHA> python -m backend.app.scripts.production_migrate check`），读生产库的
+`alembic_version`，与镜像里迁移目录的 head 不一致就失败。失败时没有写 `.env`、没有切换，线上仍是
+原来的版本。它只核对、不迁移：迁移仍由手动的 `pgs-production-migrate` 执行。
+
+这一步失败时：
+
+1. 看日志里的“数据库为 …，本次部署需要 …”。
+2. 运行 `pgs-production-migrate`，分支选 **main**（代码已经合并，属于补跑），`expected_head` 填日志里
+   “需要”的那个版本，先 `dry_run=true`，再 `dry_run=false`。
+3. 回到失败的那次 `pgs-production-gates`，只重新运行失败的任务（Re-run failed jobs）。
+
+- 报错指向哪里：main 上的部署任务红了，看起来像部署坏了或实例连不上。
+- 真正的原因：发布 PR 合并之前没有跑迁移（3.0 第 6 条）。部署本身没有问题，线上也没有受影响。
+- 数据库版本比代码**新**也会被拦（例如 revert 掉一个已经执行的迁移）：先把数据库降级到代码的 head，
+  或把迁移文件留在仓库里。用 `deploy.sh <旧 SHA>` 在实例上回滚不经过这道门，回滚到迁移之前的版本
+  要自己确认旧代码能在新结构上运行。
+- `pgs-production-migrate` 的 `Show pending migrations` 打印的是全部迁移历史（`alembic history`），
+  不是只有待执行的；当前版本看 `Survey the database before migrating` 的 `current alembic head`。
+
+2026-11-12 的事故：发布 #101 含 0043、0044，合并前没有跑迁移；门禁全绿并完成部署，评分标准页
+报“数据库表尚未初始化或结构不匹配”（`atomic_rules.scope` 不存在）。当时部署只请求
+`/api/system/health`，它不比较版本，也不读那一列。
+
 ### 11.13 验收用例互相抢同一行种子数据
 
 **报错指向**：某个按钮 `locator.click` 等到超时，页面快照里那一行根本不存在。看起来
@@ -1313,6 +1338,14 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-15 | 分节摘要（阶段 3 的 PR A：生成与存储） | 迁移 `0046_document_derivations`（新表，已给 `pgs_app` 授权并建 RLS，降级直接删表）；新环境变量 `SCORING_SECTION_SUMMARY_CHAR_BUDGET`；新只读脚本 `estimate_section_summaries`；一条排错 |
+| 2026-11-15 | 论文章节树与稳定前缀取证（#106 复审） | 无新命令；Langfuse 里 `input_tokens` 现在不含缓存命中部分（另见 `input_cached_tokens`），数据库与 `llm_call` 日志的 `prompt_tokens` 仍是全量；0045 降级在 Postgres 上先锁两张表 |
+| 2026-11-15 | 论文章节树与稳定前缀取证（阶段 1、2） | 迁移 `0045_cached_prompt_tokens`（先跑迁移工作流再部署，有非零观测时拒绝降级）；新环境变量 `SCORING_SCOPE_EVIDENCE_CHAR_BUDGET`、`SCORING_SCOPE_CONTEXT_WINDOW_TOKENS`、`SCORING_STABLE_PREFIX_ENABLED`（默认关）；`llm_call` 日志新增 `cached_tokens`；三条排错 |
+| 2026-11-13 | Chat 评分请求严格 Schema | 新环境变量 `SCORING_CHAT_STRICT_SCHEMA_ENABLED`（默认关）与 `SCORING_CHAT_SCHEMA_ENUM_LIMIT`（默认 64，暂定）；Chat 连接选项 `structured_output`；一条排错；无迁移 |
+| 2026-11-13 | 评分模型回答不合格的重问与报错（#103 第二轮复审） | 一条排错：拒答与回答不合格的区分；无新命令 |
+| 2026-11-13 | 评分模型回答不合格的重问与报错（#103 复审） | 材料级说明不再写「已自动重问」，排错条目改为按 `attempt_count` 判断有没有重问过；无新命令 |
+| 2026-11-12 | 评分模型回答不合格的重问与报错 | 新环境变量 `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER`（默认 5，0 关闭）；新日志 `rule_output_repair`，`rule_execution_failed` 多了 `check` 与 `where`；两条排错；无迁移 |
+| 2026-11-12 | 部署前核对数据库版本 | 11.12 新增：部署任务切换前核对 `alembic_version` 与镜像的迁移 head，不一致就失败且不切换；写明失败后的三步（补跑迁移、重跑部署任务）、数据库比代码新也会被拦、`Show pending migrations` 打印的是全部历史；记录 2026-11-12 漏迁移的事故 |
 | 2026-11-11 | 评分细则适用范围（分期 B：评分侧） | `SCORING_JUDGE_SCOPE_ENABLED` 含义改为按细则适用范围取证据（仍默认关，QWK 后再开）；排错补两种新的复核原因与“开了范围后转人工变多” |
 | 2026-11-11 | 评分细则适用范围（#99 第三轮复审） | 无新命令与排错；页面行为见 ARCHITECTURE 同日条目 |
 | 2026-11-11 | 评分细则适用范围（#99 第二轮复审） | 无新命令；面板说明改为“评分沿用现有取证逻辑” |
@@ -2032,6 +2065,9 @@ npm --prefix frontend/workbench run api:generate
 | `SCORING_DECISION_LEDGER_TTL_DAYS` | `30` | 账本记录的保留天数 |
 | `SCORING_MAX_INPUT_TOKENS_PER_PAPER` | `0`（不限） | 单篇输入 token 上限：开始前按估算拦截，运行中按实际用量截止 |
 | `SCORING_MAX_INPUT_TOKENS_PER_BATCH` | `0`（不限） | 单批输入 token 上限：开始前按估算拦截 |
+| `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER` | `5` | 模型回答没过校验时带固定提示重问：每条规则最多 1 次，每篇最多这么多次；`0` 关闭 |
+| `SCORING_CHAT_STRICT_SCHEMA_ENABLED` | `false` | Chat 协议的 Core 评分请求带严格 Schema；打开前需要 Vertex 实测与 QWK（见 2026-11-13 条目） |
+| `SCORING_CHAT_SCHEMA_ENUM_LIMIT` | `64` | Google 主机族：字符串枚举超过这么多个值就不发这个枚举；暂定值，改它等于换运行身份 |
 
 看用量：
 
@@ -3368,3 +3404,133 @@ from grading_batches;
 测试：`.venv/bin/python -m pytest -q backend/app/tests/test_rule_scope_scoring.py backend/app/tests/test_scoring_stage2.py backend/app/tests/test_scoring_stage2_bc.py`
 
 维护记录：2026-11-11 · 评分细则适用范围（分期 B）：开关含义更新与三条排错。
+
+### 2026-11-12 评分模型回答不合格的重问与报错
+
+模型答了但回答没过校验时，系统带一条固定的修正提示重问 1 次。每条规则（或互斥组）最多 1 次，每篇论文最多 `SCORING_OUTPUT_REPAIR_MAX_PER_PAPER` 次（默认 5）。回滚：把它设为 `0` 后重启 app 与 worker，行为回到「不合格直接判无效」，报错改进保留。
+
+看重问发生了多少、成没成：
+
+```bash
+ssh pgs-prod 'docker compose -p pgs -f /opt/pgs/compose.yml logs --since 24h worker | grep -E "rule_output_repair|rule_execution_failed" | tail -40'
+```
+
+- `rule_output_repair rule_code=… check=… outcome=accepted`：重问后合格，规则任务 `attempt_count=2`。
+- `outcome=rejected`：重问后仍不合格，或重问请求本身失败。
+- `outcome=skipped_cap`：本篇的重问次数用完了，没有重问。
+- `check` 是哪一类校验没过：`json`、`fields`、`status`、`non_triggered_has_decision`、`triggered_without_evidence`、`evidence`、`level`、`finding_code`、`rule_code`。日志里没有模型回答和论文内容。
+
+排错：
+
+- **材料失败，说明是「模型对部分规则的回答没有通过格式校验」（`PROVIDER_OUTPUT_INVALID`）**
+  - 报错指向：模型回答。这次指向是对的，但容易去查连接或限流。
+  - 真正原因：模型的回答没过校验。说明里不写有没有重问过，要看规则任务：`attempt_count=2` 是重问后仍不合格，`attempt_count=1` 是没有重问（上限设成了 0、本篇名额用完即日志里的 `skipped_cap`，或评分器不接受 `repair`）。先点「重试失败项」（已成功的规则复用，只重判失败的）。同一条规则反复失败时看 `rule_output_repair` 的 `check`：总是 `evidence` 多半是模型在改写引文而不是逐字摘录，总是 `fields` / `status` 多半是这个模型不守 JSON 结构，换模型比调参数有效。一篇里 `skipped_cap` 很多说明是系统性的，不要靠调大上限解决。
+- **`RULE_EXECUTION_FAILED`，页面说「评分规则执行失败」**
+  - 报错指向：让人去查模型或 Worker。
+  - 真正原因：2026-11-12 之后这个码只剩代码异常。`rule_execution_failed` 日志行的 `where=<模块>:<行号>` 就是抛出的位置，规则任务的复核说明里也有同一个位置。2026-11-12 之前的版本里，模型回答不合格也报这个码（当天 `t03.v1` 那次就是），那时日志只有 `exception_type=ValueError`，定位不到校验。
+- **测试陷阱：假评分器的 `score_core_envelope` 没有 `repair` 参数**
+  - 报错指向：断言「应该重问」失败，看起来像执行器没生效。
+  - 真正原因：运行时按签名判断评分器接不接受 `repair`，不接受时 `output_repair_limit` 为 0，一次都不重问。测试里的假评分器要写成 `score_core_envelope(self, *, envelope, repair=None)`。
+
+测试：`.venv/bin/python -m pytest -q backend/app/tests/test_scoring_output_repair.py`
+
+维护记录：2026-11-12 · 评分模型回答不合格的重问与报错：新增环境变量、日志字段与三条排错。
+
+维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 复审）：说明文案与排错条目按“是否重问过看 `attempt_count`”修正。
+
+### 2026-11-13 评分模型回答不合格的重问与报错（#103 第二轮复审）
+
+排错：
+
+- **材料报「模型按其安全策略拒绝评判部分规则」（`PROVIDER_OUTPUT_REFUSED`），但日志里没有 `rule_output_repair`**
+  - 报错指向：看起来像重问没生效。
+  - 真正原因：拒答不重问，这是有意的。OpenAI 的两个协议里，拒答表现为「没有正文」加一个拒答标记（Responses 是 `type="refusal"` 的内容，Chat 是 `message.refusal` 或 `finish_reason=content_filter`），解析时先认拒答。只有真的没有正文、也没有拒答标记时才算回答不合格并重问；有拒答标记时即使带着正文也按拒答，不采用。
+
+维护记录：2026-11-13 · 评分模型回答不合格的重问与报错（#103 第二轮复审）：一条排错。
+
+### 2026-11-13 Chat 评分请求严格 Schema
+
+方案见 `docs/Chat评分请求严格Schema方案.md`。默认关闭，关闭时没有任何行为变化。
+
+环境变量：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `SCORING_CHAT_STRICT_SCHEMA_ENABLED` | `false` | Chat 协议的 Core 评分请求是否带严格 Schema。**打开前需要 Vertex 实测与真实留出集 QWK** |
+| `SCORING_CHAT_SCHEMA_ENUM_LIMIT` | `64` | Google 主机族：字符串枚举超过这么多个值就不发这个枚举。暂定值；改它等于换运行身份 |
+
+连接选项（Chat 连接的 `provider_options`，目前只能通过接口设置，界面没有入口）：`structured_output` 取 `json_schema` / `json_object` / `off`。总开关关闭时可以保存，但不生效。Responses 连接不接受这个选项（它始终带 Schema）。
+
+打开的顺序：app 与 worker 同时设 `SCORING_CHAT_STRICT_SCHEMA_ENABLED=true` 后重启，两边的值要一致。回滚：设回 `false` 重启，身份回到原值，原来的缓存与账本重新可用。
+
+怎么确认一个连接在发 Schema：评分记录里 `model_version` 以 `;schema=<方言>@<版本>` 结尾，例如 `chat-completions;schema=google@1/e64`。没有这个后缀就是没发。
+
+排错——打开后整篇论文的语义规则全部失败，错误码 `PROVIDER_INVALID_REQUEST`：
+
+- 报错指向哪里：错误码说的是“请求不合法”，容易去查模型名、`temperature`、`top_p`。
+- 真正的原因多半在哪里：厂商拒绝了 Schema。常见的是某条规则可引用的证据很多，枚举超过了厂商的复杂度上限；或者这个模型不支持 `json_schema`。
+- 怎么确认：看 worker 日志里 `llm_call_failed` 的 `status=400`，再看失败是不是集中在证据多的规则上。只有部分规则失败，是枚举太大，调低 `SCORING_CHAT_SCHEMA_ENUM_LIMIT`；全部失败，是模型或端点不支持，把连接的 `structured_output` 设为 `off`。
+- 系统不会自动退回不带 Schema 的请求（见 DECISIONS 同日条目）。
+
+排错——测试连接失败，但同一个地址、模型、Key 之前能用：连接设了 `structured_output=json_schema` 且总开关已打开时，测试请求也带一份小 Schema。接口不接受就在这里失败。把选项改成 `off` 再测一次即可区分。
+
+维护记录：2026-11-13 · Chat 评分请求严格 Schema：两个环境变量、一个连接选项、两条排错。
+
+### 2026-11-15 论文章节树与稳定前缀取证（阶段 1、2）
+
+方案见 `docs/论文章节树与稳定前缀取证方案.md`。发布：迁移 `0045_cached_prompt_tokens`（`scoring_runs` 与 `ai_usage_ledger` 各加一列 `cached_tokens`，不建表）。生产先从 develop 跑迁移工作流再合发布 PR；任一行有非零的 `cached_tokens` 时 0045 拒绝降级。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `SCORING_SCOPE_EVIDENCE_CHAR_BUDGET` | `8000` | 按范围取到的段落原样发给模型，合计最多多少字。只在 `SCORING_JUDGE_SCOPE_ENABLED=true` 时起作用 |
+| `SCORING_SCOPE_CONTEXT_WINDOW_TOKENS` | `14000` | 按范围取证的请求用的上下文窗口，取它与 `SCORING_CONTEXT_WINDOW_TOKENS` 中较大的；全文范围的规则不受影响 |
+| `SCORING_STABLE_PREFIX_ENABLED` | `false` | 视图改为证据在前、别名按段落位置起名。**改提示词与判定身份，打开前需要 QWK** |
+
+三个变量 app 与 worker 要一致。它们还没有登记到 `scripts/production_env.py`（`OPTIONAL_SWITCHES` 只带开关和枚举），现在只能取默认值；要在生产打开稳定前缀或调预算，先在那里和 `ci.yml` 的部署环境里登记。`SCORING_JUDGE_SCOPE_ENABLED` 打开后的行为也变了（提示词后缀 `+rule-scope@2`、选择器 `judge-scope@3`）：按范围取到的段落不再压缩。
+
+查缓存命中：`llm_call` 日志的 `cached_tokens`，或
+
+```sql
+select model_name, sum(prompt_tokens) as prompt, sum(cached_tokens) as cached
+from scoring_runs where created_at > now() - interval '1 day' group by model_name;
+```
+
+排错：
+
+- **`cached_tokens` 一直是 0**
+  - 报错指向：像是前缀没有命中，稳定前缀没起作用。
+  - 真正原因：三种情况都会是 0。厂商不上报这个字段（0 不等于没命中）；共同前缀短于厂商的最短缓存长度；`SCORING_STABLE_PREFIX_ENABLED` 没开，证据前面还有随规则变化的内容。另外只有读同一章、且整章放得下的规则才共用到证据为止的前缀，全文范围的规则各选各的证据。
+- **打开范围后，按章节评的规则大多转人工，判定是“证据不足”**
+  - 报错指向：像是模型不敢判。
+  - 真正原因：章节超过 `SCORING_SCOPE_EVIDENCE_CHAR_BUDGET`（或放不进范围窗口），视图里 `scope.sections[].coverage` 是 `partial`，提示词不允许在“部分”时判缺失。看规则任务的证据段数与章节字数；确实需要整章时调大预算与 `SCORING_SCOPE_CONTEXT_WINDOW_TOKENS`。
+- **按范围取证的请求被厂商拒绝（413 或请求体过大）**
+  - 报错指向：厂商报请求太大，像是论文本身有问题。
+  - 真正原因：范围请求的窗口默认 14000 token，比全文范围的 9040 大；有请求体上限的厂商放不下。把 `SCORING_SCOPE_CONTEXT_WINDOW_TOKENS` 调回 `SCORING_CONTEXT_WINDOW_TOKENS` 的值，章节会按较小的窗口截取并标为“部分”。
+
+维护记录：2026-11-15 · 论文章节树与稳定前缀取证（阶段 1、2）：记录迁移、三个环境变量、缓存命中的查法与三条排错。
+
+### 2026-11-15 分节摘要（阶段 3 的 PR A：生成与存储）
+
+方案见 `docs/分节摘要定位方案.md`。发布：迁移 `0046_document_derivations`（新表 `document_derivations`；迁移里已给 `pgs_app` 授权并建 RLS，表已加进 `postgres_verifier.RUNTIME_ACCESS_TABLES`，迁移工作流的运行角色验证会读它）。生产先从 develop 跑迁移工作流再合发布 PR。表是缓存，降级直接删。
+
+评分行为没有变化：这一步没有开关，摘要只有被调用才会生成，而现在没有调用方。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `SCORING_SECTION_SUMMARY_CHAR_BUDGET` | `12000` | 一次摘要请求最多给多少字原文；一章超过时按节点拆成多次 |
+
+估算一篇论文做摘要的开销（只读数据库，不调模型）：
+
+```bash
+python -m backend.app.scripts.estimate_section_summaries <document_snapshot_id>
+```
+
+输出节点数、模型调用次数、发给模型的字数和节点标题；标题来自论文，真实论文的输出不要提交。
+
+排错：
+
+- **部署后评分报 `permission denied for table document_derivations`**
+  - 报错指向：像是应用代码或连接串的问题。
+  - 真正原因：迁移是在 `pgs_app` 角色还不存在的库上跑的（迁移里“角色不存在就跳过授权”），或者表是手工建的。授权不随表自动获得。用迁移工作流的 verify 步骤确认；缺的话以属主身份补 `GRANT SELECT, INSERT, UPDATE, DELETE` 并按 0046 建 RLS 策略。
+
+维护记录：2026-11-15 · 分节摘要（PR A）：记录迁移、一个环境变量、估算脚本与一条排错。

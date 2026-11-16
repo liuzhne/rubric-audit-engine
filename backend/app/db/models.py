@@ -286,6 +286,10 @@ class AIUsageLedger(Base):
     truncated_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # 0045：厂商报告的缓存命中输入 token（已含在 prompt_tokens 里）。0 也可能是厂商不报。
+    cached_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     estimated_cost: Mapped[float | None] = mapped_column(Numeric(12, 6), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
@@ -1896,6 +1900,42 @@ class DocumentSnapshot(Base):
     )
 
 
+class DocumentDerivation(Base):
+    """模型为一份论文快照生成的阅读辅助：分节摘要与定位结果（docs/分节摘要定位方案.md）。
+
+    不是原文，所以不放进不可变的论文快照；按生成条件冻结在这里，``payload_hash`` 进入判定身份。
+    是缓存：删掉不影响已有分数，下次评分重新生成。记录写入后不修改，提示词或模型变了是新的一行。
+    """
+
+    __tablename__ = "document_derivations"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_snapshot_id", "kind", "key_hash",
+            name="uq_document_derivations_snapshot_kind_key",
+        ),
+        CheckConstraint(
+            "kind IN ('section_summary', 'section_locate')", name="ck_document_derivations_kind"
+        ),
+        CheckConstraint(_lower_hex_digest_check("key_hash"), name="ck_document_derivations_key_hash"),
+        CheckConstraint(
+            _lower_hex_digest_check("payload_hash"), name="ck_document_derivations_payload_hash"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    document_snapshot_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_snapshots.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    # 生成条件的哈希：快照哈希、树与提示词版本、模型身份（定位还包括规则与摘要哈希）。
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
 @event.listens_for(Session, "before_flush")
 def _protect_document_snapshot_immutability(session, _flush_context, _instances):
     for candidate in tuple(session.dirty) + tuple(session.deleted):
@@ -2570,6 +2610,10 @@ class ScoringRun(Base):
         Integer, nullable=False, default=0, server_default="0"
     )
     truncated_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # 0045：厂商报告的缓存命中输入 token（已含在 prompt_tokens 里）。0 也可能是厂商不报。
+    cached_tokens: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
     # 篇章一致性发现（设计§8）：确定性（图表/引文）+ 语义（研究问题↔结论）合并，进报告、供人工复核。
