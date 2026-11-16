@@ -2571,6 +2571,7 @@ def _recalculate_run(run, items, parse_quality, total_score):
             if item.aggregation_schema_version not in {
                 "criterion-aggregation@1",
                 "criterion-aggregation@2",
+                "criterion-aggregation@3",
             }:
                 item.aggregation = _aggregation_projection(aggregate_item)
                 item.aggregation_schema_version = AGGREGATION_SCHEMA_VERSION
@@ -2617,6 +2618,7 @@ def _require_recalculable_run(run):
                 AGGREGATION_SCHEMA_VERSION,
                 "criterion-aggregation@1",
                 "criterion-aggregation@2",
+                "criterion-aggregation@3",
             }:
                 raise ValueError(
                     "score item aggregation schema does not match the frozen run"

@@ -206,6 +206,28 @@ def test_incomplete_run_keeps_unknown_rule_failure_safe():
     assert "sensitive" not in str(error)
 
 
+def test_rule_execution_failure_names_rules_and_does_not_suggest_retrying():
+    jobs = _jobs_module()
+    tasks = [
+        SimpleNamespace(
+            status="failed_exhausted",
+            provider_error=None,
+            criterion_code="T%02d" % index,
+            rule_code="manual.t%02d.deduct.%d.v1" % (index, index),
+        )
+        for index in (5, 3, 1, 2)
+    ]
+
+    error = jobs._incomplete_scoring_error(tasks)
+
+    assert error.code == "RULE_EXECUTION_FAILED"
+    message = str(error)
+    assert "T01 的 manual.t01.deduct.1.v1" in message
+    assert "等 4 条" in message
+    assert "manual.t05" not in message
+    assert "不是模型调用失败" in message and "重试会重新判定" in message
+
+
 def test_library_error_code_and_message_are_not_exposed_as_business_diagnostics():
     jobs = _jobs_module()
 

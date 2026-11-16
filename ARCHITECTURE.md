@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-16 | 扣分合计超满分封底于 0 | `rule_executor._deduction_effects` 按剩余分数入账（新增公开的 `nominal_deduction_amounts`），`_criterion_results` 不再因累计溢出判无效，改记 `DEDUCTION_FLOORED_AT_ZERO`（info）；`persistence` 写 `criterion-aggregation@3` 并在评分项说明后追加封底句；`judgement_view` 按实际入账给标签；`jobs._incomplete_scoring_error` 点名判定无效的规则。模块边界、调用链与持久化边界不变，无迁移 |
 | 2026-11-15 | 分节摘要（阶段 3 的 PR A：生成与存储） | 新模块 `scoring/retrieval/section_summary`（节点、分批、提示词、校验）与 `scoring/adapters/derivations`（存取）；新表 `document_derivations`（迁移 `0046`）；运行时入口 `summarize_sections`；评分还不读摘要 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（#106 复审） | `section_tree.outline` 隐去像个人信息的标题；`judge_scope._within_char_budget` 必留每个目标章节的第一段，`scoped_unit_cap` 在放不下时按章节数平分；`compress_evidence(keep_fitting=…)`；`transport.langfuse_usage` 把缓存命中与未命中分成两个桶 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（阶段 1、2） | 新模块 `scoring/retrieval/section_tree`（读取时拼树、目录骨架、位置别名）；按范围取到的段落原样发出、“整章”按实际内容算；视图可改为证据在前的稳定前缀顺序；用量多一项缓存命中 token，迁移 `0045_cached_prompt_tokens` |
@@ -2155,3 +2156,14 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - **持久化边界**：新表 `document_derivations`（`document_snapshot_id` + `kind` + `key_hash` 唯一）。它是缓存，不是论文快照的一部分；快照仍不可变。记录里没有论文正文，只有节点标题、计数、段落编号与摘要。
 
 维护记录：2026-11-15 · 分节摘要（PR A）：新增两个模块、一张表与运行时入口；迁移 head 为 `0046_document_derivations`。
+
+### 2026-11-16 扣分合计超满分封底于 0
+
+方案见 `docs/扣分合计超满分封底方案.md`。只改 Core 聚合，不改模型请求：
+
+- `rule_executor._criterion_results` 扣分循环：每条命中规则先由 `nominal_deduction_amounts` 按 `repeat_policy` 算应扣额，再由 `_deduction_effects` 按剩余分数入账（扣到 0 为止，之后的 occurrence 记 0，0 不产生扣分条目）。有封底时给该评分项追加 `DEDUCTION_FLOORED_AT_ZERO`（severity `info`，`rule_code` 为空）。单条规则的配置越界仍走原来的判无效路径。
+- `persistence._score_items`：M4 结果的 `aggregation_schema_version` 为 `criterion-aggregation@3`（`engine` 的两处版本检查认识 @3）；`core_item_reason(floor_note=)` 在说明句后追加“命中扣分合计 X 分，超过满分 Y 分，已扣至 0 分”。`from_core_issues` 不认识这个码，所以它不进复核原因。
+- `judgement_view._row`：部分入账显示“扣分（已扣至 0 分）/扣 X 分（原应扣 Y 分）”，入账 0 显示“命中（该项已扣至 0 分，未再扣分）”；评分项是 invalid/blocked 的旧结果显示“命中（该项未计分）”。
+- 判定账本身份（`decision_identity`）哈希整个请求信封，信封里有 `runtime_identity` 与 `policy_hash`；本次两者都不变，所以已有判定照常复用。
+
+维护记录：2026-11-16 · 扣分合计超满分封底于 0：聚合行为与展示变化，模块边界不变，无迁移。

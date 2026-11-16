@@ -39,8 +39,9 @@ def test_ai_apply_confirm_and_recompile_respects_publish_contract(client, new_fo
         result = client.post(f"/api/rubrics/{rubric['id']}/rules/{rule['rule_code']}/confirm", json=confirmation(view, rule))
         assert result.status_code == 200, result.text
         decision = {"occurrences": [{"occurrence_id": str(n)} for n in range(3)]}
-        _, error = _deduction_effects(rule, decision, 10)
-        assert error is None
+        amounts, nominal = _deduction_effects(rule, decision, 10)
+        # 组上限内的一条规则不会被封底：实际入账等于应扣额。
+        assert sum(amounts) == nominal
         assert float(decision['calculated_effect']) == -float(rule['max_points'])
     assert all(r['status'] == 'approved' for r in workspace(client, rubric['id'])['rules'])
     result = client.post(f"/api/rubrics/{rubric['id']}/recompile", json={

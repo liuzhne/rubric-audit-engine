@@ -56,6 +56,8 @@ def _decimal_text(value: Decimal | str | int) -> str:
 # 模型回 insufficient_evidence 时，判定记为 not_triggered 并带这条 review 级问题，
 # 所属评分项转人工（docs/论文评分第二阶段改造方案.md 第 6 节）。
 EVIDENCE_INSUFFICIENT_CODE = "RULE_EVIDENCE_INSUFFICIENT"
+# 命中扣分合计超过评分项满分、已扣至 0 分：只报告，不阻塞、不进复核。
+DEDUCTION_FLOORED_CODE = "DEDUCTION_FLOORED_AT_ZERO"
 _EVIDENCE_INSUFFICIENT_MARK = "_evidence_insufficient"
 # 适用范围（docs/评分细则适用范围方案.md 第 8.3、8.5 节）：目标章节在论文里找不到时不调用模型；
 # 多章对照判 triggered 却没引用到两章时不采用。两者都记为 not_triggered 加一条 review 级问题，
@@ -1283,20 +1285,23 @@ def _assign_occurrence_effects(decision, amounts):
         occurrence["calculated_effect"] = _decimal_text(amount)
 
 
-def _deduction_effects(rule, decision, available_score):
-    occurrences = sorted(decision["occurrences"], key=lambda item: item["occurrence_id"])
-    decision["occurrences"] = occurrences
+def nominal_deduction_amounts(rule, occurrence_count):
+    """一条命中扣分规则按自身配置应扣的分（负数，按 occurrence 顺序），不看评分项还剩多少分。
+
+    判定视图用它显示“原应扣多少分”，与入账走同一套算法。
+    """
+
     points = Decimal(rule["max_points"])
     policy = rule["repeat_policy"]
-    amounts = [Decimal("0") for _ in occurrences]
-    if occurrences:
+    amounts = [Decimal("0") for _ in range(occurrence_count)]
+    if occurrence_count:
         if policy == "once":
             amounts[0] = -points
         elif policy == "per_occurrence":
-            amounts = [-points for _ in occurrences]
+            amounts = [-points for _ in range(occurrence_count)]
         elif policy == "capped":
             remaining = Decimal(rule["cap_points"])
-            for index in range(len(occurrences)):
+            for index in range(occurrence_count):
                 if remaining <= 0:
                     break
                 allocated = min(points, remaining)
@@ -1304,12 +1309,29 @@ def _deduction_effects(rule, decision, available_score):
                 remaining -= allocated
         else:
             raise ValueError("unsupported repeat policy")
-    total = -sum((-amount for amount in amounts), Decimal("0"))
-    if -total > available_score:
-        return None, "DEDUCTION_EXCEEDS_CRITERION_MAX"
+    return amounts
+
+
+def _deduction_effects(rule, decision, available_score):
+    """按剩余分数入账：扣到 0 为止（docs/扣分合计超满分封底方案.md）。
+
+    返回 ``(实际入账, 应扣合计)``，都是负数或 0。应扣额不超过剩余分数时两者相同；
+    超过时最后一个 occurrence 只扣剩下的分，之后的记 0。
+    """
+
+    occurrences = sorted(decision["occurrences"], key=lambda item: item["occurrence_id"])
+    decision["occurrences"] = occurrences
+    nominal = nominal_deduction_amounts(rule, len(occurrences))
+    remaining = max(Decimal(available_score), Decimal("0"))
+    amounts = []
+    for amount in nominal:
+        taken = min(-amount, remaining)
+        remaining -= taken
+        amounts.append(-taken if taken else Decimal("0"))
+    total = sum(amounts, Decimal("0"))
     _assign_occurrence_effects(decision, amounts)
     decision["calculated_effect"] = _decimal_text(total)
-    return amounts, None
+    return amounts, sum(nominal, Decimal("0"))
 
 
 def _criterion_results(*, order, nodes_by_code, decisions, issues):
@@ -1467,7 +1489,8 @@ def _criterion_results(*, order, nodes_by_code, decisions, issues):
                     "amount": _decimal_text(max_score),
                 }
             )
-            overflow = False
+            nominal_total = Decimal("0")
+            floored = False
             for rule in rules:
                 if rule["direction"] != "deduct":
                     continue
@@ -1476,24 +1499,12 @@ def _criterion_results(*, order, nodes_by_code, decisions, issues):
                     if decision["calculated_effect"] is None:
                         decision["calculated_effect"] = "0"
                     continue
-                # Use the remaining criterion score, not only max_score, so
-                # individually legal rules cannot cumulatively drive a score
-                # below zero.
-                amounts, error = _deduction_effects(rule, decision, score)
-                if error:
-                    overflow = True
-                    decision["status"] = "invalid"
-                    decision["calculated_effect"] = None
-                    issues.append(
-                        _issue(
-                            error,
-                            "block",
-                            criterion_code,
-                            rule["rule_code"],
-                            "runtime deduction exceeds criterion max_score",
-                        )
-                    )
-                    break
+                # 从剩余分数里扣、扣到 0 为止：各条规则单独合法、合计却超过满分时，
+                # 该项得 0 分并正常出分，不再整项判无效（docs/扣分合计超满分封底方案.md）。
+                amounts, nominal = _deduction_effects(rule, decision, score)
+                nominal_total += nominal
+                if sum(amounts, Decimal("0")) != nominal:
+                    floored = True
                 for occurrence, amount in zip(decision["occurrences"], amounts):
                     if amount == 0:
                         continue
@@ -1507,17 +1518,17 @@ def _criterion_results(*, order, nodes_by_code, decisions, issues):
                             "amount": _decimal_text(amount),
                         }
                     )
-            if overflow:
-                outcomes.append(
-                    {
-                        "criterion_code": criterion_code,
-                        "status": "invalid",
-                        "auto_score": None,
-                        "final_score": None,
-                        "max_score": criterion["max_score"],
-                    }
+            if floored:
+                issues.append(
+                    _issue(
+                        DEDUCTION_FLOORED_CODE,
+                        "info",
+                        criterion_code,
+                        None,
+                        "triggered deductions %s exceed criterion max_score %s; floored at zero"
+                        % (_decimal_text(-nominal_total), _decimal_text(max_score)),
+                    )
                 )
-                continue
         status = "review_required" if review_triggered else "calculated"
         outcomes.append(
             {

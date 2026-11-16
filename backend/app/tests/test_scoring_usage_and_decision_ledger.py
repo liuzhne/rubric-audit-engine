@@ -265,6 +265,36 @@ def test_executor_replays_a_validated_decision_without_calling_the_provider():
     assert m4._decision(second)["status"] == "triggered"
 
 
+def test_floored_criterion_replays_every_decision_without_calling_the_provider():
+    # 扣到 0 为止只改聚合：溢出那条规则的判定照常进账本，重试零调用
+    # （docs/扣分合计超满分封底方案.md 第 5 节）。
+    rule_a = m4._deduct_rule(code="proposal.floor_a.v1", max_points="60")
+    rule_b = m4._deduct_rule(code="proposal.floor_b.v1", max_points="60")
+    criterion = m4._criterion(max_score="100")
+    request = m4._request_for(
+        (criterion, rule_a),
+        (criterion, rule_b),
+        dependency_order=[rule_a["rule_code"], rule_b["rule_code"]],
+    )
+    responses = {
+        rule["rule_code"]: m4._semantic_response(
+            rule["rule_code"], occurrences=[m4._quote_occurrence(request, index)]
+        )
+        for index, rule in enumerate((rule_a, rule_b))
+    }
+    ledger = _MemoryLedger()
+
+    first_runtime = m4._SemanticRuntime(responses)
+    first = _run(request, first_runtime, ledger)
+    second_runtime = m4._SemanticRuntime({})
+    second = _run(request, second_runtime, ledger)
+
+    assert m4._criterion_outcome(first)["auto_score"] == "0"
+    assert sorted(ledger.puts) == sorted([rule_a["rule_code"], rule_b["rule_code"]])
+    assert second_runtime.envelopes == []
+    assert second == first
+
+
 def test_executor_never_records_a_decision_it_rejected():
     request, response = _triggered_request_and_response()
     response["occurrences"][0]["finding_code"] = "NOT_AUTHORIZED"
