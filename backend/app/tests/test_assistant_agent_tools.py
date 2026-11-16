@@ -625,6 +625,16 @@ def test_ambiguous_rubric_candidates_carry_their_position_in_the_full_list(clien
     assert _cards(body, "pick_files")[0]["rubric_id"] == "rubric-c"
 
 
+def test_rubric_ordinals_beyond_99_are_understood(client, agent, monkeypatch):  # noqa: F811
+    # #111 第二轮复审：候选的“序号”可能超过 99，三位数也要能按序号选。
+    _seed_published_rubric(client)
+    _published_rubrics(monkeypatch, [{"id": "rubric-%d" % index, "name": "标准 %d" % index, "version": "v1.0",
+                                      "business_profile_key": "general_document"} for index in range(2, 102)])
+    agent(step(("action_start_grading", {"rubric_name": "101"})))
+    body = _say(client, _conversation(client), "101")
+    assert _cards(body, "pick_files")[0]["rubric_id"] == "rubric-101"
+
+
 def test_rubric_list_tells_the_model_not_to_ask_for_refs(client, agent):  # noqa: F811
     _seed_published_rubric(client)
     model = agent(*_list_rubrics_then(reply("可以用的评分标准有：", cards=["r1"])))

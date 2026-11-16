@@ -648,7 +648,7 @@ def _action_start_grading(turn: TurnContext, params: StartGradingParams) -> dict
 
 
 _CHINESE_DIGITS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-_ORDINAL = re.compile(r"^第?([0-9]{1,2}|[一二两三四五六七八九十])(?:个|份|项|号|条)?$")
+_ORDINAL = re.compile(r"^第?([0-9]{1,3}|[一二两三四五六七八九十])(?:个|份|项|号|条)?$")
 
 
 def _rubric_needle(said: str) -> str:
