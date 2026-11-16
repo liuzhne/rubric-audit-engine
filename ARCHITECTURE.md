@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-16 | 评分助手等选文件时按名称或序号换评分标准 | `runner._start_flow` 在等选文件时收到带 `preset_rubric_id` 的评分流程，改为 `resume` 同一张卡片的 `change_rubric`（与工作区换标准同一条路）；`agent/business._action_start_grading` 的 `rubric_name` 认序号（与 `rubric_list` 同序）；模块边界与持久化不变，无迁移 |
 | 2026-11-16 | 扣分合计超满分封底于 0 | `rule_executor._deduction_effects` 按剩余分数入账（新增公开的 `nominal_deduction_amounts`），`_criterion_results` 不再因累计溢出判无效，改记 `DEDUCTION_FLOORED_AT_ZERO`（info）；`persistence` 写 `criterion-aggregation@3` 并在评分项说明后追加封底句；`judgement_view` 按实际入账给标签；`jobs._incomplete_scoring_error` 点名判定无效的规则。模块边界、调用链与持久化边界不变，无迁移 |
 | 2026-11-15 | 分节摘要（阶段 3 的 PR A：生成与存储） | 新模块 `scoring/retrieval/section_summary`（节点、分批、提示词、校验）与 `scoring/adapters/derivations`（存取）；新表 `document_derivations`（迁移 `0046`）；运行时入口 `summarize_sections`；评分还不读摘要 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（#106 复审） | `section_tree.outline` 隐去像个人信息的标题；`judge_scope._within_char_budget` 必留每个目标章节的第一段，`scoped_unit_cap` 在放不下时按章节数平分；`compress_evidence(keep_fitting=…)`；`transport.langfuse_usage` 把缓存命中与未命中分成两个桶 |
@@ -1413,7 +1414,7 @@ pending + 计划卡片 ──▶ taskBar / chipsFor / todoItems ──▶ 输入
 
 组件边界（`components/assistant/`）：`ConversationRail`（会话栏，`focus.progress` 显示第几步）、`ChatThread`（消息、事件分隔线、入口卡片）、`EntryCard`（流程卡片与结果卡片在对话里只是“在右侧查看”入口）、`ChatComposer`（任务条 + 建议问题 + 输入框）、`WorkspacePanel`（标签、更多、步骤条、新结果提示、回到当前）、`ws/*`（各步骤与结果视图，共用 `WsLayout` 的“滚动正文 + 底部操作条”）。对话本身的选择（选任务、重试、放弃上一步、失败诊断）仍是 `AssistantCard`。
 
-写动作仍走原接口：确认开始与换评分标准是 `runs` 的 `resume`（`store.answerConfirm` / `changeRubric`）；核对评分规则调用评分标准页同一组接口（`rules/{code}/confirm`、`submit-review`、`publish`），发布后立即 `resume` 让流程接着走。完整页面一律新标签页打开（选好的待评分文件只在本页内存里）。
+写动作仍走原接口：确认开始与换评分标准是 `runs` 的 `resume`（`store.answerConfirm` / `changeRubric`；对话里点名标准时由 `runner._start_flow` 代发同一个 `change_rubric`）；核对评分规则调用评分标准页同一组接口（`rules/{code}/confirm`、`submit-review`、`publish`），发布后立即 `resume` 让流程接着走。完整页面一律新标签页打开（选好的待评分文件只在本页内存里）。
 
 后端随之调整：流程顺序见上节 `flow.py`；`plan.answer_progress`（流程里问进展回 `progress_snapshot`，存提问时的计划副本）与 `answer_next_steps`（`todo` 卡片，清单前端实时算），都不经模型；`next_steps` 放在 `views.CHIP_ACTIONS`，不进 `QUICK_ACTIONS`（那里的键写在 Agent `reply.next_steps` 的工具定义里）。批次汇总每份加 `latest_review_reasons`（一次查询取需要复核的评分项与原因）。
 
