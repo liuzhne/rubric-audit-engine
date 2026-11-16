@@ -614,6 +614,121 @@ def test_rubric_list_tells_the_model_not_to_ask_for_refs(client, agent):  # noqa
     assert "不要写“用 r1”" in _last_tool_result(model)["说明"]
 
 
+# --- 选择卡片（docs/评分助手选择卡片方案.md） ------------------------------------------------
+
+_REPORT_RUBRIC = {"id": "rubric-report", "name": "课程报告评分标准", "version": "v2.0",
+                  "business_profile_key": "general_document"}
+
+
+def _users(body):
+    return [item for item in body["messages"] if item["role"] == "user"]
+
+
+def test_choose_renders_buttons_from_tool_results_and_a_click_switches_the_rubric(client, agent, monkeypatch):  # noqa: F811
+    rubric_id, rubric_name = _seed_published_rubric(client)
+    _published_rubrics(monkeypatch, [_REPORT_RUBRIC])
+    conversation_id = _wait_for_files(client)
+    agent(*_list_rubrics_then(reply("可以换成下面任意一份：\n1. 《%s》\n2. 《课程报告评分标准》v2.0" % rubric_name,
+                                    choose={"purpose": "use_rubric", "refs": ["r1", "r2"]})))
+    body = _say(client, conversation_id, "选取其他评分标准")
+
+    assert _texts(body)[-1] == "可以换成下面任意一份："  # 模型自己列的候选去掉，只留卡片
+    card = _cards(body, "choice")[0]
+    assert card["purpose"] == "use_rubric" and card["question"] == "选取其他评分标准"
+    assert [item["id"] for item in card["options"]] == [rubric_id, "rubric-report"]
+    assert card["options"][0]["current"] is True and "current" not in card["options"][1]
+    assert card["options"][1]["label"] == "《课程报告评分标准》v2.0（通用文档）"  # 名称来自工具结果
+    assert body["pending"]["kind"] == "pick_files"
+
+    picked = _run(client, conversation_id, type="select", card_id=card["id"], value={"id": "rubric-report"})
+    assert picked["pending"]["kind"] == "pick_files"
+    assert _cards(picked, "pick_files")[0]["rubric_id"] == "rubric-report"
+    assert _texts(picked)[-1] == "已换成《课程报告评分标准》v2.0，接着选择待评分的文件。"
+    again = client.post(f"/api/assistant/conversations/{conversation_id}/runs",
+                        json={"type": "select", "card_id": card["id"], "value": {"id": rubric_id}})
+    assert again.status_code == 409
+
+
+def test_typing_the_number_of_a_button_picks_it_without_calling_the_model(client, agent, monkeypatch):  # noqa: F811
+    _seed_published_rubric(client)
+    _published_rubrics(monkeypatch, [_REPORT_RUBRIC])
+    conversation_id = _wait_for_files(client)
+    model = agent(*_list_rubrics_then(reply("换成哪一份？", choose={"purpose": "use_rubric", "refs": ["r1", "r2"]})))
+    _say(client, conversation_id, "换一份评分标准")
+    calls = len(model.requests)
+
+    body = _say(client, conversation_id, "2")
+    assert len(model.requests) == calls  # 按卡片上的顺序直接选，不调用模型
+    assert _users(body)[0]["intent"] == "choose"
+    assert _cards(body, "pick_files")[0]["rubric_id"] == "rubric-report"
+
+
+def test_choose_is_sent_back_when_it_cannot_be_used(client, agent, monkeypatch):  # noqa: F811
+    _seed_published_rubric(client)
+    conversation_id = _wait_for_files(client)
+    # 只有一个候选：不让用户选，直接用。
+    model = agent(*_list_rubrics_then(reply("选哪一份？", choose={"purpose": "use_rubric", "refs": ["r1"]}),
+                                      reply("目前只有这一份评分标准。")))
+    body = _say(client, conversation_id, "换一份评分标准")
+    assert "只有一个候选" in _last_tool_result(model)["错误"] and not _cards(body, "choice")
+
+    # 种类与用途对不上。
+    _published_rubrics(monkeypatch, [_REPORT_RUBRIC])
+    model = agent(*_list_rubrics_then(reply("选哪一份？", choose={"purpose": "focus_task", "refs": ["r1", "r2"]}),
+                                      reply("有两份可以用。")))
+    _say(client, conversation_id, "换一份评分标准")
+    assert "t 开头" in _last_tool_result(model)["错误"]
+
+
+def test_rubric_buttons_are_refused_once_the_files_are_uploaded(client, agent, monkeypatch):  # noqa: F811
+    _seed_published_rubric(client)
+    conversation_id, _batch_id, body = _start_until_waiting_job(client)
+    _published_rubrics(monkeypatch, [_REPORT_RUBRIC])  # 建好任务之后再加：建任务的工具调用带 name 参数
+    model = agent(*_list_rubrics_then(reply("选哪一份？", choose={"purpose": "use_rubric", "refs": ["r1", "r2"]}),
+                                      reply("文件已经上传，这次评分不能再换评分标准。")))
+    body = _say(client, conversation_id, "换一份评分标准")
+    assert "锁定了评分标准" in _last_tool_result(model)["错误"] and not _cards(body, "choice")
+    assert body["pending"]["kind"] == "wait_job"
+
+
+def test_picking_a_task_answers_the_question_that_was_asked(client, agent):  # noqa: F811
+    _seed_published_rubric(client)
+    _first, first_id, _body = _start_until_waiting_job(client)
+    _second, second_id, _body = _start_until_waiting_job(client)
+    _rename(client, first_id, "课程报告评分 · 软件工程导论")
+    _rename(client, second_id, "课程报告评分 · 数据结构")
+    model = agent(step(("action_cancel", {"task_name": "课程报告评分"})),
+                  reply("要取消哪一个？", choose={"purpose": "focus_task", "refs": ["t1", "t2"]}),
+                  step(("action_cancel", {"task_ref": "t0"})))
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "课程报告评分先别评了")
+    card = _cards(body, "choice")[0]
+    assert {item["label"] for item in card["options"]} == {"课程报告评分 · 软件工程导论", "课程报告评分 · 数据结构"}
+
+    picked = _run(client, conversation_id, type="select", card_id=card["id"], value={"id": second_id})
+    # 选完用原来那句话接着跑一个回合：当前任务已经是选中的那个。
+    assert "【用户这句话】\n课程报告评分先别评了" in model.requests[-1]["messages"][-1]["content"]
+    assert "你选了：课程报告评分 · 数据结构" in _texts(picked)
+    assert _cards(picked, "confirm_cancel")[0]["batch_id"] == second_id
+    assert _focus(client, conversation_id)["batch_id"] == second_id
+    events = [item for item in _agent_messages(client, conversation_id) if item.intent == "event"]
+    assert events and events[-1].text.startswith("你选了")  # 事件消息不改成 Agent 回合，不多算一次
+
+
+def test_history_shows_the_buttons_and_what_was_picked(client, agent, monkeypatch):  # noqa: F811
+    _seed_published_rubric(client)
+    _published_rubrics(monkeypatch, [_REPORT_RUBRIC])
+    conversation_id = _wait_for_files(client)
+    agent(*_list_rubrics_then(reply("换成哪一份？", choose={"purpose": "use_rubric", "refs": ["r1", "r2"]})))
+    card = _cards(_say(client, conversation_id, "换一份评分标准"), "choice")[0]
+    _run(client, conversation_id, type="select", card_id=card["id"], value={"id": "rubric-report"})
+    model = agent(reply("好的。"))
+    _say(client, conversation_id, "刚才换成了哪份？")
+    history = "\n".join(str(item.get("content")) for item in model.requests[0]["messages"])
+    assert "[卡片：选择评分标准（按钮：1. 《" in history
+    assert "用户选了 《课程报告评分标准》v2.0（通用文档）]" in history
+
+
 def test_no_published_rubric_is_said_plainly_never_left_after_a_colon(client, agent, monkeypatch):  # noqa: F811
     from backend.app.services.assistant import tools as assistant_tools
 

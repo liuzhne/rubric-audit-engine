@@ -136,16 +136,16 @@ def problem(text: str, refs) -> str | None:
     seen_text = "\n".join(refs.seen_text)
     claim = done_by_agent(text)
     if claim:
-        return ("你不能自己执行改动，不要说“%s”。老师要做的事：先用 tool_search 加载对应的 action_* 工具"
+        return ("你不能自己执行改动，不要说“%s”。用户要做的事：先用 tool_search 加载对应的 action_* 工具"
                 "（例如 select:action_cancel），再用 call_tool 调用，它会生成确认卡片；做不到的就直说。" % claim)
     claim = card_claim(text)
     if claim and not refs.proposed and claim not in seen_text:
         return ("本回合没有出确认卡片，不能说“%s”。要出卡片，先加载并调用对应的 action_* 工具。" % claim)
     claim = asks_to_confirm(text)
     if claim and not refs.proposed and not any(marker in seen_text for marker in _CHOICE_MARKERS):
-        return ("不要用文字向老师反问确认（“%s”）：直接调用对应的 action_* 提议工具（action_start_grading / "
-                "action_import_rubric / action_retry_failed / action_cancel）生成确认卡片，老师在卡片上确认；"
-                "老师点了任务名就填 task_name。" % claim)
+        return ("不要用文字向用户反问确认（“%s”）：直接调用对应的 action_* 提议工具（action_start_grading / "
+                "action_import_rubric / action_retry_failed / action_cancel）生成确认卡片，用户在卡片上确认；"
+                "用户点了任务名就填 task_name。" % claim)
     for sentence in _SENTENCE.findall(text or ""):
         for category, claim in status_claims(sentence).items():
             if claim in seen_text or _backed(category, sentence, refs):

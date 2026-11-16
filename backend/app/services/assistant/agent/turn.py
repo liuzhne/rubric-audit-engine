@@ -34,6 +34,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from backend.app.db.models import AssistantMessage
+from backend.app.services.assistant import choices
 from backend.app.services.assistant.agent import budget
 from backend.app.services.assistant.agent import catalog
 from backend.app.services.assistant.agent import compaction
@@ -234,7 +235,8 @@ def _tools_node(state: _State, runtime: Runtime[_Runtime]):
             return {"outcome": {"kind": "fallback", "reason": "too_many_tool_calls"}}
         if call.name == "reply":
             try:
-                reply = validate_reply(call.arguments, rt.turn.refs)
+                reply = validate_reply(call.arguments, rt.turn.refs,
+                                       unavailable=lambda purpose: choices.unavailable(rt.turn.run, purpose))
             except ReplyInvalid as exc:
                 if retries >= 1 or state.get("synthetic"):
                     return {"outcome": {"kind": "fallback", "reason": "reply_invalid"}}
@@ -246,7 +248,7 @@ def _tools_node(state: _State, runtime: Runtime[_Runtime]):
         if call.name == "tool_search":
             searches += 1
             content = _search(call, rt) if searches <= budget.MAX_SEARCHES else {
-                "错误": "本回合搜索次数已用完：请用已加载的工具回答，或调用 reply 告诉老师现在做不到。"}
+                "错误": "本回合搜索次数已用完：请用已加载的工具回答，或调用 reply 告诉用户现在做不到。"}
             steps.append(_tool_message(call, content))
             continue
         content, proposal = _call(call, rt)
@@ -282,7 +284,7 @@ def _search(call: ToolCall, rt: _Runtime) -> dict:
             rt.first_loaded.append(tool.name)
     result["tools"] = [catalog.definition(tool) for tool in found]
     if not found:
-        result["提示"] = result.get("提示") or "没有找到相关工具：可以换个说法再搜，或调用 reply 告诉老师现在做不到。"
+        result["提示"] = result.get("提示") or "没有找到相关工具：可以换个说法再搜，或调用 reply 告诉用户现在做不到。"
         result["分组"] = {key: label for key, label in catalog.GROUPS.items()}
     return result
 
@@ -429,6 +431,8 @@ def run_turn(ctx: RunContext, scorer, *, text: str, user_message_id: str) -> Tur
         # 清理时整句删掉了几句、模型要显示几个编号：线上回复“少了一截”时靠它们分辨原因（11-05 生产查不出来）。
         meta["dropped_sentences"] = raw["reply"].dropped_sentences
         meta["cards_requested"] = len(raw["reply"].cards)
+        if raw["reply"].choose:
+            meta["choose"] = raw["reply"].choose[0]
     if raw.get("reason"):
         meta["reason"] = raw["reason"]
     if raw.get("error_code"):
@@ -485,6 +489,24 @@ def attachments(refs, reply: ValidReply) -> tuple[list[dict], list[str]]:
     return cards, lines
 
 
+def choice_card(ctx: RunContext, refs, reply: ValidReply, *, question: str) -> dict | None:
+    """回复里的 `choose` → 选择卡片。选项的对象 ID 与显示文字来自本回合的工具结果，顺序照模型给的。"""
+
+    if not reply.choose:
+        return None
+    purpose, picked = reply.choose
+    current = choices.current_id(ctx, purpose)
+    options = []
+    for ref in picked:
+        kind, object_id = refs.object_of(ref)
+        option = {"id": object_id, "label": refs.label_of(ref) or ref, "current": object_id == current}
+        parent = refs.parents.get((kind, object_id))
+        if kind == "p" and parent:
+            option["batch_id"] = parent[1]
+        options.append(option)
+    return choices.card(purpose, options, question=question)
+
+
 def _overflow_line(labels: list[str | None]) -> str:
     """超出卡片上限的对象：有名称的列名称，没有名称的也计数，不静默丢掉（#78 复审）。"""
 
@@ -504,4 +526,4 @@ def help_texts(reply: ValidReply) -> list[str]:
     return [help_entries.BY_KEY[key].text for key in reply.help_refs if key in help_entries.BY_KEY]
 
 
-__all__ = ["FALLBACK_TEXT", "TurnOutcome", "attachments", "help_texts", "model_step", "run_turn"]
+__all__ = ["FALLBACK_TEXT", "TurnOutcome", "attachments", "choice_card", "help_texts", "model_step", "run_turn"]

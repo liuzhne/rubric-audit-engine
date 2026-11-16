@@ -29,11 +29,13 @@ from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from backend.app.api import guards
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.core.config import settings
 from backend.app.db.models import AssistantConversation
 from backend.app.db.models import AssistantMessage
 from backend.app.db.models import utcnow
+from backend.app.services.assistant import choices
 from backend.app.services.assistant import intents
 from backend.app.services.assistant import model as assistant_model
 from backend.app.services.assistant import plan
@@ -349,6 +351,8 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
         ctx.conversation.title = text[:30]
     ctx.conversation.updated_at = utcnow()
 
+    if not attachments and not quick_action and _typed_choice(ctx, saver, message, text):
+        return
     if attachments:
         result = intents.IntentResult(intent="start_grading")
     elif quick_action in QUICK_ACTIONS or quick_action in CHIP_ACTIONS:
@@ -438,6 +442,7 @@ def _try_agent_turn(ctx: RunContext, saver: SqlCheckpointSaver, text: str, messa
     ctx.progress(agent_progress.UNDERSTANDING)
     outcome = agent_turn.run_turn(ctx, scorer, text=text, user_message_id=message.id)
     if outcome.kind == "degrade":
+        # 选完接着回答时这里是事件消息：用量照样记在它上面，已经计费的不能丢。
         message.meta = {"mode": "degraded", "reason": outcome.reason}
         if (outcome.meta or {}).get("error_code"):
             message.meta["error_code"] = outcome.meta["error_code"]
@@ -448,14 +453,19 @@ def _try_agent_turn(ctx: RunContext, saver: SqlCheckpointSaver, text: str, messa
             message.meta["tokens"] = usage
         return False, True
     model_name = getattr(scorer, "model_name", None)
-    message.intent = agent_budget.AGENT_INTENT
-    message.model_name = model_name
+    if message.role == "user":
+        # 选完接着回答时传进来的是事件消息：不改它的标记，否则界面不再当事件显示、回合数也会多算一次。
+        message.intent = agent_budget.AGENT_INTENT
+        message.model_name = model_name
     flow = None
     shown = None
     if outcome.kind == "reply":
         # 没有卡片的对象（评分标准、评分项）由代码接在引导句后面列出（Agent 化方案 §14.2）。
         cards, lines = agent_turn.attachments(outcome.refs, outcome.reply)
         shown = {"cards_shown": len(cards), "listed": len(lines)}
+        choice = agent_turn.choice_card(ctx, outcome.refs, outcome.reply, question=text)
+        if choice is not None:
+            cards.append(choice)
         if outcome.reply.next_steps:
             cards.append(quick_actions_card(list(outcome.reply.next_steps)))
         lead = "\n".join([outcome.reply.text, *lines])
@@ -476,6 +486,101 @@ def _try_agent_turn(ctx: RunContext, saver: SqlCheckpointSaver, text: str, messa
     return True, False
 
 
+# --- 选择卡片（docs/评分助手选择卡片方案.md） -----------------------------------------------
+
+def _typed_choice(ctx: RunContext, saver: SqlCheckpointSaver, message: AssistantMessage, text: str) -> bool:
+    """上一条回复里有没选的选择卡片，用户打字回了序号或唯一对得上的名称：当作点了那个按钮，不调用模型。
+
+    序号按卡片上显示的顺序算——用户看到的就是卡片（方案 §6.5）。对不上就照常交给模型。
+    """
+
+    card_message, card = choices.latest_open(ctx)
+    if card is None:
+        return False
+    picked = choices.match_typed(card, text)
+    if picked is None:
+        return False
+    message.intent = "choose"
+    _choose(ctx, saver, card_message, card, picked)
+    return True
+
+
+def _choose(ctx: RunContext, saver: SqlCheckpointSaver, card_message, card: dict, picked: dict) -> None:
+    handler = _CHOICE_HANDLERS.get(card.get("purpose"))
+    if handler is None:
+        raise HTTPException(status_code=422, detail="这张卡片不能这样操作")
+    handler(ctx, saver, card_message, card, picked)
+
+
+def _choice_stale(ctx: RunContext, card_message, card: dict, text: str) -> None:
+    ctx.update_card(card_message.id, card["id"], "expired")
+    ctx.say(text, [quick_actions_card()])
+
+
+def _choose_rubric(ctx: RunContext, saver: SqlCheckpointSaver, card_message, card: dict, picked: dict) -> None:
+    reason = choices.unavailable(ctx, "use_rubric")
+    if reason:
+        _choice_stale(ctx, card_message, card, reason + "。")
+        return
+    ctx.update_card(card_message.id, card["id"], "done", {"id": picked["id"]})
+    pending = ctx.conversation.pending or {}
+    if pending.get("kind") == "pick_files":
+        # 与工作区“评分标准”里换一份同一条路：可用性由流程再校验一次。
+        _resume_flow(ctx, saver, pending["card_id"], {"action": "change_rubric", "rubric_id": picked["id"]})
+        return
+    _start_flow(ctx, saver, {"mode": "grading", "file_count": 0, "file_names": [], "preset_rubric_id": picked["id"]})
+
+
+def _choose_task(ctx: RunContext, saver: SqlCheckpointSaver, card_message, card: dict, picked: dict) -> None:
+    try:
+        batch = guards.visible_batch(ctx.db, picked["id"], ctx.principal)
+    except HTTPException:
+        _choice_stale(ctx, card_message, card, "这个任务现在不可用了（可能已删除或无权访问），换一个吧。")
+        return
+    ctx.update_card(card_message.id, card["id"], "done", {"id": batch.id})
+    ctx.set_focus(batch_id=batch.id, batch_name=batch.name, job_id=None, paper_id=None)
+    follow = card.get("next_query")
+    if follow:
+        _run_query(ctx, follow["intent"], batch_id=batch.id, ordinal=follow.get("ordinal"),
+                   name=follow.get("name"), text=follow.get("text") or "")
+        return
+    if not _continue_after_choice(ctx, saver, card, picked):
+        ctx.say("好的，现在说的是《%s》，可以接着问。" % batch.name, [quick_actions_card(["query_progress"])])
+
+
+def _choose_paper(ctx: RunContext, saver: SqlCheckpointSaver, card_message, card: dict, picked: dict) -> None:
+    try:
+        paper = guards.visible_paper(ctx.db, picked["id"], ctx.principal)
+    except HTTPException:
+        _choice_stale(ctx, card_message, card, "这份材料现在不可用了（可能已删除或无权访问），换一份吧。")
+        return
+    ctx.update_card(card_message.id, card["id"], "done", {"id": paper.id})
+    focus = ctx.conversation.focus or {}
+    if focus.get("batch_id") != paper.batch_id:
+        ctx.set_focus(batch_id=paper.batch_id, batch_name=None, job_id=None)
+    ctx.set_focus(paper_id=paper.id)
+    if card.get("next_query") or not _continue_after_choice(ctx, saver, card, picked):
+        _run_query(ctx, "query_paper", batch_id=paper.batch_id, paper_id=paper.id)
+
+
+def _continue_after_choice(ctx: RunContext, saver: SqlCheckpointSaver, card: dict, picked: dict) -> bool:
+    """Agent 出的选择卡片：选中之后用用户原来那句话再跑一个回合，焦点已经是选中的对象（方案 §6.3）。"""
+
+    question = card.get("question")
+    if not question:
+        return False
+    event = ctx.event("你选了：%s" % picked.get("label", ""))
+    handled, _degraded = _try_agent_turn(ctx, saver, question, event)
+    return handled
+
+
+_CHOICE_HANDLERS = {
+    "use_rubric": _choose_rubric,
+    "focus_task": _choose_task,
+    "focus_paper": _choose_paper,
+}
+
+
 def _handle_select(ctx: RunContext, saver: SqlCheckpointSaver, card_id: str, value: dict) -> None:
     message, card = ctx.find_card(card_id)
     if card is None or card.get("status") != "proposed":
@@ -483,6 +588,12 @@ def _handle_select(ctx: RunContext, saver: SqlCheckpointSaver, card_id: str, val
     kind = card.get("type")
     value = value or {}
 
+    if kind == "choice":
+        picked = choices.option(card, value.get("id"))
+        if picked is None:
+            raise HTTPException(status_code=422, detail="请选择卡片里的选项")
+        _choose(ctx, saver, message, card, picked)
+        return
     if kind == "choose_batch":
         batch = next((item for item in card.get("batches", []) if item["id"] == value.get("batch_id")), None)
         if batch is None:
