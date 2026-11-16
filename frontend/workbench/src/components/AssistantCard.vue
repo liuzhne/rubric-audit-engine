@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 留在对话里的卡片：对话本身产生的选择与确认（选任务、选材料、重试、取消、要不要放弃上一步、失败诊断）、
+ * 留在对话里的卡片：对话本身产生的选择与确认（选评分标准、选任务、选材料、重试、取消、要不要放弃上一步、失败诊断）、
  * 快捷按钮与页面链接，以及旧流程的“是否移除解析失败的文件”。
  * 流程卡片与结果卡片显示成“在右侧查看”入口（`assistant/EntryCard.vue`），交互在工作区里（v2 界面改造方案 §3.3）。
  *
@@ -10,6 +10,7 @@
 import { computed } from "vue";
 import { useRouter } from "vue-router";
 
+import ChoiceCard from "@/components/assistant/ChoiceCard.vue";
 import { useAssistantStore } from "@/stores/assistant.js";
 
 const props = defineProps({
@@ -28,7 +29,7 @@ const STATUS_TEXT = { running: "进行中…", done: "已完成", failed: "未�
 const statusText = computed(() => STATUS_TEXT[props.card.status] || "");
 // 打断确认卡片：done 是放弃了上一步，dismissed 是选了继续上一步。
 const SWITCH_STATUS_TEXT = { done: "已放弃上一步", dismissed: "已继续上一步", expired: "已过期" };
-// 选择卡片选完后写明选了哪一个，不只是“已完成”。
+// 旧的选择卡片（2026-11-16 之前的历史消息）：选完后写明选了哪一个，不只是“已完成”。
 const chosenText = computed(() => {
   const result = props.card.result || {};
   const picked = props.card.type === "choose_batch"
@@ -76,7 +77,10 @@ const linkHref = computed(() => (props.card.path ? router.resolve(props.card.pat
       </div>
     </template>
 
-    <!-- 选择任务 / 选择材料 -->
+    <!-- 选择：在几个对象里点一个（评分标准、任务、材料） -->
+    <ChoiceCard v-else-if="card.type === 'choice'" :card="card" />
+
+    <!-- 旧的选择任务 / 选择材料（历史消息照常显示） -->
     <template v-else-if="card.type === 'choose_batch' || card.type === 'choose_paper'">
       <div v-if="proposed" class="choices">
         <template v-if="card.type === 'choose_batch'">

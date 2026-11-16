@@ -17,6 +17,7 @@ from langgraph.graph import START
 from langgraph.graph import StateGraph
 from langgraph.runtime import Runtime
 
+from backend.app.services.assistant import choices
 from backend.app.services.assistant import tools
 from backend.app.services.assistant.context import RunContext
 from backend.app.services.assistant.views import overview_text
@@ -66,11 +67,13 @@ def resolve_batch(state: QueryState, runtime: Runtime[RunContext]):
     if len(batches) == 1:
         ctx.set_focus(batch_id=batches[0]["id"], batch_name=batches[0]["name"])
         return {"batch_id": batches[0]["id"], "next": state["intent"]}
-    ctx.say("要查哪个评分任务？", [{
-        "type": "choose_batch", "status": "proposed", "next_intent": state["intent"],
-        "paper_ordinal": state.get("ordinal"), "paper_name": state.get("name"),
-        "text": (state.get("text") or "")[:200], "batches": batches,
-    }])
+    current = (ctx.conversation.focus or {}).get("batch_id")
+    ctx.say("要查哪个评分任务？", [choices.card(
+        "focus_task",
+        [{"id": batch["id"], "label": batch["name"], "current": batch["id"] == current} for batch in batches],
+        next_query={"intent": state["intent"], "ordinal": state.get("ordinal"), "name": state.get("name"),
+                    "text": (state.get("text") or "")[:200]},
+    )])
     return {"next": END}
 
 
@@ -128,12 +131,13 @@ def query_paper(state: QueryState, runtime: Runtime[RunContext]):
         _show_paper(ctx, batch_id, match, papers.index(match) + 1, profile_key)
         return {"next": END}
     prompt = "这个任务只有 %d 份文件，要查哪一份？" % len(papers) if state.get("ordinal") else "要查哪一份？"
-    ctx.say(prompt, [{
-        "type": "choose_paper", "status": "proposed", "batch_id": batch_id,
-        "papers": [{"paper_id": paper["paper_id"],
-                    "label": "%d. %s" % (papers.index(paper) + 1, paper_label(paper, profile_key))}
-                   for paper in candidates[:30]],
-    }])
+    ctx.say(prompt, [choices.card(
+        "focus_paper",
+        [{"id": paper["paper_id"], "batch_id": batch_id,
+          "label": "%d. %s" % (papers.index(paper) + 1, paper_label(paper, profile_key))}
+         for paper in candidates],
+        next_query={"intent": "query_paper"}, limit=choices.MAX_PAPER_OPTIONS,
+    )])
     return {"next": END}
 
 

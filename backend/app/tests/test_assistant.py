@@ -620,13 +620,37 @@ def test_query_paper_by_ordinal_and_choice(client):
     assert second["conversation"]["focus"]["workspace"] == "/batches/%s/grade?paper=%s" % (batch_id, result["paper_id"])
 
     choose = _say(client, conversation_id, "第9篇呢")
-    card = _cards(choose, "choose_paper")[0]
-    picked = _run(client, conversation_id, type="select", card_id=card["id"],
-                  value={"paper_id": card["papers"][0]["paper_id"]})
-    assert _cards(picked, "paper_result")
+    card = _cards(choose, "choice")[0]
+    assert card["purpose"] == "focus_paper" and [item["label"][:3] for item in card["options"]] == ["1. ", "2. "]
+    picked = _run(client, conversation_id, type="select", card_id=card["id"], value={"id": card["options"][0]["id"]})
+    assert _cards(picked, "paper_result")[0]["paper_id"] == card["options"][0]["id"]
     again = client.post(f"/api/assistant/conversations/{conversation_id}/runs",
-                        json={"type": "select", "card_id": card["id"], "value": {"paper_id": card["papers"][0]["paper_id"]}})
+                        json={"type": "select", "card_id": card["id"], "value": {"id": card["options"][0]["id"]}})
     assert again.status_code == 409
+
+    # 卡片出来后打字回序号：按卡片上的序号当作点了按钮，不调用模型（选择卡片方案 §6.5）。
+    card = _cards(_say(client, conversation_id, "第9篇呢"), "choice")[0]
+    typed = _say(client, conversation_id, "2")
+    assert _cards(typed, "paper_result")[0]["paper_id"] == card["options"][1]["id"]
+    said = [item for item in typed["messages"] if item["role"] == "user"]
+    assert said[0]["intent"] == "choose"
+    unrelated = _say(client, conversation_id, "2")  # 卡片已经选过：这句话不再当作选择
+    assert [item for item in unrelated["messages"] if item["role"] == "user"][0]["intent"] != "choose"
+
+
+def test_rule_mode_asks_which_task_with_the_shared_choice_card(client):
+    _seed_published_rubric(client)
+    _start_until_waiting_job(client)
+    _other, second_id, _body = _start_until_waiting_job(client)
+    conversation_id = _conversation(client)  # 新对话：没有当前任务
+    body = _say(client, conversation_id, "评分进度怎么样")
+    card = _cards(body, "choice")[0]
+    assert card["purpose"] == "focus_task" and card["next_query"]["intent"] == "query_progress"
+    assert second_id in [item["id"] for item in card["options"]] and "question" not in card
+
+    picked = _run(client, conversation_id, type="select", card_id=card["id"], value={"id": second_id})
+    assert _cards(picked, "job_progress")[0]["batch_id"] == second_id
+    assert picked["conversation"]["focus"]["batch_id"] == second_id
 
 
 def test_import_flow_waits_for_publication_then_asks_for_files(client):

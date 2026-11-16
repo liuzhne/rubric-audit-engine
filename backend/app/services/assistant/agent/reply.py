@@ -10,6 +10,9 @@
 - **单句丢弃**：含分数样式的数字、改分建议、链接、邮箱或 HTML 标签的句子去掉；
 - **超长截断**：`text` 最多 300 字。
 
+`choose`（@7）请用户在几个对象里点一个：用途与候选编号要对得上、至少两个候选、当前状态下能用，否则整体作废；
+有 `choose` 时 text 里模型自己列出候选的那几行去掉，按钮由代码按工具结果生成（docs/评分助手选择卡片方案.md）。
+
 前端一律按纯文本显示。分数不经模型转述：要展示数据就把引用编号放进 `cards`，卡片由界面现取；
 没有卡片的对象（评分标准、评分项）由代码按工具结果列出名称（`turn.attachments`）。
 """
@@ -19,12 +22,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from typing import Callable
 
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import ValidationError
 
 from backend.app.services.assistant.agent import claims
+from backend.app.services.assistant import choices
 from backend.app.services.assistant.agent.refs import TurnRefs
 from backend.app.services.assistant.views import QUICK_ACTIONS
 from backend.app.services.scoring.core.evidence import detect_injection
@@ -34,9 +39,15 @@ from backend.app.services.scoring.suggestions import SENTENCE_PATTERN
 
 MAX_TEXT_CHARS = 300
 MAX_CARDS = 3
+MAX_OPTIONS = choices.MAX_OPTIONS
 
 #: 回复里能建议的下一步：渲染成快捷按钮，点了按键直接分派（§16）。
 NEXT_STEPS = tuple(QUICK_ACTIONS)
+
+
+class ChooseParams(BaseModel):
+    purpose: str = Field(min_length=1, max_length=40)
+    refs: list[str] = Field(min_length=1, max_length=MAX_OPTIONS)
 
 
 class ReplyParams(BaseModel):
@@ -44,6 +55,7 @@ class ReplyParams(BaseModel):
     cards: list[str] = Field(default_factory=list, max_length=10)
     next_steps: list[str] = Field(default_factory=list, max_length=6)
     help_refs: list[str] = Field(default_factory=list, max_length=3)
+    choose: ChooseParams | None = None
 
 
 class ReplyInvalid(Exception):
@@ -61,6 +73,8 @@ class ValidReply:
     next_steps: tuple[str, ...]
     dropped_sentences: int
     help_refs: tuple[str, ...] = ()
+    #: 请用户选：(用途, 候选编号)。卡片由代码按工具结果生成（docs/评分助手选择卡片方案.md §4）。
+    choose: tuple[str, tuple[str, ...]] | None = None
 
 
 # 分数样式与分句：与评分侧的修改建议过滤同一份（scoring/suggestions.py）。
@@ -118,10 +132,66 @@ def parse_arguments(arguments) -> dict:
     return value
 
 
-def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check_claims: bool = True) -> ValidReply:
+def _candidate_names(refs: TurnRefs, ref: str) -> list[str]:
+    label = refs.label_of(ref) or ""
+    names = [label] if label else []
+    found = re.search(r"《(.+?)》", label)
+    if found:
+        names.append(found.group(1))
+    return [name for name in names if len(name) >= 2]
+
+
+#: 模型自己又列了一遍候选：行首是序号或列表记号（“1.”“2、”“·”“-”）。
+_LIST_LINE = re.compile(r"^[ \t]*(?:[0-9]{1,2}[.、)）]|[·\-•])")
+
+
+def _drop_listed(text: str, names: list[str]) -> str:
+    """候选由卡片显示：text 里自己列出候选的那几行去掉，免得用户看到两份、顺序还可能对不上。"""
+
+    kept = [line for line in text.split("\n")
+            if not (_LIST_LINE.match(line) and any(name in line for name in names))]
+    return "\n".join(kept).strip()
+
+
+def _validate_choose(params: ChooseParams, refs: TurnRefs, cards: list[str],
+                     unavailable: Callable[[str], str | None] | None) -> tuple[str, tuple[str, ...]]:
+    purpose = choices.PURPOSES.get(params.purpose)
+    if purpose is None:
+        raise ReplyInvalid("choose.purpose 只能从这些里选：%s" % "、".join(choices.PURPOSES))
+    # 按对象去重、比较：“t1”与“ t1”是同一个对象，不能变成两个按钮，也不能绕过与 cards 的重复检查（#112 复审）。
+    shown = {refs.object_of(ref) for ref in cards}
+    picked: list[str] = []
+    objects: set = set()
+    for raw in params.refs:
+        ref = str(raw or "").strip()
+        found = refs.object_of(ref)
+        if found is None:
+            raise ReplyInvalid("choose.refs 里的编号“%s”不在本回合的工具结果里" % ref)
+        if found[0] != purpose.kind:
+            raise ReplyInvalid("choose.purpose 为 %s 时，refs 只能放 %s 开头的编号" % (purpose.key, purpose.kind))
+        if found in shown:
+            raise ReplyInvalid("编号“%s”不能既放进 cards 又放进 choose：要用户选就只放 choose" % ref)
+        if not refs.label_of(ref):
+            # 当前材料 p0 只有编号没有名称：按钮上不能只写“p0”（#112 复审）。
+            raise ReplyInvalid("候选“%s”还没有名称，按钮上显示不出来：先用工具查到它（例如 paper_result、task_list），"
+                               "再放进 choose" % ref)
+        if found not in objects:
+            objects.add(found)
+            picked.append(ref)
+    if len(picked) < choices.MIN_OPTIONS:
+        raise ReplyInvalid("只有一个候选就直接用它，不要让用户选；choose 至少要有 %d 个候选" % choices.MIN_OPTIONS)
+    reason = unavailable(purpose.key) if unavailable else None
+    if reason:
+        raise ReplyInvalid("现在不能让用户这样选：%s。去掉 choose，把原因告诉用户" % reason)
+    return purpose.key, tuple(picked)
+
+
+def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check_claims: bool = True,
+                   unavailable: Callable[[str], str | None] | None = None) -> ValidReply:
     """校验一次 `reply` 调用。整体作废时抛 `ReplyInvalid`。
 
-    ``check_claims=False`` 只给压缩摘要用：摘要转述的是过去的对话（“老师取消了任务”），不是本回合的说法。
+    ``check_claims=False`` 只给压缩摘要用：摘要转述的是过去的对话（“用户取消了任务”），不是本回合的说法。
+    ``unavailable`` 按用途返回“现在不能选”的原因（等待中的步骤决定），没有就是可以。
     """
 
     try:
@@ -133,12 +203,8 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
     visible = _strip_markup(params.text)
     if detect_injection(params.text) or detect_injection(visible):
         raise ReplyInvalid("回复里出现了疑似提示注入的内容")
-    if check_claims:
-        problem = claims.problem(visible, refs)
-        if problem:
-            raise ReplyInvalid(problem)
-    if not allow_cards and (params.cards or params.next_steps or params.help_refs):
-        raise ReplyInvalid("这里只要文字，cards、next_steps 与 help_refs 必须为空")
+    if not allow_cards and (params.cards or params.next_steps or params.help_refs or params.choose):
+        raise ReplyInvalid("这里只要文字，cards、next_steps、help_refs 与 choose 必须为空")
     unseen = [ref for ref in params.help_refs if ref not in refs.help_seen]
     if unseen:
         raise ReplyInvalid("help_refs 里的“%s”不是本回合 help_lookup 返回的条目" % "、".join(unseen))
@@ -154,16 +220,26 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
     unknown = [step for step in params.next_steps if step not in NEXT_STEPS]
     if unknown:
         raise ReplyInvalid("next_steps 只能从这些里选：%s" % "、".join(NEXT_STEPS))
+    choose = _validate_choose(params.choose, refs, cards, unavailable) if params.choose else None
+    # 说法核对放在 choose 校验之后：合格的选择卡片会显示出来，“请在下面的卡片里选”就是成立的（#112 复审）。
+    if check_claims:
+        problem = claims.problem(visible, refs, choosing=bool(choose))
+        if problem:
+            raise ReplyInvalid(problem)
+    if choose:
+        visible = _drop_listed(visible, [name for ref in choose[1] for name in _candidate_names(refs, ref)])
+        if not visible:
+            raise ReplyInvalid("text 只剩候选列表：候选由卡片显示，text 写一句引导即可")
     text, dropped = _clean_text(visible)
     if not text:
         raise ReplyInvalid("回复去掉分数、改分建议与链接后没有剩下内容；分数请用 cards 展示")
-    if allow_cards and text.endswith(_TRAILING_COLON) and not cards and not params.help_refs:
+    if allow_cards and text.endswith(_TRAILING_COLON) and not cards and not params.help_refs and not choose:
         # 快捷按钮不算：“目前已发布的评分标准有：”后面跟两个按钮，老师看到的仍是空列表（11-05 生产）。
         raise ReplyInvalid("text 以冒号结尾，后面却没有内容：要列出的名称直接写进 text，或把工具结果里的编号放进 cards")
     # 卡片数上限在显示时处理（turn.attachments）：超出的用名称补一行，不再静默截掉。
     return ValidReply(text=text, cards=tuple(cards),
                       next_steps=tuple(dict.fromkeys(params.next_steps)), dropped_sentences=dropped,
-                      help_refs=tuple(dict.fromkeys(params.help_refs)))
+                      help_refs=tuple(dict.fromkeys(params.help_refs)), choose=choose)
 
 
-__all__ = ["MAX_CARDS", "MAX_TEXT_CHARS", "NEXT_STEPS", "ReplyInvalid", "ReplyParams", "ValidReply", "parse_arguments", "validate_reply"]
+__all__ = ["MAX_CARDS", "MAX_OPTIONS", "ChooseParams", "MAX_TEXT_CHARS", "NEXT_STEPS", "ReplyInvalid", "ReplyParams", "ValidReply", "parse_arguments", "validate_reply"]
