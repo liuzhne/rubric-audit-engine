@@ -811,7 +811,8 @@ def _incomplete_scoring_error(rule_tasks):
             message = f"评分模型调用失败（{code}）；请检查模型连接后重试。"
         return IncompleteScoringResultError(code, message, failure_kind="llm")
     if failed:
-        # 不是模型调用失败：同样的评分标准和论文重试，判定会被复用，结果不变。
+        # 不是模型调用失败：多半是规则配置或检查器的问题。这些规则没有可复用的判定，
+        # 重试会重新判定，原因不消除时结果通常相同，所以不暗示“重试就好”。
         # 只列编码（不含正文），让管理员能直接定位到规则。
         named = sorted(
             {
@@ -830,7 +831,8 @@ def _incomplete_scoring_error(rule_tasks):
         return IncompleteScoringResultError(
             "RULE_EXECUTION_FAILED",
             (
-                "评分规则判定无效%s，不是模型调用失败；同样的评分标准和论文重试结果不变。"
+                "评分规则判定无效%s，不是模型调用失败，多半与规则配置或检查器有关；"
+                "重试会重新判定这些规则，原因不消除时结果通常相同。"
                 "请把评分项与规则编码告诉管理员排查。" % where
             ),
             failure_kind="checker",

@@ -225,7 +225,7 @@ def test_rule_execution_failure_names_rules_and_does_not_suggest_retrying():
     assert "T01 的 manual.t01.deduct.1.v1" in message
     assert "等 4 条" in message
     assert "manual.t05" not in message
-    assert "不是模型调用失败" in message and "重试结果不变" in message
+    assert "不是模型调用失败" in message and "重试会重新判定" in message
 
 
 def test_library_error_code_and_message_are_not_exposed_as_business_diagnostics():
