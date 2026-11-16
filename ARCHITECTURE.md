@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-16 | 评分助手选择卡片（#112 复审） | `agent/reply.validate_reply` 的说法核对移到 choose 校验之后，`claims.problem` 加 `choosing`；`TurnRefs.name_of`；`runner._choose_rubric` 记已选前先查已发布列表；模块边界不变 |
 | 2026-11-16 | 评分助手选择卡片（提示词 @7） | 新模块 `services/assistant/choices.py`；Agent 回复契约加 `choose`（`agent/reply.py`），`runner` 统一选择卡片的点击、打字兜底与选完接着回答；查询图改出 `choice` 卡片；前端 `components/assistant/ChoiceCard.vue`；历史与压缩摘要记下按钮文字与选了哪个；契约版本 `2026-11-16.assistant-choice`；无迁移 |
 | 2026-11-16 | 评分助手等选文件时按名称或序号换评分标准 | `runner._start_flow` 在等选文件时收到带 `preset_rubric_id` 的评分流程，改为 `resume` 同一张卡片的 `change_rubric`（与工作区换标准同一条路）；`agent/business._action_start_grading` 的 `rubric_name` 认序号（与 `rubric_list` 同序）；模块边界与持久化不变，无迁移 |
 | 2026-11-16 | 扣分合计超满分封底于 0 | `rule_executor._deduction_effects` 按剩余分数入账（新增公开的 `nominal_deduction_amounts`），`_criterion_results` 不再因累计溢出判无效，改记 `DEDUCTION_FLOORED_AT_ZERO`（info）；`persistence` 写 `criterion-aggregation@3` 并在评分项说明后追加封底句；`judgement_view` 按实际入账给标签；`jobs._incomplete_scoring_error` 点名判定无效的规则。模块边界、调用链与持久化边界不变，无迁移 |

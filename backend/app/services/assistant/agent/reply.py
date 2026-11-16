@@ -158,15 +158,25 @@ def _validate_choose(params: ChooseParams, refs: TurnRefs, cards: list[str],
     purpose = choices.PURPOSES.get(params.purpose)
     if purpose is None:
         raise ReplyInvalid("choose.purpose 只能从这些里选：%s" % "、".join(choices.PURPOSES))
+    # 按对象去重、比较：“t1”与“ t1”是同一个对象，不能变成两个按钮，也不能绕过与 cards 的重复检查（#112 复审）。
+    shown = {refs.object_of(ref) for ref in cards}
     picked: list[str] = []
-    for ref in params.refs:
-        if refs.object_of(ref) is None:
+    objects: set = set()
+    for raw in params.refs:
+        ref = str(raw or "").strip()
+        found = refs.object_of(ref)
+        if found is None:
             raise ReplyInvalid("choose.refs 里的编号“%s”不在本回合的工具结果里" % ref)
-        if refs.kind_of(ref) != purpose.kind:
+        if found[0] != purpose.kind:
             raise ReplyInvalid("choose.purpose 为 %s 时，refs 只能放 %s 开头的编号" % (purpose.key, purpose.kind))
-        if ref in cards:
+        if found in shown:
             raise ReplyInvalid("编号“%s”不能既放进 cards 又放进 choose：要用户选就只放 choose" % ref)
-        if ref not in picked:
+        if not refs.label_of(ref):
+            # 当前材料 p0 只有编号没有名称：按钮上不能只写“p0”（#112 复审）。
+            raise ReplyInvalid("候选“%s”还没有名称，按钮上显示不出来：先用工具查到它（例如 paper_result、task_list），"
+                               "再放进 choose" % ref)
+        if found not in objects:
+            objects.add(found)
             picked.append(ref)
     if len(picked) < choices.MIN_OPTIONS:
         raise ReplyInvalid("只有一个候选就直接用它，不要让用户选；choose 至少要有 %d 个候选" % choices.MIN_OPTIONS)
@@ -193,10 +203,6 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
     visible = _strip_markup(params.text)
     if detect_injection(params.text) or detect_injection(visible):
         raise ReplyInvalid("回复里出现了疑似提示注入的内容")
-    if check_claims:
-        problem = claims.problem(visible, refs)
-        if problem:
-            raise ReplyInvalid(problem)
     if not allow_cards and (params.cards or params.next_steps or params.help_refs or params.choose):
         raise ReplyInvalid("这里只要文字，cards、next_steps、help_refs 与 choose 必须为空")
     unseen = [ref for ref in params.help_refs if ref not in refs.help_seen]
@@ -215,6 +221,11 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
     if unknown:
         raise ReplyInvalid("next_steps 只能从这些里选：%s" % "、".join(NEXT_STEPS))
     choose = _validate_choose(params.choose, refs, cards, unavailable) if params.choose else None
+    # 说法核对放在 choose 校验之后：合格的选择卡片会显示出来，“请在下面的卡片里选”就是成立的（#112 复审）。
+    if check_claims:
+        problem = claims.problem(visible, refs, choosing=bool(choose))
+        if problem:
+            raise ReplyInvalid(problem)
     if choose:
         visible = _drop_listed(visible, [name for ref in choose[1] for name in _candidate_names(refs, ref)])
         if not visible:

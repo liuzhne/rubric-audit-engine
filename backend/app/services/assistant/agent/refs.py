@@ -91,6 +91,11 @@ class TurnRefs:
         key = self._by_ref.get(ref)
         return self._display_names.get(key) if key is not None else None
 
+    def name_of(self, kind: str, object_id: str) -> str | None:
+        """工具结果里给出的对象名称（不需要编号）：例如材料所属任务的任务名。"""
+
+        return self._display_names.get((kind, str(object_id)))
+
     def displayable(self, ref: str) -> bool:
         """放进 reply.cards 之后界面上能看到东西：有卡片（任务总有概况卡片），或者代码能列出它的名称。"""
 

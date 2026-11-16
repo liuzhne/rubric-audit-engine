@@ -522,6 +522,10 @@ def _choose_rubric(ctx: RunContext, saver: SqlCheckpointSaver, card_message, car
     if reason:
         _choice_stale(ctx, card_message, card, reason + "。")
         return
+    # 先确认这份还在已发布、可见的标准里，再记“已选”：卡片开着的时候它可能被下线了（#112 复审）。
+    if not any(item["id"] == picked["id"] for item in tools.call(ctx, "list_published_rubrics")):
+        _choice_stale(ctx, card_message, card, "这份评分标准现在不可用（未发布或无权访问），请换一份。")
+        return
     ctx.update_card(card_message.id, card["id"], "done", {"id": picked["id"]})
     pending = ctx.conversation.pending or {}
     if pending.get("kind") == "pick_files":

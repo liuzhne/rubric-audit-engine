@@ -126,11 +126,12 @@ def _backed(category: str, sentence: str, refs) -> bool:
     return False
 
 
-def problem(text: str, refs) -> str | None:
+def problem(text: str, refs, *, choosing: bool = False) -> str | None:
     """不成立的说法给出修正提示（给模型看）；都成立返回 None。
 
     ``refs`` 是本回合的 `TurnRefs`：确认卡片（``proposed``）、状态依据（``evidence``）、名称与所属任务、
-    工具结果原文（``seen_text``，说法原样出现在这里也算工具返回过）。
+    工具结果原文（``seen_text``，说法原样出现在这里也算工具返回过）。``choosing`` 表示这条回复带着合格的选择卡片：
+    “请在下面的卡片里选”“请问是哪个任务”都成立。
     """
 
     seen_text = "\n".join(refs.seen_text)
@@ -139,10 +140,10 @@ def problem(text: str, refs) -> str | None:
         return ("你不能自己执行改动，不要说“%s”。用户要做的事：先用 tool_search 加载对应的 action_* 工具"
                 "（例如 select:action_cancel），再用 call_tool 调用，它会生成确认卡片；做不到的就直说。" % claim)
     claim = card_claim(text)
-    if claim and not refs.proposed and claim not in seen_text:
+    if claim and not choosing and not refs.proposed and claim not in seen_text:
         return ("本回合没有出确认卡片，不能说“%s”。要出卡片，先加载并调用对应的 action_* 工具。" % claim)
     claim = asks_to_confirm(text)
-    if claim and not refs.proposed and not any(marker in seen_text for marker in _CHOICE_MARKERS):
+    if claim and not choosing and not refs.proposed and not any(marker in seen_text for marker in _CHOICE_MARKERS):
         return ("不要用文字向用户反问确认（“%s”）：直接调用对应的 action_* 提议工具（action_start_grading / "
                 "action_import_rubric / action_retry_failed / action_cancel）生成确认卡片，用户在卡片上确认；"
                 "用户点了任务名就填 task_name。" % claim)

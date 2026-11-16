@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from sqlalchemy import select
 
 from backend.app.db import models
@@ -755,6 +756,80 @@ def test_history_shows_the_buttons_and_what_was_picked(client, agent, monkeypatc
     history = "\n".join(str(item.get("content")) for item in model.requests[0]["messages"])
     assert "[卡片：选择评分标准（按钮：1. 《" in history
     assert "用户选了 《课程报告评分标准》v2.0（通用文档）]" in history
+
+
+def _choice_refs():
+    from backend.app.services.assistant.agent.refs import TurnRefs
+
+    refs = TurnRefs()
+    for batch_id, name in (("batch-a", "软件工程导论"), ("batch-b", "数据结构")):
+        refs.name("t", batch_id, name)
+        refs.add("t", batch_id)
+    for paper_id, batch_id in (("paper-a", "batch-a"), ("paper-b", "batch-b")):
+        refs.name("p", paper_id, "张三", parent=("t", batch_id))
+        refs.add("p", paper_id)
+    return refs
+
+
+def test_a_valid_choice_lets_the_reply_point_at_its_card():
+    # #112 复审：“请在下面的卡片中选择”有了选择卡片就成立，不能被当成编造卡片拦下。
+    from backend.app.services.assistant.agent.reply import ReplyInvalid
+    from backend.app.services.assistant.agent.reply import validate_reply
+
+    reply_args = {"text": "请在下面的卡片中选择一个任务。", "choose": {"purpose": "focus_task", "refs": ["t1", "t2"]}}
+    assert validate_reply(reply_args, _choice_refs()).choose == ("focus_task", ("t1", "t2"))
+    with pytest.raises(ReplyInvalid, match="没有出确认卡片"):
+        validate_reply({"text": "请在下面的卡片中选择一个任务。"}, _choice_refs())
+
+
+def test_choice_candidates_are_counted_by_object_and_need_a_name():
+    from backend.app.services.assistant.agent.reply import ReplyInvalid
+    from backend.app.services.assistant.agent.reply import validate_reply
+
+    refs = _choice_refs()
+    # “t1”与“ t1”是同一个对象：只算一个候选，于是不够两个。
+    with pytest.raises(ReplyInvalid, match="只有一个候选"):
+        validate_reply({"text": "选哪个？", "choose": {"purpose": "focus_task", "refs": ["t1", " t1"]}}, refs)
+    with pytest.raises(ReplyInvalid, match="不能既放进 cards"):
+        validate_reply({"text": "选哪个？", "cards": ["t1"], "choose": {"purpose": "focus_task", "refs": [" t1", "t2"]}},
+                       refs)
+    # 当前材料 p0 只有编号、没有名称：按钮上显示不出来，要先查到名称。
+    refs.pin("p0", "p", "paper-current")
+    with pytest.raises(ReplyInvalid, match="还没有名称"):
+        validate_reply({"text": "选哪份？", "choose": {"purpose": "focus_paper", "refs": ["p0", "p1"]}}, refs)
+
+
+def test_papers_from_different_tasks_carry_the_task_name_on_their_buttons():
+    from types import SimpleNamespace
+
+    from backend.app.services.assistant.agent import turn as agent_turn
+    from backend.app.services.assistant.agent.reply import validate_reply
+
+    refs = _choice_refs()
+    valid = validate_reply({"text": "是哪一份？", "choose": {"purpose": "focus_paper", "refs": ["p1", "p2"]}}, refs)
+    ctx = SimpleNamespace(conversation=SimpleNamespace(focus={}, pending=None))
+    card = agent_turn.choice_card(ctx, refs, valid, question="张三为什么扣分")
+    assert [item["label"] for item in card["options"]] == ["张三（软件工程导论）", "张三（数据结构）"]
+
+
+def test_a_rubric_withdrawn_while_the_card_is_open_is_not_recorded_as_chosen(client, agent, monkeypatch):  # noqa: F811
+    rubric_id, _name = _seed_published_rubric(client)
+    extra = [dict(_REPORT_RUBRIC)]
+    _published_rubrics(monkeypatch, extra)
+    conversation_id = _wait_for_files(client)
+    agent(*_list_rubrics_then(reply("换成哪一份？", choose={"purpose": "use_rubric", "refs": ["r1", "r2"]})))
+    card = _cards(_say(client, conversation_id, "换一份评分标准"), "choice")[0]
+
+    extra.clear()  # 卡片开着的时候这份被下线了
+    body = _run(client, conversation_id, type="select", card_id=card["id"], value={"id": "rubric-report"})
+    assert "不可用" in _texts(body)[-1]
+    assert _cards(body, "choice")[0]["status"] == "expired" and "result" not in _cards(body, "choice")[0]
+    assert body["pending"]["kind"] == "pick_files"
+    with client.session_factory() as session:
+        conversation = session.get(models.AssistantConversation, conversation_id)
+        pick = next(item for message in conversation.messages for item in message.cards or []
+                    if item.get("id") == conversation.pending["card_id"])
+    assert pick["rubric_id"] == rubric_id  # 还是原来那份
 
 
 def test_no_published_rubric_is_said_plainly_never_left_after_a_colon(client, agent, monkeypatch):  # noqa: F811

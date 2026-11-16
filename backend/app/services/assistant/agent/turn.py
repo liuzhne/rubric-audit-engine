@@ -504,6 +504,12 @@ def choice_card(ctx: RunContext, refs, reply: ValidReply, *, question: str) -> d
         if kind == "p" and parent:
             option["batch_id"] = parent[1]
         options.append(option)
+    # 材料来自不止一个任务：按钮上带任务名，不同任务里同名的材料才分得清（#112 复审）。
+    if len({option.get("batch_id") for option in options if option.get("batch_id")}) > 1:
+        for option in options:
+            task = refs.name_of("t", option["batch_id"]) if option.get("batch_id") else None
+            if task:
+                option["label"] = "%s（%s）" % (option["label"], task)
     return choices.card(purpose, options, question=question)
 
 
