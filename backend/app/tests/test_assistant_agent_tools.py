@@ -607,6 +607,34 @@ def test_rubric_chosen_by_ordinal_while_waiting_for_files_switches_the_rubric(cl
     assert "没有“3”" in result["提示"] and len(result["rubrics"]) == 2
 
 
+def test_ambiguous_rubric_candidates_carry_their_position_in_the_full_list(client, agent, monkeypatch):  # noqa: F811
+    # #111 复审：候选是筛过的子集，序号要按完整列表给，老师回序号时按完整列表取才对得上。
+    _seed_published_rubric(client)
+    _published_rubrics(monkeypatch, [
+        {"id": "rubric-a", "name": "课程报告评分标准", "version": "v1.0", "business_profile_key": "general_document"},
+        {"id": "rubric-b", "name": "实验报告评分标准", "version": "v1.0", "business_profile_key": "general_document"},
+        {"id": "rubric-c", "name": "课程报告评分标准", "version": "v2.0", "business_profile_key": "general_document"},
+    ])
+    model = agent(step(("action_start_grading", {"rubric_name": "课程报告"})), reply("有两份课程报告评分标准，用哪一份？"))
+    _say(client, _conversation(client), "用课程报告评分标准评一下")
+    result = _last_tool_result(model)
+    assert [(item["version"], item["序号"]) for item in result["候选"]] == [("v1.0", 2), ("v2.0", 4)]
+
+    agent(step(("action_start_grading", {"rubric_name": "4"})))
+    body = _say(client, _conversation(client), "4")
+    assert _cards(body, "pick_files")[0]["rubric_id"] == "rubric-c"
+
+
+def test_rubric_ordinals_beyond_99_are_understood(client, agent, monkeypatch):  # noqa: F811
+    # #111 第二轮复审：候选的“序号”可能超过 99，三位数也要能按序号选。
+    _seed_published_rubric(client)
+    _published_rubrics(monkeypatch, [{"id": "rubric-%d" % index, "name": "标准 %d" % index, "version": "v1.0",
+                                      "business_profile_key": "general_document"} for index in range(2, 102)])
+    agent(step(("action_start_grading", {"rubric_name": "101"})))
+    body = _say(client, _conversation(client), "101")
+    assert _cards(body, "pick_files")[0]["rubric_id"] == "rubric-101"
+
+
 def test_rubric_list_tells_the_model_not_to_ask_for_refs(client, agent):  # noqa: F811
     _seed_published_rubric(client)
     model = agent(*_list_rubrics_then(reply("可以用的评分标准有：", cards=["r1"])))

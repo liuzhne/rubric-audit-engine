@@ -634,8 +634,10 @@ def _action_start_grading(turn: TurnContext, params: StartGradingParams) -> dict
         if len(hits) == 1:
             flow["preset_rubric_id"] = hits[0]["id"]
         elif hits:
+            # 候选是筛过的子集：带上它在完整列表里的序号，用户打字回序号时按完整列表取才对得上（#111 复审）。
             return {"提示": "符合“%s”的评分标准不止一份：用 reply 的 choose（use_rubric）请用户点选一份，或用候选里的 ref 再调用。" % needle[:20],
-                    "候选": [_rubric_entry(turn, item) for item in hits[:LIST_LIMIT]]}
+                    "候选": [{**_rubric_entry(turn, item), "序号": rubrics.index(item) + 1}
+                             for item in hits[:LIST_LIMIT]]}
         else:
             return {"提示": "已发布的评分标准里没有“%s”：用 reply 的 choose（use_rubric）请用户从下面点选一份，或不指定（用最新发布的）。" % needle[:20],
                     "rubrics": [_rubric_entry(turn, item) for item in rubrics[:LIST_LIMIT]]}
@@ -646,7 +648,7 @@ def _action_start_grading(turn: TurnContext, params: StartGradingParams) -> dict
 
 
 _CHINESE_DIGITS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-_ORDINAL = re.compile(r"^第?([0-9]{1,2}|[一二两三四五六七八九十])(?:个|份|项|号|条)?$")
+_ORDINAL = re.compile(r"^第?([0-9]{1,3}|[一二两三四五六七八九十])(?:个|份|项|号|条)?$")
 
 
 def _rubric_needle(said: str) -> str:
