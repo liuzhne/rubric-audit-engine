@@ -2171,3 +2171,10 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - 判定账本身份（`decision_identity`）哈希整个请求信封，信封里有 `runtime_identity` 与 `policy_hash`；本次两者都不变，所以已有判定照常复用。
 
 维护记录：2026-11-16 · 扣分合计超满分封底于 0：聚合行为与展示变化，模块边界不变，无迁移。
+
+### 2026-11-17 宽屏布局：工作台居中、首页宽屏补一列
+
+- 工作台外壳（`layouts/AppShell.vue`）的内容区仍以 `--content-max`（1380px）为上限，加 `margin-inline: auto` 居中；之前只有上限、没有居中，宽屏下多出的宽度全在右侧。整屏三栏（`meta.chrome === "full"`）不受影响。
+- 宣传页首屏（`site/LandingPage.vue`）新增静态示意块“评审记录”（`.hero-ledger`，逐项得分 + 复核留痕），只在 `min-width: 1500px` 且 `min-aspect-ratio: 16/9` 时显示，此时首屏三栏不换行、左侧留白由 18vw 收到 9vw。数据写在组件里，不调接口。
+
+维护记录：2026-11-17 · 宽屏布局：只改前端样式与首屏示意块，模块边界与数据流不变，无迁移。

@@ -322,6 +322,8 @@ async function onLogout() {
 .workspace:not(.full-bleed) {
   padding: 30px 36px 56px;
   max-width: var(--content-max);
+  /* 宽屏下居中：只设上限不居中时，多出来的宽度全堆在右边，页面看起来偏左。 */
+  margin-inline: auto;
 }
 
 /* 工作区内嵌：页面窄，内容边距收紧。 */
