@@ -137,21 +137,22 @@ def _replace_refs(text: str, refs: TurnRefs) -> str:
         ref = found.group("ref")
         if refs.object_of(ref) is None:
             continue
-        if bool(found.group("open")) != bool(found.group("close")):
-            continue  # 括号不成对：只匹配到半边，不动
+        # 括号只有半边：括号包的是更长的一段（“（t1、t2）”），括号原样保留，编号照常处理。
+        paired = bool(found.group("open")) and bool(found.group("close"))
+        keep_open = "" if paired else (found.group("open") or "")
+        keep_close = "" if paired else (found.group("close") or "")
         label = refs.label_of(ref)
         before, after = text[:found.start()].rstrip(" \t"), text[found.end():]
         side = _beside_name(before, after, label) if label else None
         if side:
             # “实验报告评分（t1）：……”留下冒号；“t1：实验报告评分……”名称在后，冒号一起去掉。
-            replacement = "：" if side == "before" and found.group("colon") else ""
+            core, colon = "", "：" if side == "before" and found.group("colon") else ""
         elif label:
-            replacement = ("（%s）" if found.group("open") else "%s") % label
-            replacement += "：" if found.group("colon") else ""
+            core, colon = ("（%s）" if paired else "%s") % label, "：" if found.group("colon") else ""
         else:
             raise ReplyInvalid("text 里不要写编号“%s”：用户看不到编号，直接写名称" % ref)
         pieces.append(text[last:found.start()].rstrip(" \t"))
-        pieces.append(replacement)
+        pieces.append(keep_open + core + keep_close + colon)
         last = found.end()
         # “t4（论文评分开发批次）”去掉编号后，名称不必再留在括号里。
         unwrapped = _BRACKETED.match(text, last) if side == "after" else None
@@ -268,8 +269,9 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
         raise ReplyInvalid("参数不合格：%s" % exc.errors()[0]["msg"]) from exc
     # 注入检测与说法核对看去掉记号之后的文字：老师看到的是它。只看原文时，“评分已经**完成**”
     # 对不上“已经完成”，去掉记号后却原样显示（#78 复审）。
-    visible = _replace_refs(_strip_markup(params.text), refs)
-    if detect_injection(params.text) or detect_injection(visible):
+    stripped = _strip_markup(params.text)
+    visible = _replace_refs(stripped, refs)
+    if detect_injection(params.text) or detect_injection(stripped) or detect_injection(visible):
         raise ReplyInvalid("回复里出现了疑似提示注入的内容")
     if not allow_cards and (params.cards or params.next_steps or params.help_refs or params.choose):
         raise ReplyInvalid("这里只要文字，cards、next_steps、help_refs 与 choose 必须为空")
@@ -291,7 +293,9 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
     choose = _validate_choose(params.choose, refs, cards, unavailable) if params.choose else None
     # 说法核对放在 choose 校验之后：合格的选择卡片会显示出来，“请在下面的卡片里选”就是成立的（#112 复审）。
     if check_claims:
-        problem = claims.problem(visible, refs, choosing=bool(choose))
+        # 核对看替换编号之前的文字：编号认得出是哪个对象；换掉之后只剩简称，可能对不上任何名称，
+        # 状态说法就落到“没点名”的宽松核对上（#118 复审：t3 在评分中，“t3 毕业论文评分已经完成”会被放过）。
+        problem = claims.problem(stripped, refs, choosing=bool(choose))
         if problem:
             raise ReplyInvalid(problem)
     if choose:
