@@ -592,6 +592,10 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-16 | 评分助手选择卡片（#112 复审） | `agent/reply.validate_reply` 的说法核对移到 choose 校验之后，`claims.problem` 加 `choosing`；`TurnRefs.name_of`；`runner._choose_rubric` 记已选前先查已发布列表；模块边界不变 |
+| 2026-11-16 | 评分助手选择卡片（提示词 @7） | 新模块 `services/assistant/choices.py`；Agent 回复契约加 `choose`（`agent/reply.py`），`runner` 统一选择卡片的点击、打字兜底与选完接着回答；查询图改出 `choice` 卡片；前端 `components/assistant/ChoiceCard.vue`；历史与压缩摘要记下按钮文字与选了哪个；契约版本 `2026-11-16.assistant-choice`；无迁移 |
+| 2026-11-16 | 评分助手等选文件时按名称或序号换评分标准 | `runner._start_flow` 在等选文件时收到带 `preset_rubric_id` 的评分流程，改为 `resume` 同一张卡片的 `change_rubric`（与工作区换标准同一条路）；`agent/business._action_start_grading` 的 `rubric_name` 认序号（与 `rubric_list` 同序）；模块边界与持久化不变，无迁移 |
+| 2026-11-16 | 扣分合计超满分封底于 0 | `rule_executor._deduction_effects` 按剩余分数入账（新增公开的 `nominal_deduction_amounts`），`_criterion_results` 不再因累计溢出判无效，改记 `DEDUCTION_FLOORED_AT_ZERO`（info）；`persistence` 写 `criterion-aggregation@3` 并在评分项说明后追加封底句；`judgement_view` 按实际入账给标签；`jobs._incomplete_scoring_error` 点名判定无效的规则。模块边界、调用链与持久化边界不变，无迁移 |
 | 2026-11-15 | 分节摘要（阶段 3 的 PR A：生成与存储） | 新模块 `scoring/retrieval/section_summary`（节点、分批、提示词、校验）与 `scoring/adapters/derivations`（存取）；新表 `document_derivations`（迁移 `0046`）；运行时入口 `summarize_sections`；评分还不读摘要 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（#106 复审） | `section_tree.outline` 隐去像个人信息的标题；`judge_scope._within_char_budget` 必留每个目标章节的第一段，`scoped_unit_cap` 在放不下时按章节数平分；`compress_evidence(keep_fitting=…)`；`transport.langfuse_usage` 把缓存命中与未命中分成两个桶 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（阶段 1、2） | 新模块 `scoring/retrieval/section_tree`（读取时拼树、目录骨架、位置别名）；按范围取到的段落原样发出、“整章”按实际内容算；视图可改为证据在前的稳定前缀顺序；用量多一项缓存命中 token，迁移 `0045_cached_prompt_tokens` |
@@ -1384,6 +1388,7 @@ AssistantView（薄客户端）── POST /api/assistant/conversations/{id}/run
 - `services/assistant/flow.py`：流程图（LangGraph `StateGraph`，有状态）。grading / import / watch 三种流程共用一张图；grading 在入口先查前提（已发布的评分标准、评分模型），缺了就说明怎么补、不弹选文件，导入流程发布后接着评分之前同样先查评分模型；2026-10-29 起顺序是选文件（之前可以换评分标准）→ 建草稿任务 → 等浏览器上传 → 预检 → 确认开始（无法评分的文件在这一步一起移除）→ 开评，流程卡片带 `step`（计划步骤的键）；“等待”节点第一行就 `interrupt()`，有副作用的节点放在其后并幂等（建批次按“本人 + 批次名 + 流程开始时间”找回）。状态只有编号与标志位。
 - `services/assistant/plan.py`：计划卡片（`docs/评分助手计划卡片方案.md`）。grading 与 import 开始时由代码列出固定步骤（7 步 / 8 步），各节点走完一步就用 `RunContext.patch_card` 在原卡片上更新；编号记在流程状态的 `plan`，并随每个中断存进会话的 `pending`（接口不返回），运行器放弃或作废流程时据此把卡片标成已放弃或已过期，流程结束时卡片还在进行中则兜底标“已结束”。计划卡片不进 Agent 上下文。
 - `services/assistant/queries.py`：查询图（无状态），流程等待时也能随时查询；重试、取消只给确认卡片。
+- `services/assistant/choices.py`：选择卡片（`docs/评分助手选择卡片方案.md`，2026-11-16）。一种卡片 `choice` 承担所有“在几个对象里点一个”：用途登记（`use_rubric` / `focus_task` / `focus_paper`：对象种类、给模型的说明、当前能不能用），生成卡片，打字作答的兜底匹配。Agent 的 `reply.choose` 给出用途与候选编号，`agent/turn.choice_card` 按本回合工具结果生成选项；查询图（规则模式）直接给候选并带 `next_query`。点击走 `runs` 的 `select`，由 `runner` 按用途分派：换评分标准恢复选文件卡片的 `change_rubric` 或开始评分；选任务、选材料设焦点后，Agent 出的卡片用原话再跑一个回合，规则模式接着跑原查询。上一条回复里还没选的卡片，用户打字回序号或唯一对得上的名称时由代码当作点了按钮，不调用模型。旧卡片 `choose_batch` / `choose_paper` 不再生成，前端与点击分支保留给历史消息。
 - `services/assistant/tools.py`：工具登记（名称、说明、Pydantic 参数可导出 JSON Schema、是否只读）；写工具必须 `allow_write=True`，只由流程节点或用户确认后的选择卡片调用，永不开放给模型。
 - `services/assistant/checkpointer.py`：自写 `BaseCheckpointSaver`，表 `assistant_checkpoints` / `assistant_checkpoint_writes`。**写入先进加锁的内存缓冲，运行结束后由运行器在主线程 `persist()`**：LangGraph 在后台线程保存快照，SQLAlchemy 会话不能跨线程并发使用。
 - `services/assistant/context.py`：一次运行的上下文（经 `context=` 传给节点，不进快照）：写消息、写事件消息（`event`，`intent="event"`，前端显示为分隔线，不进 Agent 上下文）、推进卡片（`update_card` 改状态与结果，`patch_card` 改任意字段）、更新焦点（`focus.workspace` 记与当前步骤对应的完整页面；`focus.progress` 是计划进度，会话列表显示“步骤 2/8”）。
@@ -1412,7 +1417,7 @@ pending + 计划卡片 ──▶ taskBar / chipsFor / todoItems ──▶ 输入
 
 组件边界（`components/assistant/`）：`ConversationRail`（会话栏，`focus.progress` 显示第几步）、`ChatThread`（消息、事件分隔线、入口卡片）、`EntryCard`（流程卡片与结果卡片在对话里只是“在右侧查看”入口）、`ChatComposer`（任务条 + 建议问题 + 输入框）、`WorkspacePanel`（标签、更多、步骤条、新结果提示、回到当前）、`ws/*`（各步骤与结果视图，共用 `WsLayout` 的“滚动正文 + 底部操作条”）。对话本身的选择（选任务、重试、放弃上一步、失败诊断）仍是 `AssistantCard`。
 
-写动作仍走原接口：确认开始与换评分标准是 `runs` 的 `resume`（`store.answerConfirm` / `changeRubric`）；核对评分规则调用评分标准页同一组接口（`rules/{code}/confirm`、`submit-review`、`publish`），发布后立即 `resume` 让流程接着走。完整页面一律新标签页打开（选好的待评分文件只在本页内存里）。
+写动作仍走原接口：确认开始与换评分标准是 `runs` 的 `resume`（`store.answerConfirm` / `changeRubric`；对话里点名标准时由 `runner._start_flow` 代发同一个 `change_rubric`）；核对评分规则调用评分标准页同一组接口（`rules/{code}/confirm`、`submit-review`、`publish`），发布后立即 `resume` 让流程接着走。完整页面一律新标签页打开（选好的待评分文件只在本页内存里）。
 
 后端随之调整：流程顺序见上节 `flow.py`；`plan.answer_progress`（流程里问进展回 `progress_snapshot`，存提问时的计划副本）与 `answer_next_steps`（`todo` 卡片，清单前端实时算），都不经模型；`next_steps` 放在 `views.CHIP_ACTIONS`，不进 `QUICK_ACTIONS`（那里的键写在 Agent `reply.next_steps` 的工具定义里）。批次汇总每份加 `latest_review_reasons`（一次查询取需要复核的评分项与原因）。
 
@@ -2155,3 +2160,14 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - **持久化边界**：新表 `document_derivations`（`document_snapshot_id` + `kind` + `key_hash` 唯一）。它是缓存，不是论文快照的一部分；快照仍不可变。记录里没有论文正文，只有节点标题、计数、段落编号与摘要。
 
 维护记录：2026-11-15 · 分节摘要（PR A）：新增两个模块、一张表与运行时入口；迁移 head 为 `0046_document_derivations`。
+
+### 2026-11-16 扣分合计超满分封底于 0
+
+方案见 `docs/扣分合计超满分封底方案.md`。只改 Core 聚合，不改模型请求：
+
+- `rule_executor._criterion_results` 扣分循环：每条命中规则先由 `nominal_deduction_amounts` 按 `repeat_policy` 算应扣额，再由 `_deduction_effects` 按剩余分数入账（扣到 0 为止，之后的 occurrence 记 0，0 不产生扣分条目）。有封底时给该评分项追加 `DEDUCTION_FLOORED_AT_ZERO`（severity `info`，`rule_code` 为空）。单条规则的配置越界仍走原来的判无效路径。
+- `persistence._score_items`：M4 结果的 `aggregation_schema_version` 为 `criterion-aggregation@3`（`engine` 的两处版本检查认识 @3）；`core_item_reason(floor_note=)` 在说明句后追加“命中扣分合计 X 分，超过满分 Y 分，已扣至 0 分”。`from_core_issues` 不认识这个码，所以它不进复核原因。
+- `judgement_view._row`：部分入账显示“扣分（已扣至 0 分）/扣 X 分（原应扣 Y 分）”，入账 0 显示“命中（该项已扣至 0 分，未再扣分）”；评分项是 invalid/blocked 的旧结果显示“命中（该项未计分）”。
+- 判定账本身份（`decision_identity`）哈希整个请求信封，信封里有 `runtime_identity` 与 `policy_hash`；本次两者都不变，所以已有判定照常复用。
+
+维护记录：2026-11-16 · 扣分合计超满分封底于 0：聚合行为与展示变化，模块边界不变，无迁移。

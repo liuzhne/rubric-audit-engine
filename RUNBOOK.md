@@ -314,6 +314,7 @@ export LANGFUSE_RELEASE=<deployment-commit>
 | 规则显示 `CONTEXT_LENGTH_EXCEEDED` / `TOKEN_BUDGET_UNSATISFIABLE` | PromptEnvelope schema、selection/budget identity、context window、输出预留、完整 EvidenceUnit 大小 | 保持 V4，检查规则 coverage 与证据块粒度；不要退回发送全文或截断引用。必需规则转人工复核 |
 | 生产迁移工作流报 `tenant/user postgres.<ref> not found` | Supabase 项目状态（控制台或 `get_project`） | 不是连接串或密码错误：免费项目闲置会被暂停（INACTIVE）。恢复项目并等到 ACTIVE_HEALTHY 后，从试运行重来；不要改 `MIGRATION_DATABASE_URL` |
 | 多个规则出现 429/498/5xx 或 `PROVIDER_CIRCUIT_OPEN` | AI connection、service tier、批并发、熔断阈值、Provider 状态 | 暂停新批次并降低外层并发；遵守 Retry-After。401/403 先重认证连接；实例重启只清进程内 circuit，不代表故障已恢复 |
+| 材料报“评分规则执行失败”/`RULE_EXECUTION_FAILED`，重试后一模一样 | 工作台 `/api/scoring-runs/{run}/items?include_view=true` 里 `judgement_view.rules` 中 `outcome=invalid` 的规则；对照 `/api/rubrics/{id}/review-workspace` 的 `max_points` | 报错指向“规则执行失败、请看日志后重试”，2026-11-16 前的版本里真正原因常是**命中扣分合计超过该项满分**（`DEDUCTION_EXCEEDS_CRITERION_MAX`），不是模型或系统故障；判定被复用，所以重试结果不变。新版本扣到 0 为止，对这类论文点「重试失败项」即可出分、不调用模型。v2 的 `/api/v2/scoring-runs/{id}/rule-tasks` 对论文运行返回 404，别在那里找 |
 | 评分返回部分结果但总分/等级为空 | `RuleScoringTask` failed/review_required 与 open/claimed blocking `ManualReviewTask` | 这是 fail-closed 预期；由授权教师领取并依据冻结原文解决，不要用普通整体复核强行发布总分 |
 | 结果意外来自 Mock | `LLM_PROVIDER`、`LLM_FALLBACK_TO_MOCK`、集成状态 | 正式评估设 fallback=false；检查日志中的 provider identity，不要把 Mock 结果当质量证据 |
 | 缓存结果疑似陈旧 | `PROMPT_VERSION`、模型/采样/RubricVersion/anchor identity | 修复输入构造时 bump Core 与 cache 的 prompt 版本；不要只删除用户数据或扩大 cache key 复用 |
@@ -1338,6 +1339,10 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-16 | 评分助手选择卡片（#112 复审） | 无迁移、无新命令、提示词指纹不变（评测报告仍有效）；“按钮已失效”排错补上标准被下线或失去访问权限的情况与核对方法；新增一条排错（候选没有名称时回复被作废重写） |
+| 2026-11-16 | 评分助手选择卡片（提示词 @7） | 无迁移、无新环境变量；提示词升 `assistant-agent@7`（先在候选镜像上评测再合并）；契约版本升为 `2026-11-16.assistant-choice`；评测集 54 条；两条排错 |
+| 2026-11-16 | 评分助手等选文件时按名称或序号换评分标准 | 无迁移、无新环境变量、提示词指纹不变；评分助手排错新增一条（回序号说“没有找到”、点名的标准没换上） |
+| 2026-11-16 | 扣分合计超满分封底于 0 | 无迁移、无新环境变量；第 6 节新增一条排错（“评分规则执行失败”重试不变）；上线后对已失败的论文点「重试失败项」 |
 | 2026-11-15 | 分节摘要（阶段 3 的 PR A：生成与存储） | 迁移 `0046_document_derivations`（新表，已给 `pgs_app` 授权并建 RLS，降级直接删表）；新环境变量 `SCORING_SECTION_SUMMARY_CHAR_BUDGET`；新只读脚本 `estimate_section_summaries`；一条排错 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（#106 复审） | 无新命令；Langfuse 里 `input_tokens` 现在不含缓存命中部分（另见 `input_cached_tokens`），数据库与 `llm_call` 日志的 `prompt_tokens` 仍是全量；0045 降级在 Postgres 上先锁两张表 |
 | 2026-11-15 | 论文章节树与稳定前缀取证（阶段 1、2） | 迁移 `0045_cached_prompt_tokens`（先跑迁移工作流再部署，有非零观测时拒绝降级）；新环境变量 `SCORING_SCOPE_EVIDENCE_CHAR_BUDGET`、`SCORING_SCOPE_CONTEXT_WINDOW_TOKENS`、`SCORING_STABLE_PREFIX_ENABLED`（默认关）；`llm_call` 日志新增 `cached_tokens`；三条排错 |
@@ -2565,6 +2570,9 @@ DATABASE_URL=sqlite+pysqlite:////tmp/dev.db uv run python -m backend.app.scripts
 - **现象**（v2 上线后）：点确认卡片上的“换评分标准”或“重新选择文件”返回 422“恢复数据不合规”。
   - 报错指向：后端校验坏了。
   - 真正原因：页面是上线前打开的旧版本。v2 的确认只剩“开始评分 / 不评了”，换评分标准挪到选文件之前；契约版本已升为 `2026-10-29.assistant-v2`，旧页面在下一次写操作前会自动刷新，手动刷新也行。
+- **现象**：等选文件时老师说“换一份评分标准”，助手列出标准后老师回“2”，助手回“没有找到您说的评分标准”；或者老师说了标准名称，助手说“好的”，工作区的评分标准却没变。
+  - 报错指向：助手模型理解错了，或评分标准没有发布。
+  - 真正原因（2026-11-16 前）：两处代码。一是 `action_start_grading` 只按名称匹配，“2”被当成名称；编号 `r1` 只在一个回合内有效，下一句话用不上。二是 `runner._start_flow` 看到已在等选文件，只回“正在等你选择文件”，把老师点名的标准丢掉。现在序号按 `rubric_list` 的顺序（最新发布的在前）解析，等选文件时点名标准会走 `change_rubric`。两次之间若有新发布的标准，序号会错位一份，以工作区显示的标准为准。
 - **现象**：老师在确认那一步点了“不评了”，评分任务列表里多了一个“助手评分 · 月-日 时:分 · N 份”的草稿。
   - 报错指向：放弃没有生效。
   - 真正原因：v2 选完文件就建草稿任务并上传（这样确认时才看得到预检结果），放弃时任务留作草稿，回复里写了任务名。属预期行为，可在评分任务页归档。
@@ -3534,3 +3542,41 @@ python -m backend.app.scripts.estimate_section_summaries <document_snapshot_id>
   - 真正原因：迁移是在 `pgs_app` 角色还不存在的库上跑的（迁移里“角色不存在就跳过授权”），或者表是手工建的。授权不随表自动获得。用迁移工作流的 verify 步骤确认；缺的话以属主身份补 `GRANT SELECT, INSERT, UPDATE, DELETE` 并按 0046 建 RLS 策略。
 
 维护记录：2026-11-15 · 分节摘要（PR A）：记录迁移、一个环境变量、估算脚本与一条排错。
+
+### 2026-11-16 扣分合计超满分封底于 0
+
+方案见 `docs/扣分合计超满分封底方案.md`。无迁移、无环境变量、不调用模型。
+
+上线后：此前因扣分溢出失败的论文，在评分任务里点「重试失败项」。判定全部从账本复用，预期该项得 0 分、整篇出总分，这次运行的输出 token 为 0。
+
+排错：
+
+- **重试后仍报“评分规则判定无效（T03 的 manual.t03.deduct.8.v1 …）”**
+  - 报错指向：像是扣分溢出没修好。
+  - 真正原因：封底只处理多条累计溢出；剩下的判无效来自单条规则自身（配置越界、矩阵非法、确定性检查器输出不合格等）。按报错里的规则编码，在 `judgement_view.rules` 与评分标准里看这一条。
+- **评分项分数是 0，老师问为什么**
+  - 看评分项说明句末的“命中扣分合计 X 分，超过满分 Y 分，已扣至 0 分”，以及判定视图里标“扣分（已扣至 0 分）”的那条。这是“扣完为止”，不是故障。
+
+维护记录：2026-11-16 · 扣分合计超满分封底于 0：记录上线后的处理与两条排错。
+
+### 2026-11-16 评分助手选择卡片（提示词 @7）
+
+方案见 `docs/评分助手选择卡片方案.md`。无迁移、无环境变量。
+
+发布：
+1. 改了提示词（`assistant-agent@7`）与评测集（54 条），**合并前在候选镜像上评测**：`gh workflow run assistant-eval.yml --ref claude/assistant-choice-card -f candidate=true -f mode=estimate …`，估算报给维护者，同意后 `mode=run`。达标的报告提交进同一个 PR 再合并，否则部署会停在 “Check the assistant eval gate”。
+2. 契约版本升为 `2026-11-16.assistant-choice`：旧页面不认识 `choice` 卡片，会在下一次写操作前自动刷新。
+
+排错：
+
+- **点选择卡片上的按钮，回复“已失效”或“现在不能换”**
+  - 报错指向：按钮坏了。
+  - 真正原因：点击时后端按当前状态重新校验。换评分标准时文件已经上传（任务锁定了标准），或者这份标准在卡片打开后被下线、失去访问权限（不在已发布、可见的列表里）；选任务、选材料时对象已删除或无权访问。卡片标为已失效、不记“已选”，回复里写了原因；等待中的选文件保持原来的标准。核对：会话里选文件卡片的 `rubric_id` 没变，选择卡片 `status=expired` 且没有 `result`。
+- **模型的回复被作废重写，日志 `reply_retries=1`，修正提示是“候选……还没有名称”**
+  - 报错指向：模型不听话。
+  - 真正原因：`choose` 里放了只有编号、没有名称的对象（典型是焦点里的当前材料 `p0`，本回合没有工具返回它的名称）。按钮上不能只写编号，校验让模型先用工具查到名称再出卡片。
+- **用户打字回“2”，没有当作选了第 2 个，而是交给了模型**
+  - 报错指向：打字兜底没生效。
+  - 真正原因：兜底只看**上一条回复**里还没选的选择卡片；中间又说过别的话、或卡片已经选过，就不再当作选择。规则模式选材料时序号按上传顺序（按钮上写的“3. 张三”），不是按钮的位置。
+
+维护记录：2026-11-16 · 评分助手选择卡片：记录发布顺序与两条排错。

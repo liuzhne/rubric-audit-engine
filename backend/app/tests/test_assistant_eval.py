@@ -38,7 +38,7 @@ def _report_module():
 
 KNOWN_EXPECT = {"tools_all", "tools_any", "tools_none", "search", "cards_any", "outcome", "pending_unchanged",
                 "pending_after", "help_refs", "help_refs_none", "reply_mentions_any", "reply_advises_on",
-                "reply_count", "reply_not_asks"}
+                "reply_count", "reply_not_asks", "choice"}
 
 
 class RuleOfThumbModel:
@@ -56,8 +56,8 @@ class RuleOfThumbModel:
 
     def complete_with_tools(self, messages, tools, **options):
         self.calls += 1
-        state = max(index for index, message in enumerate(messages) if "【老师这句话】" in str(message.get("content")))
-        said = messages[state]["content"].split("【老师这句话】", 1)[1]
+        state = max(index for index, message in enumerate(messages) if "【用户这句话】" in str(message.get("content")))
+        said = messages[state]["content"].split("【用户这句话】", 1)[1]
         results = self._results(messages, state)
         got = {key for result in results for key in result}
         searched = any("tools" in result for result in results)
@@ -93,11 +93,28 @@ class RuleOfThumbModel:
                 return step(("task_list", {}))
             total = next(result["合计"] for result in results if "合计" in result)
             return reply("一共 %d 份，已评 %d 份，%d 份需要复核。" % (total["材料"], total["已评分"], total["需要复核"]))
+        # 选择卡片（@7）：要用户在几个对象里挑一个时用 reply 的 choose。
+        if "换成" in said:
+            return step(("action_start_grading", {"rubric_name": said.split("换成", 1)[1].strip()}))
+        if "其他评分标准" in said:
+            if not searched:
+                return step(("tool_search", {"query": "select:rubric_list"}))
+            if "rubrics" not in got:
+                return step(("call_tool", {"name": "rubric_list", "arguments_json": "{}"}))
+            rubrics = next(result["rubrics"] for result in results if "rubrics" in result)
+            return reply("换成哪一份？", choose={"purpose": "use_rubric", "refs": [item["ref"] for item in rubrics]})
+        if "那个任务" in said:
+            if "tasks" not in got:
+                return step(("task_list", {}))
+            tasks = next(result["tasks"] for result in results if "tasks" in result)
+            return reply("是哪个任务？", choose={"purpose": "focus_task", "refs": [task["ref"] for task in tasks]})
         choices = next((result["tasks"] for result in results if "tasks" in result and "提示" in result), None)
         if choices and "paper" not in got:
             task = next((task for task in choices if task["name"][-6:] in said), None)
             if task:
                 return step(("paper_result", {"task_ref": task["ref"], "ordinal": 2}))
+            if len(choices) > 1:
+                return reply("是哪个任务？", choose={"purpose": "focus_task", "refs": [task["ref"] for task in choices]})
         if any("提示" in result for result in results) and not any(
                 key in got for key in ("paper", "task", "entries", "rubrics", "需要复核的材料")):
             return reply("我需要你先说明是哪一个。")

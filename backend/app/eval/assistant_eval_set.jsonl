@@ -44,3 +44,11 @@
 {"id": "fb-03", "category": "修改建议", "setup": ["示例学生乙扣了哪些分"], "utterance": "我要的是修改论文的建议，不是改分", "expect": {"tools_all": ["paper_result"], "help_refs_none": ["score.edit"], "reply_advises_on": ["选题意义", "文献综述", "研究方法", "论文创新性", "论证与分析", "写作规范"]}}
 {"id": "cnt-01", "category": "数量与进度", "utterance": "现在已经评分了几篇论文？", "expect": {"tools_all": ["task_list"], "reply_not_asks": true, "reply_count": {"value": 2, "units": ["篇", "份"], "measure": ["已评", "评了", "评分了", "评完", "评过", "已经评", "已完成", "完成了"]}}}
 {"id": "cnt-02", "category": "数量与进度", "utterance": "一共有多少份需要人工复核", "expect": {"tools_any": ["task_list", "review_list"], "reply_count": {"value": 1, "units": ["份", "篇"], "measure": ["复核"]}}}
+{"id": "choose-01", "category": "请用户选择", "setup": ["开始评分"], "utterance": "选取其他评分标准", "expect": {"choice": {"purpose": "use_rubric"}, "pending_unchanged": true}}
+{"id": "choose-02", "category": "请用户选择", "setup": ["开始评分"], "utterance": "有哪些评分标准", "expect": {"tools_all": ["rubric_list"], "pending_unchanged": true}}
+{"id": "choose-03", "category": "请用户选择", "utterance": "用课程报告评分标准帮我评一下", "expect": {"outcome": "proposal", "tools_all": ["action_start_grading"], "choice": "forbidden", "pending_after": "pick_files"}}
+{"id": "choose-04", "category": "请用户选择", "setup": ["开始评分"], "utterance": "换成课程报告评分标准", "expect": {"outcome": "proposal", "tools_all": ["action_start_grading"], "choice": "forbidden", "pending_after": "pick_files"}}
+{"id": "choose-05", "category": "请用户选择", "utterance": "看一下那个任务的进度", "expect": {"choice": {"purpose": "focus_task"}}}
+{"id": "choose-06", "category": "请用户选择", "utterance": "现在有哪些评分任务", "expect": {"tools_all": ["task_list"], "choice": "forbidden", "search": "forbidden"}}
+{"id": "choose-07", "category": "请用户选择", "utterance": "示例学生乙为什么扣分", "expect": {"tools_all": ["paper_result"], "choice": "forbidden"}}
+{"id": "choose-08", "category": "请用户选择", "utterance": "第 2 份为什么扣分", "expect": {"choice": {"purpose": "focus_task"}}}

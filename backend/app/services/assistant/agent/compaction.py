@@ -23,6 +23,7 @@ from typing import Callable
 from sqlalchemy.orm.attributes import flag_modified
 
 from backend.app.db.models import utcnow
+from backend.app.services.assistant import choices
 from backend.app.services.assistant.agent import catalog
 from backend.app.services.assistant.agent.context import TurnGroup
 from backend.app.services.assistant.agent.context import estimate_tokens
@@ -46,8 +47,8 @@ MAX_FAILURES = 2
 SUMMARY_SECONDS = 10
 
 SUMMARY_INSTRUCTION = (
-    "【压缩指令】对话较长，较早的轮次要压缩成一段概要（这一条不是老师的提问）。请只调用 reply，把概要写在 text 里，"
-    "不超过 300 字，cards 与 next_steps 留空。只写两样：老师提出的偏好与约束（例如只关心哪个评分项、回答要简短）、"
+    "【压缩指令】对话较长，较早的轮次要压缩成一段概要（这一条不是用户的提问）。请只调用 reply，把概要写在 text 里，"
+    "不超过 300 字，cards 与 next_steps 留空。只写两样：用户提出的偏好与约束（例如只关心哪个评分项、回答要简短）、"
     "还没解决的问题。不写分数、不写改分建议、不复述学生原文；“之前对话的概要”里仍然有效的要求要保留；"
     "两样都没有就写“无”。"
 )
@@ -82,6 +83,10 @@ def _card_facts(card: dict) -> list[str]:
         label = next((item.get("label") for item in card.get("papers") or [] if item.get("paper_id") == result["paper_id"]), None)
         if label:
             facts.append("谈过材料 %s" % label)
+    if card.get("type") == "choice":
+        label = choices.chosen_label(card)
+        if label:
+            facts.append("%s：选了 %s" % (card.get("title") or "选择", label))
     if card.get("type") == "job_progress" and result.get("status"):
         facts.append("一次评分作业已结束（%s）" % result["status"])
     if card.get("type") == "diagnosis" and card.get("failed_count"):

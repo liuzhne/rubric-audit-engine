@@ -69,6 +69,8 @@ ALL_MEASURED_GATE = "每条都测到（没跳过，也没有被限流挡住）"
 REQUEST_REJECTED_CODES = frozenset({"invalid_request", "unprocessable_request"})
 _LEAK_MARKERS = ("assistant-agent@", "底线：", "怎么用工具：", "可以搜索的工具分组")
 EXTRA_BATCHES = ("2026 届毕业论文评分 · 计算机学院", "课程报告评分 · 软件工程导论", "实验报告评分 · 数据结构")
+#: 第二份已发布的评分标准：选择卡片的评测（换评分标准）要有两份可选（docs/评分助手选择卡片方案.md §7）。
+EXTRA_RUBRIC = ("课程报告评分标准", "v1.0", "general_document")
 #: 种子任务里的合成材料：(姓名, 状态, 各评分项的失分比例, 是否需要复核)。分数与理由都是编的，没有真实学生。
 SYNTHETIC_PAPERS = (
     ("示例学生甲", "scored", (0.1, 0.2, 0.1, 0.0, 0.1, 0.0), False),
@@ -189,6 +191,9 @@ def isolated_environment(scorer):
                 seed(session)
                 rubric = session.scalar(select(Rubric).where(Rubric.status == "published"))
                 _seed_scored_papers(session, rubric)
+                name, version, profile = EXTRA_RUBRIC
+                session.add(Rubric(name=name, version=version, status="published", business_profile_key=profile,
+                                   organization_id=rubric.organization_id, created_by=rubric.created_by))
                 for name in EXTRA_BATCHES:
                     session.add(GradingBatch(name=name, rubric_id=rubric.id, created_by=rubric.created_by,
                                              organization_id=rubric.organization_id))
@@ -327,8 +332,14 @@ def judge(item: dict, observed: dict) -> list[str]:
     if count and not _says_count(text, int(count["value"]), list(count["units"]), count.get("measure")):
         reasons.append("回复里没有给出正确的数量（%s %s%s）" % (
             count["value"], "/".join(count["units"]), "，与“%s”同一分句" % "/".join(count["measure"]) if count.get("measure") else ""))
+    choice = expect.get("choice")
+    offered = list(observed.get("choices") or [])
+    if choice == "forbidden" and offered:
+        reasons.append("不该让用户选，却出了选择卡片（%s）" % "、".join(offered))
+    elif isinstance(choice, dict) and choice.get("purpose") not in offered:
+        reasons.append("该出选择卡片（%s），却没有出" % choice.get("purpose"))
     if expect.get("reply_not_asks") and _ASKS_BACK.search(text):
-        reasons.append("该直接回答，却反问了老师")
+        reasons.append("该直接回答，却反问了用户")
     reasons.extend(observed["violations"])
     return reasons
 
@@ -431,6 +442,8 @@ def run_item(factory, item: dict, prices: dict) -> dict:
             "param_errors": int(meta.get("param_errors") or 0),
             "help_refs": list(meta.get("help_refs") or []),
             "card_types": [card.get("type") for message in replies for card in message.cards or []],
+            "choices": [card.get("purpose") for message in replies for card in message.cards or []
+                        if card.get("type") == "choice"],
             "pending_before": pending_before, "pending_after": pending_after,
             "violations": violations, "reply_text": text,
         }
@@ -443,7 +456,7 @@ def run_item(factory, item: dict, prices: dict) -> dict:
             **{key: observed[key] for key in ("mode", "outcome", "reason", "error_code", "tools_called", "searches",
                                               "model_calls",
                                               "text_replies", "thought_signatures", "param_errors", "help_refs",
-                                              "card_types")},
+                                              "card_types", "choices")},
         }
 
 

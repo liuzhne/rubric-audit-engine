@@ -38,3 +38,23 @@ it("“要放弃上一步吗”：两个按钮分别放弃并开始、继续上�
   await wrapper.setProps({ card: { ...card, status: "dismissed" } });
   expect(wrapper.text()).toBe("已继续上一步");
 });
+
+it("选择卡片：每个选项一个按钮，正在用的那个有标记；点了交给后端，选完只显示选了哪个", async () => {
+  const store = useAssistantStore();
+  store.select = vi.fn();
+  const card = {
+    id: "c1", type: "choice", status: "proposed", purpose: "use_rubric", title: "选择评分标准",
+    options: [{ id: "r-a", label: "《开题报告》v1.0（通用文档）", current: true }, { id: "r-b", label: "《毕业论文评分标准》v1.0（毕业论文）" }],
+  };
+  const wrapper = mount(AssistantCard, { props: { message: { id: "m1" }, card }, global: { plugins: [router()] } });
+  const buttons = wrapper.findAll("button");
+  expect(buttons.map((item) => item.text())).toEqual(["《开题报告》v1.0（通用文档）正在用", "《毕业论文评分标准》v1.0（毕业论文）"]);
+  await buttons[1].trigger("click");
+  expect(store.select).toHaveBeenCalledWith("c1", { id: "r-b" });
+
+  await wrapper.setProps({ card: { ...card, status: "done", result: { id: "r-b" } } });
+  expect(wrapper.findAll("button")).toHaveLength(0);
+  expect(wrapper.text()).toBe("已选：《毕业论文评分标准》v1.0（毕业论文）");
+  await wrapper.setProps({ card: { ...card, status: "expired" } });
+  expect(wrapper.text()).toBe("已失效");
+});

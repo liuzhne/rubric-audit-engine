@@ -216,7 +216,7 @@ def test_core_persistence_round_trips_m4_rule_audit_and_retry_is_idempotent():
             contribution["occurrence_id"]
             for contribution in stored_contributions
         } == set(occurrence_ids)
-        assert item.aggregation_schema_version == "criterion-aggregation@2"
+        assert item.aggregation_schema_version == "criterion-aggregation@3"
         aggregation_contributions = item.aggregation["contributions"]
         assert [
             contribution["occurrence_id"]

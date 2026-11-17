@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 
 from pydantic import BaseModel
@@ -46,7 +47,7 @@ TASK_REF_NOTE = "任务编号（来自 task_list 等工具的结果，或当前�
 #: 提议工具不替老师挑任务：重试、取消错了任务的代价比查询大（A1 第二轮评测：不填时用了最近的任务，答“没有可以重试的”）。
 ACTION_TASK_REF_NOTE = ("任务编号（来自 task_list 等工具的结果，或当前状态里的 t0）；不填就用 task_name 或当前任务；"
                         "都没有时按状态在最近的任务里找唯一的那个，不唯一给候选")
-ACTION_TASK_NAME_NOTE = "老师说的任务名（或其中一段，例如“课程报告评分”）；不知道编号时填它，会在最近的任务里按名称找"
+ACTION_TASK_NAME_NOTE = "用户说的任务名（或其中一段，例如“课程报告评分”）；不知道编号时填它，会在最近的任务里按名称找"
 REVIEW_TASK_REF_NOTE = ("任务编号（来自 task_list 等工具的结果，或当前状态里的 t0）；不填就用当前任务；"
                         "没有当前任务时在最近的任务里一起找")
 
@@ -233,10 +234,10 @@ def _help_lookup(turn: TurnContext, params: HelpParams) -> dict:
 register(AgentTool(
     name="help_lookup", group="help", title="帮助条目",
     purpose="查系统的用法：怎么开始评分、怎么导入评分标准、在哪复核和改分、失败了怎么办等",
-    when="老师问系统“怎么用”“在哪……”“是什么”“有什么区别”“……怎么办”时先查；不用于查询具体任务或材料的数据。"
-         "老师表达要做什么（如“帮我评一下”“我要用自己的模板”“失败的重试”“别评了”）时不要调本工具，直接调对应的 action_*；"
+    when="用户问系统“怎么用”“在哪……”“是什么”“有什么区别”“……怎么办”时先查；不用于查询具体任务或材料的数据。"
+         "用户表达要做什么（如“帮我评一下”“我要用自己的模板”“失败的重试”“别评了”）时不要调本工具，直接调对应的 action_*；"
          "问某一份论文怎么改（修改建议）用 paper_result",
-    params=HelpParams, param_notes={"topic": "老师问的是什么，用他的说法，例如“模板怎么上传”"},
+    params=HelpParams, param_notes={"topic": "用户问的是什么，用用户自己的说法，例如“模板怎么上传”"},
     returns="entries：[{ref, 标题, 内容}]，最多 3 条",
     kind="read", risk="low", resident=True,
     keywords=("帮助", "怎么用", "怎么上传", "在哪", "区别", "用法"),
@@ -274,7 +275,7 @@ def _task_list(turn: TurnContext, params: TaskListParams) -> dict:
         # 合计只算这次返回的任务（最近 limit 个）：老师问“一共”时要说清范围，更早的任务不在里面（#60 复审）。
         "合计": {"范围": "最近 %d 个任务" % len(tasks), "任务": len(tasks), **total} if tasks else {"任务": 0},
         "说明": "按创建时间倒序；合计只统计这次返回的任务，说“一共”时带上范围，更早的任务可以调大 limit 再查；"
-                "没有任务时为空列表。只有一个任务时直接用它，不必问老师是不是这个；"
+                "没有任务时为空列表。只有一个任务时直接用它，不必问用户是不是这个；"
                 "评分状态说的是评分作业，评完没有看“还没有评分结果”是不是 0；要看失分最多的评分项、最差的几份，用 task_overview。",
     }
 
@@ -282,7 +283,7 @@ def _task_list(turn: TurnContext, params: TaskListParams) -> dict:
 register(AgentTool(
     name="task_list", group="task", title="评分任务列表",
     purpose="列出当前组织最近的评分任务：名称、编号，以及每个任务的材料数、已评分、需要复核、评分状态与合计",
-    when="老师问有哪些任务、一共评了几篇、有几份要复核、要在几个任务里选一个时用；问某个任务的细节（失分最多的项、"
+    when="用户问有哪些任务、一共评了几篇、有几份要复核、要在几个任务里选一个时用；问某个任务的细节（失分最多的项、"
          "最差的几份）用 task_overview",
     params=TaskListParams, param_notes={"limit": "最多返回几个任务，默认 8，最多 20"},
     returns="tasks：[{ref, name, 材料, 已评分, 需要复核, 评分状态}]，最多 limit 个；合计",
@@ -332,7 +333,7 @@ def _task_overview(turn: TurnContext, params: TaskParams) -> dict:
     result["说明"] = "这里不给分数数字；要展示分数，把 task.ref 或材料的 ref 放进 reply 的 cards。"
     # 只有一个任务时不必提醒“不对的话先找任务”：没有别的可选，提醒只会让模型反问（§31.3）。
     if chose_latest and len(tools.call(turn.run, "list_recent_batches", limit=2)) > 1:
-        result["说明"] += "老师没有指定任务，用的是最近的一个；不对的话先用 task_list 找到任务再调用。"
+        result["说明"] += "用户没有指定任务，用的是最近的一个；不对的话先用 task_list 找到任务再调用。"
     turn.run.show_workspace(("/tasks/%s/run" if job and job["status"] in ACTIVE_JOB_STATUSES else "/batches/%s/grade") % batch_id)
     return result
 
@@ -340,7 +341,7 @@ def _task_overview(turn: TurnContext, params: TaskParams) -> dict:
 register(AgentTool(
     name="task_overview", group="task", title="评分任务概况",
     purpose="一个评分任务的进度、材料数、需要复核与没评完的数量、失分最多的评分项、总分最低的几份",
-    when="老师问某个任务评得怎么样、评完没有、哪个评分项丢分最多、哪几份最差时用；问某一份的细节用 paper_result",
+    when="用户问某个任务评得怎么样、评完没有、哪个评分项丢分最多、哪几份最差时用；问某一份的细节用 paper_result",
     params=TaskParams, param_notes={"task_ref": TASK_REF_NOTE},
     returns="task、材料计数、评分进度、失分从多到少的评分项（最多 5 个）、总分最低的材料（最多 3 份，带 ref）；不含分数数字",
     kind="read", risk="low", resident=True,
@@ -409,12 +410,12 @@ def _locate(turn: TurnContext, params: PaperParams):
 def _paper_result(turn: TurnContext, params: PaperParams) -> dict:
     located = _locate(turn, params)
     if located is None:
-        return {"提示": "没有当前任务：请先确定是哪个任务（task_ref），再按序号找。", "tasks": _task_choices(turn)}
+        return {"提示": "没有当前任务：先确定是哪个任务（task_ref）再按序号找；看不出是哪个，用 reply 的 choose（focus_task）请用户点选。", "tasks": _task_choices(turn)}
     if located[0] == "not_found":
-        return {"提示": "最近 %d 个任务里没有找到“%s”：请老师确认姓名、标题或文件名，或先指定任务。"
+        return {"提示": "最近 %d 个任务里没有找到“%s”：请用户确认姓名、标题或文件名，或先指定任务。"
                       % (SEARCH_TASKS, str(located[1])[:NAME_LIMIT]), "tasks": _task_choices(turn)}
     if located[0] == "candidates":
-        return {"提示": "几个任务里都有对应的材料：请老师选一份，或用 ref 再调用。", "候选": [
+        return {"提示": "几个任务里都有对应的材料：用 reply 的 choose（focus_paper）请用户点选一份，或用 ref 再调用。", "候选": [
             {**_paper_entry(turn, batch_id, paper, papers.index(paper) + 1, _profile(summary)), "任务": summary["batch_name"]}
             for batch_id, summary, papers, paper in located[1][:LIST_LIMIT]
         ]}
@@ -424,7 +425,7 @@ def _paper_result(turn: TurnContext, params: PaperParams) -> dict:
         return {"提示": "这个任务里还没有材料。"}
     if match is None:
         shown = candidates[:LIST_LIMIT]
-        result = {"提示": "没有唯一对应的材料：请老师选一份，或用候选里的 ref 再调用。",
+        result = {"提示": "没有唯一对应的材料：用 reply 的 choose（focus_paper）请用户点选一份，或用候选里的 ref 再调用。",
                   "候选": [_paper_entry(turn, batch_id, paper, papers.index(paper) + 1, profile) for paper in shown]}
         if len(candidates) > len(shown):
             result["还有"] = len(candidates) - len(shown)
@@ -464,7 +465,7 @@ def _paper_result(turn: TurnContext, params: PaperParams) -> dict:
         })
     return {"paper": entry, "评分项": items,
             "说明": "按失分从多到少排列，不给分数数字；要展示分数与证据，把 paper.ref 放进 reply 的 cards。"
-                    "老师问怎么改时，按评分项把扣分理由、评分理由（有修改建议就一并用）转成怎么改，不编造理由里没有的内容；"
+                    "用户问怎么改时，按评分项把扣分理由、评分理由（有修改建议就一并用）转成怎么改，不编造理由里没有的内容；"
                     "带“评分状态”的项没有评出结果，不给修改建议。"}
 
 
@@ -472,12 +473,12 @@ register(AgentTool(
     name="paper_result", group="paper", title="某一份的评分结果",
     purpose="定位一份材料（编号、序号或姓名、标题、文件名），给出各评分项是否满分、需不需要复核、扣分理由与证据条数；"
             "失分的项另有评分理由与修改建议，用来回答“怎么改”",
-    when="老师问第几份、某个学生、某个文件的得分情况、为什么扣分、怎么改（修改建议、怎么改进、怎么提高）时用；"
-         "按姓名找人不用先选任务（不填 task_ref 会在最近的任务里一起找）；不唯一时返回候选让老师选；分数本身由卡片显示",
+    when="用户问第几份、某个学生、某个文件的得分情况、为什么扣分、怎么改（修改建议、怎么改进、怎么提高）时用；"
+         "按姓名找人不用先选任务（不填 task_ref 会在最近的任务里一起找）；不唯一时返回候选让用户选；分数本身由卡片显示",
     params=PaperParams,
     param_notes={"task_ref": "任务编号（来自工具结果，或当前状态里的 t0）；按姓名找人时可以不填，会在最近的任务里一起找",
                  "paper_ref": "材料编号（来自工具结果，或当前状态里的 p0）",
-                 "ordinal": "第几份（按上传顺序，从 1 开始；要配合任务）", "name": "老师说的姓名、标题或文件名片段"},
+                 "ordinal": "第几份（按上传顺序，从 1 开始；要配合任务）", "name": "用户说的姓名、标题或文件名片段"},
     returns="paper{ref, 序号, 名称, 状态} 与评分项[{ref, 评分项, 满分, 需要复核, 扣分理由≤3, 证据条数, 失分项另有评分理由与修改建议}]；或候选列表",
     kind="read", risk="low", resident=True,
     keywords=("第几份", "得分", "扣分", "为什么", "某一份", "学生", "结果"),
@@ -508,7 +509,7 @@ def _review_across_tasks(turn: TurnContext) -> dict | str:
              "name": name, "需要复核的材料数": count}
             for batch_id, name, count in found
         ],
-        "说明": "老师没有指定任务：告诉他这几个任务各有几份需要复核，请他选一个；明细用 task_ref 再调用。",
+        "说明": "用户没有指定任务：告诉用户这几个任务各有几份需要复核，用 reply 的 choose（focus_task）请用户点选一个；明细用 task_ref 再调用。",
     }
 
 
@@ -546,7 +547,7 @@ def _review_list(turn: TurnContext, params: TaskParams) -> dict:
 register(AgentTool(
     name="review_list", group="review", title="需要人工复核的内容",
     purpose="列出一个任务里需要人工复核的材料，以及每份是哪几个评分项",
-    when="老师问哪些需要复核、哪些要人工确认时用（没说任务也可以，会在最近的任务里一起找）；复核本身在评分工作区完成",
+    when="用户问哪些需要复核、哪些要人工确认时用（没说任务也可以，会在最近的任务里一起找）；复核本身在评分工作区完成",
     params=TaskParams, param_notes={"task_ref": REVIEW_TASK_REF_NOTE},
     returns="task 与需要复核的材料[{ref, 序号, 名称, 需要复核的评分项}]，最多 10 份，附“还有”",
     kind="read", risk="low", resident=False,
@@ -566,11 +567,12 @@ def _rubric_list(turn: TurnContext, _params: RubricListParams) -> dict:
     rubrics = tools.call(turn.run, "list_published_rubrics")
     if not rubrics:
         # 空列表要明说：模型写了“已发布的评分标准有：”却没有可列的，冒号后面就是空的（11-05 生产）。
-        return {"rubrics": [], "提示": "目前没有已发布的评分标准：直接告诉老师没有，建议导入评分规则和模板（next_steps 用 import_rubric）。"}
+        return {"rubrics": [], "提示": "目前没有已发布的评分标准：直接告诉用户没有，建议导入评分规则和模板（next_steps 用 import_rubric）。"}
     shown = rubrics[:LIST_LIMIT]
     result = {
         "rubrics": [_rubric_entry(turn, item) for item in shown],
-        "说明": "已发布、工作台能评的评分标准，最新发布的在前。",
+        "说明": "已发布、工作台能评的评分标准，最新发布的在前。用户看不到 ref：要用户挑一份时用 reply 的 choose"
+                "（use_rubric）出按钮，不要自己列编号、不要写“用 r1”。",
     }
     if len(rubrics) > len(shown):
         result["还有"] = len(rubrics) - len(shown)
@@ -585,7 +587,7 @@ def _rubric_list(turn: TurnContext, _params: RubricListParams) -> dict:
 register(AgentTool(
     name="rubric_list", group="rubric", title="可用的评分标准",
     purpose="列出已发布、可以用来评分的评分标准（名称、版本、文档类型）",
-    when="老师问有哪些评分标准、用哪份标准评分时用；不用于查看某条规则的内容",
+    when="用户问有哪些评分标准、用哪份标准评分时用；不用于查看某条规则的内容",
     params=RubricListParams,
     returns="rubrics：[{ref, name, version, 文档类型}]，最多 10 个，附“还有”几个",
     kind="read", risk="low", resident=False,
@@ -619,29 +621,61 @@ def _action_start_grading(turn: TurnContext, params: StartGradingParams) -> dict
         flow["preset_rubric_id"] = turn.refs.resolve(params.rubric_ref, "r")
     elif (params.rubric_name or "").strip():
         # 老师点了评分标准的名字（或文档类型，如“通用文档”）：在已发布的里找，一步出卡片，不用先查 rubric_list。
-        needle = params.rubric_name.strip()
+        needle = _rubric_needle(params.rubric_name)
         rubrics = tools.call(turn.run, "list_published_rubrics")
-        hits = [item for item in rubrics
-                if needle in item["name"] or needle in document_type_label(item["business_profile_key"])]
+        ordinal = _ordinal(needle)
+        if ordinal is not None:
+            # 老师按上一条回复的序号回答（“2”“第二个”）：列表与 rubric_list 同序（最新发布的在前）。
+            # 以前把“2”当名称去找，回“没有找到”（11-16 生产）。
+            hits = [rubrics[ordinal - 1]] if 1 <= ordinal <= len(rubrics) else []
+        else:
+            hits = [item for item in rubrics
+                    if needle in item["name"] or needle in document_type_label(item["business_profile_key"])]
         if len(hits) == 1:
             flow["preset_rubric_id"] = hits[0]["id"]
         elif hits:
-            return {"提示": "符合“%s”的评分标准不止一份：请老师选一份，或用候选里的 ref 再调用。" % needle[:20],
-                    "候选": [_rubric_entry(turn, item) for item in hits[:LIST_LIMIT]]}
+            # 候选是筛过的子集：带上它在完整列表里的序号，用户打字回序号时按完整列表取才对得上（#111 复审）。
+            return {"提示": "符合“%s”的评分标准不止一份：用 reply 的 choose（use_rubric）请用户点选一份，或用候选里的 ref 再调用。" % needle[:20],
+                    "候选": [{**_rubric_entry(turn, item), "序号": rubrics.index(item) + 1}
+                             for item in hits[:LIST_LIMIT]]}
         else:
-            return {"提示": "已发布的评分标准里没有“%s”：请老师从下面选一份，或不指定（用最新发布的）。" % needle[:20],
+            return {"提示": "已发布的评分标准里没有“%s”：用 reply 的 choose（use_rubric）请用户从下面点选一份，或不指定（用最新发布的）。" % needle[:20],
                     "rubrics": [_rubric_entry(turn, item) for item in rubrics[:LIST_LIMIT]]}
-    return {"proposal": {"flow": flow, "text": "好的，开始评分。"}}
+    text = "好的，开始评分。"
+    if flow.get("preset_rubric_id") and (turn.run.conversation.pending or {}).get("kind") == "pick_files":
+        text = "好的，换评分标准。"  # 已经在等选文件：是换标准，不是再开一次评分
+    return {"proposal": {"flow": flow, "text": text}}
+
+
+_CHINESE_DIGITS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+_ORDINAL = re.compile(r"^第?([0-9]{1,3}|[一二两三四五六七八九十])(?:个|份|项|号|条)?$")
+
+
+def _rubric_needle(said: str) -> str:
+    """去掉“用”“《》”与句末语气：老师说“用2”“用《开题报告》”时只留名称或序号。"""
+
+    needle = said.strip().strip("。！!，,")
+    if needle.startswith("用") and len(needle) > 1:
+        needle = needle[1:]
+    return needle.strip("《》 ")
+
+
+def _ordinal(needle: str) -> int | None:
+    found = _ORDINAL.match(needle)
+    if not found:
+        return None
+    value = found.group(1)
+    return int(value) if value.isdigit() else _CHINESE_DIGITS[value]
 
 
 register(AgentTool(
     name="action_start_grading", group="action", title="开始评分（提议）",
-    purpose="在界面上弹出【选择待评分文件】卡片；老师选好文件后再弹出确认卡片核对评分标准，点了确认才建任务",
-    when="老师要评分、要评一批材料时直接调用（如“帮我评一下”“开始评分”）：即使还没选或上传文件、没说用哪份标准，"
-         "也直接调用——调用后界面才会弹出选文件卡片让老师上传；不要用 help_lookup 教老师怎么操作。只是问“怎么评分”时才用 help_lookup",
+    purpose="在界面上弹出【选择待评分文件】卡片；用户选好文件后再弹出确认卡片核对评分标准，点了确认才建任务",
+    when="用户要评分、要评一批材料时直接调用（如“帮我评一下”“开始评分”）：即使还没选或上传文件、没说用哪份标准，"
+         "也直接调用——调用后界面才会弹出选文件卡片让用户上传；不要用 help_lookup 教用户怎么操作。只是问“怎么评分”时才用 help_lookup",
     params=StartGradingParams,
-    param_notes={"rubric_ref": "老师指定的评分标准编号（来自 rubric_list）；不填用最新发布的",
-                 "rubric_name": "老师说的评分标准名称或文档类型（如“通用文档”）；不知道编号时填它，会在已发布的标准里找"},
+    param_notes={"rubric_ref": "用户指定的评分标准编号（来自 rubric_list）；不填用最新发布的",
+                 "rubric_name": "用户说的评分标准名称或文档类型（如“通用文档”）；不知道编号时填它，会在已发布的标准里找"},
     returns="进入流程，本回合结束",
     kind="proposal", risk="medium", resident=True,
     keywords=("开始评分", "评一下", "上传论文", "批改", "打分"),
@@ -660,8 +694,8 @@ def _action_import_rubric(_turn: TurnContext, _params: NoParams) -> dict:
 
 register(AgentTool(
     name="action_import_rubric", group="action", title="导入评分标准（提议）",
-    purpose="在界面上弹出【导入评分规则和模板】卡片；老师在卡片里上传、提交后在右侧核对并发布",
-    when="老师要用自己的评分规则或模板时直接调用（如“我要用自己的评分规则和模板来评”）：即使还没上传规则或模板文件，"
+    purpose="在界面上弹出【导入评分规则和模板】卡片；用户在卡片里上传、提交后在右侧核对并发布",
+    when="用户要用自己的评分规则或模板时直接调用（如“我要用自己的评分规则和模板来评”）：即使还没上传规则或模板文件，"
          "也直接调用——卡片里才能上传；只是问“怎么导入”时才用 help_lookup",
     params=NoParams, returns="进入流程，本回合结束",
     kind="proposal", risk="medium", resident=True,
@@ -677,8 +711,8 @@ class ActionTaskParams(BaseModel):
 
 
 def _needs_task(turn: TurnContext) -> dict:
-    return {"需要先确定任务": "老师没有说是哪个任务，也没有当前任务。老师的话里点了下面某个任务的名字，就带上它的 ref "
-                          "（或 task_name）直接再调用，不要再问；真的看不出是哪个，再问老师。",
+    return {"需要先确定任务": "用户没有说是哪个任务，也没有当前任务。用户的话里点了下面某个任务的名字，就带上它的 ref "
+                          "（或 task_name）直接再调用，不要再问；真的看不出是哪个，用 reply 的 choose（focus_task）请用户点选。",
             "tasks": _task_choices(turn)}
 
 
@@ -710,7 +744,7 @@ def _task_by_state(turn: TurnContext, wanted, many: str, none: str) -> str | dic
     if len(hits) == 1:
         return _choices(turn, hits)[0]["ref"]
     if hits:
-        return {"提示": "%s：请老师选一个，或用候选里的 ref 再调用。" % many, "候选": _choices(turn, hits)}
+        return {"提示": "%s：用 reply 的 choose（focus_task）请用户点选一个，或用候选里的 ref 再调用。" % many, "候选": _choices(turn, hits)}
     return {"提示": none}
 
 
@@ -727,7 +761,7 @@ def _action_task(turn: TurnContext, params: ActionTaskParams, wanted, many: str,
         if len(hits) == 1:
             return _choices(turn, hits)[0]["ref"]
         if hits:
-            return {"提示": "名称里有“%s”的任务不止一个：请老师选一个，或用候选里的 ref 再调用。" % needle[:20],
+            return {"提示": "名称里有“%s”的任务不止一个：用 reply 的 choose（focus_task）请用户点选一个，或用候选里的 ref 再调用。" % needle[:20],
                     "候选": _choices(turn, hits)}
         result = _needs_task(turn)
         result["提示"] = "最近的任务里没有名称里有“%s”的。" % needle[:20]
@@ -757,8 +791,8 @@ def _action_retry_failed(turn: TurnContext, params: ActionTaskParams) -> dict:
 
 register(AgentTool(
     name="action_retry_failed", group="action", title="重试失败项（提议）",
-    purpose="在界面上弹出【重试确认】卡片（写明任务名与份数），老师点了确认才重试失败、取消或中断的材料；已成功的结果保留",
-    when="老师要重试失败的、没评完的材料时直接调用；没说任务、也没有当前任务时，会在最近的任务里找唯一有失败项的那个；"
+    purpose="在界面上弹出【重试确认】卡片（写明任务名与份数），用户点了确认才重试失败、取消或中断的材料；已成功的结果保留",
+    when="用户要重试失败的、没评完的材料时直接调用；没说任务、也没有当前任务时，会在最近的任务里找唯一有失败项的那个；"
          "要重评某一个评分项时不用它",
     params=ActionTaskParams, param_notes={"task_ref": ACTION_TASK_REF_NOTE, "task_name": ACTION_TASK_NAME_NOTE},
     returns="确认卡片并结束本回合；没有可重试的项时返回提示",
@@ -788,8 +822,8 @@ def _action_cancel(turn: TurnContext, params: ActionTaskParams) -> dict:
 
 register(AgentTool(
     name="action_cancel", group="action", title="取消评分（提议）",
-    purpose="在界面上弹出【取消确认】卡片（写明任务名与进度），老师点了确认才取消剩余的评分；已完成的结果保留",
-    when="老师要停止、取消正在进行的评分时直接调用（如“先别评了”）；没说任务、也没有当前任务时，会在最近的任务里找唯一正在评分的那个",
+    purpose="在界面上弹出【取消确认】卡片（写明任务名与进度），用户点了确认才取消剩余的评分；已完成的结果保留",
+    when="用户要停止、取消正在进行的评分时直接调用（如“先别评了”）；没说任务、也没有当前任务时，会在最近的任务里找唯一正在评分的那个",
     params=ActionTaskParams, param_notes={"task_ref": ACTION_TASK_REF_NOTE, "task_name": ACTION_TASK_NAME_NOTE},
     returns="确认卡片并结束本回合；没有进行中的评分时返回提示",
     kind="proposal", risk="medium", resident=True,

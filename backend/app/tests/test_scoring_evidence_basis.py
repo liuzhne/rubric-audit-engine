@@ -571,3 +571,102 @@ def test_one_group_call_marks_every_tier_basis_with_its_group():
     bases = {code: _decision(result, code)["basis"] for code in ("T.1", "T.2", "T.3")}
     assert {basis["rationale"] for basis in bases.values()} == {"第二档最符合。"}
     assert len({basis["group_code"] for basis in bases.values()}) == 1
+
+
+# ── 扣到 0 为止（docs/扣分合计超满分封底方案.md）──────────────────────
+
+
+def test_floored_item_is_scored_and_explains_the_partial_and_zero_deductions():
+    rules = [
+        _deduct_rule(code="proposal.floor_a.v1", max_points="60"),
+        _deduct_rule(code="proposal.floor_b.v1", max_points="60"),
+        _deduct_rule(code="proposal.floor_c.v1", max_points="10"),
+    ]
+    criterion = _criterion(max_score="100")
+    request = _request_for(
+        *[(criterion, rule) for rule in rules],
+        dependency_order=[rule["rule_code"] for rule in rules],
+    )
+    responses = {
+        rule["rule_code"]: _semantic_response(
+            rule["rule_code"], occurrences=[_quote_occurrence(request, index)]
+        )
+        for index, rule in enumerate(rules)
+    }
+    outcome = _outcome(request, responses)
+    engine, db, run = _persist(request, outcome)
+    try:
+        item = run.items[0]
+        assert item.auto_score_status == "calculated"
+        assert item.final_score == 0
+        assert item.aggregation_schema_version == "criterion-aggregation@3"
+        assert item.aggregation["schema_version"] == "criterion-aggregation@3"
+        assert item.reason.endswith("命中扣分合计 130 分，超过满分 100 分，已扣至 0 分。")
+        assert not item.review_reasons
+        view = build_judgement_view(run, item, frozen=_frozen(request))
+    finally:
+        db.close()
+        engine.dispose()
+    rows = {row["rule_code"]: row for row in view["rules"]}
+    assert (rows["proposal.floor_a.v1"]["label"], rows["proposal.floor_a.v1"]["effect"]) == (
+        "扣分",
+        "扣 60 分",
+    )
+    assert (rows["proposal.floor_b.v1"]["label"], rows["proposal.floor_b.v1"]["effect"]) == (
+        "扣分（已扣至 0 分）",
+        "扣 40 分（原应扣 60 分）",
+    )
+    assert rows["proposal.floor_c.v1"]["outcome"] == "triggered"
+    assert rows["proposal.floor_c.v1"]["label"] == "命中（该项已扣至 0 分，未再扣分）"
+    assert "已达扣分上限" not in json.dumps(view, ensure_ascii=False)
+
+
+def test_item_reason_has_no_floor_note_when_deductions_fit():
+    rule = _deduct_rule(max_points="5")
+    request = _request_for((_criterion(), rule))
+    outcome = _outcome(
+        request,
+        {rule["rule_code"]: _semantic_response(
+            rule["rule_code"], occurrences=[_quote_occurrence(request)]
+        )},
+    )
+    engine, db, run = _persist(request, outcome)
+    try:
+        item = run.items[0]
+        assert item.final_score == 95
+        assert item.reason == "按 1 条规则判定：命中 1 条。"
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_old_invalid_item_does_not_claim_it_was_floored():
+    # 旧算法（@2）下扣分溢出会让整项判无效，命中的规则都没有入账；不能说成“已扣至 0 分”。
+    request = _request_for((_criterion(), _deduct_rule()))
+    item = SimpleNamespace(
+        rule_results=[
+            {
+                "rule_code": "legacy.overflow.v1",
+                "status": "triggered",
+                "direction": "deduct",
+                "occurrences": [{"occurrence_id": "a" * 64}],
+                "score_contributions": [],
+            }
+        ],
+        review_reasons=None,
+        auto_score_status="invalid",
+    )
+    view = build_judgement_view(
+        SimpleNamespace(),
+        item,
+        frozen=_frozen(request),
+        snapshots={
+            "legacy.overflow.v1": {
+                "name": "旧规则",
+                "direction": "deduct",
+                "max_points": "5",
+                "repeat_policy": "once",
+            }
+        },
+    )
+    assert view["rules"][0]["label"] == "命中（该项未计分）"

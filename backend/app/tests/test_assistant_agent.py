@@ -154,7 +154,7 @@ def test_agent_reply_with_a_task_card_and_metadata(client, agent):
     names = [tool["function"]["name"] for tool in first["tools"]]
     assert names[:3] == ["reply", "tool_search", "call_tool"] and "task_list" in names
     assert first["options"]["tool_choice"] == "required"
-    assert first["messages"][0]["role"] == "system" and "【老师这句话】" in first["messages"][-1]["content"]
+    assert first["messages"][0]["role"] == "system" and "【用户这句话】" in first["messages"][-1]["content"]
     tool_result = json.loads(second["messages"][-1]["content"])
     assert tool_result["tasks"][0]["ref"] == "t1" and "id" not in tool_result["tasks"][0]
 
@@ -640,6 +640,7 @@ PROMPT_FINGERPRINTS = {
     "assistant-agent@4": "73d487a9aecd82e2",
     "assistant-agent@5": "395a83d8d2f1856e",
     "assistant-agent@6": "0a800263cf46a736",
+    "assistant-agent@7": "319a88deb4647f7a",
 }
 
 
@@ -858,7 +859,7 @@ def test_an_unusable_model_answer_records_why(client, agent):
 ])
 def test_asking_in_words_instead_of_proposing_is_sent_back(text):
     found = claims.problem(text, TurnRefs())
-    assert found is not None and "不要用文字向老师反问确认" in found
+    assert found is not None and "不要用文字向用户反问确认" in found
 
 
 @pytest.mark.parametrize("text", [
@@ -882,7 +883,7 @@ def test_a_verbal_confirmation_turns_into_the_proposal_in_the_same_turn(client, 
     body = _say(client, conversation_id, "我要用自己的评分规则和模板来评")
     assert body["pending"]["kind"] == "create_import_session"
     fix = json.loads(model.requests[-1]["messages"][-1]["content"])
-    assert "不要用文字向老师反问确认" in fix["错误"]
+    assert "不要用文字向用户反问确认" in fix["错误"]
 
 
 def test_the_waiting_step_tells_the_model_not_to_reopen_the_flow():
