@@ -265,6 +265,54 @@ def test_rubric_and_item_refs_are_listed_and_cards_beyond_the_limit_are_named():
     assert agent_turn.attachments(refs, said) == ([], ["· 《毕业论文评分标准-V1》v1.0（毕业论文）"])
 
 
+def _named_tasks(*names):
+    refs = TurnRefs()
+    for index, name in enumerate(names, 1):
+        refs.name("t", "b%d" % index, name)
+        refs.add("t", "b%d" % index, card={"type": "overview", "batch_id": "b%d" % index})
+    return refs
+
+
+@pytest.mark.parametrize(("text", "shown"), [
+    # GLM-5.3 冒烟 task-04（2026-11-17）：编号写在简称前面，去掉编号。
+    ("t1 实验报告评分·数据结构和 t3 毕业论文评分·计算机学院还没开始。",
+     "实验报告评分·数据结构和毕业论文评分·计算机学院还没开始。"),
+    ("实验报告评分（t1）：还没开始。", "实验报告评分：还没开始。"),
+    ("t1：实验报告评分还没开始。", "实验报告评分还没开始。"),
+    ("t4（论文评分开发批次）已结束。", "论文评分开发批次已结束。"),
+    # 旁边没写名称：换成名称。
+    ("t1 还没开始，t2 正在评分。", "实验报告评分 · 数据结构还没开始，课程报告评分 · 软件工程导论正在评分。"),
+    # 几个编号共用一对括号：括号保留，编号逐个处理（#118 复审）。
+    ("请比较（t1、t2）。", "请比较（实验报告评分 · 数据结构、课程报告评分 · 软件工程导论）。"),
+    ("看这两个（t1、t2）：都还没开始。", "看这两个（实验报告评分 · 数据结构、课程报告评分 · 软件工程导论）：都还没开始。"),
+    # 不是本回合的编号、或连着字母数字的，不动。
+    ("看 a_b.docx、t9 与 t10x。", "看 a_b.docx、t9 与 t10x。"),
+])
+def test_refs_in_the_text_are_replaced_by_names(text, shown):
+    refs = _named_tasks("实验报告评分 · 数据结构", "课程报告评分 · 软件工程导论", "2026 届毕业论文评分 · 计算机学院",
+                        "2026 届论文评分开发批次")
+    assert validate_reply(json.dumps({"text": text}, ensure_ascii=False), refs, check_claims=False).text == shown
+
+
+def test_status_claims_are_checked_against_the_ref_not_the_shortened_name():
+    # t3 在评分中、t1 已完成：“t3 毕业论文评分已经完成”去掉编号后只剩简称，对不上任何名称；
+    # 核对必须按编号认出 t3，不能落到“没点名”的宽松核对上被 t1 的完成放过（#118 复审）。
+    refs = _named_tasks("实验报告评分 · 数据结构", "课程报告评分 · 软件工程导论", "2026 届毕业论文评分 · 计算机学院")
+    refs.saw_status("completed", "t", "b1")
+    refs.saw_status("scoring", "t", "b3")
+    with pytest.raises(ReplyInvalid):
+        validate_reply(json.dumps({"text": "t3 毕业论文评分已经完成。"}, ensure_ascii=False), refs)
+    found = validate_reply(json.dumps({"text": "t1 实验报告评分已经完成。"}, ensure_ascii=False), refs)
+    assert found.text == "实验报告评分已经完成。"
+
+
+def test_a_ref_in_the_text_without_a_name_is_rejected():
+    refs = TurnRefs()
+    refs.add("p", "paper-1")  # 没有名称可换
+    with pytest.raises(ReplyInvalid, match="不要写编号“p1”"):
+        validate_reply(json.dumps({"text": "p1 需要复核。"}, ensure_ascii=False), refs)
+
+
 def test_claims_are_checked_on_the_text_after_markers_are_stripped():
     # 只看原文时“已经**完成**”对不上“已经完成”，去掉记号后却原样显示（#78 复审）。
     for text in ("课程报告评分已经**完成**。", "课程报告评分已经`完成`。"):

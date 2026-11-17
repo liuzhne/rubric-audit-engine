@@ -7,6 +7,8 @@
   说自己做了写动作、说出了确认卡片却没有、说出工具没返回过的任务状态（`claims`，§14.1）；
   清理后的 `text` 以冒号结尾、后面却没有卡片、代码列表或帮助条目（§14.2）；
 - **去掉记号**：Markdown 的加粗、反引号、标题井号去掉，行首的 `*`、`+` 换成“·”，文字保留；
+- **编号换成名称**：用户看不到引用编号（t1、p2），`text` 里出现本回合登记过的编号时由代码处理——紧挨着名称的
+  去掉，否则换成名称；没有名称可换就整体作废（task-04，GLM-5.3 冒烟 2026-11-17）；
 - **单句丢弃**：含分数样式的数字、改分建议、链接、邮箱或 HTML 标签的句子去掉；
 - **超长截断**：`text` 最多 300 字。
 
@@ -94,6 +96,73 @@ _MARKUP = (
 )
 #: 以冒号结尾：后面本该有内容（“目前已发布的评分标准有：”）。
 _TRAILING_COLON = ("：", ":")
+
+
+#: 正文里的引用编号：前后不能连着字母数字（“a_b.docx”“t10x”“p1.5”不算），可带一层括号与后面的冒号。
+_REF_IN_TEXT = re.compile(
+    r"(?P<open>[（(\[【][ \t]*)?(?<![A-Za-z0-9_.\-])(?P<ref>[tpri][0-9]{1,3})(?![A-Za-z0-9_]|\.[0-9])"
+    r"(?P<close>[ \t]*[）)\]】])?(?P<colon>[ \t]*[:：])?[ \t]*")
+#: 判断编号旁边是不是已经写了名称：取紧挨着的几个字，看它是不是名称的一部分（模型常写简称）。
+_NAME_PROBE = 4
+_BRACKETED = re.compile(r"[（(]([^（）()\n]{1,60})[）)]")
+#: 名称两边的括号与引号：“t4（论文评分开发批次）”里名称在括号里。
+_QUOTES = "（）()“”「」《》\"'"
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
+def _beside_name(before: str, after: str, label: str) -> str | None:
+    """名称写在编号的哪一边："before"、"after"，都不是返回 None。"""
+
+    name = _squash(label)
+    if not name:
+        return None
+    probe = min(_NAME_PROBE, len(name))
+    tail = _squash(before).rstrip(_QUOTES)[-probe:]
+    head = _squash(after).lstrip(_QUOTES)[:probe]
+    if len(tail) == probe and tail in name:
+        return "before"
+    if len(head) == probe and head in name:
+        return "after"
+    return None
+
+
+def _replace_refs(text: str, refs: TurnRefs) -> str:
+    """把正文里的引用编号去掉或换成名称（用户看不到编号）。没登记过的编号不动：可能就是正文里的字。"""
+
+    pieces, last = [], 0
+    for found in _REF_IN_TEXT.finditer(text):
+        ref = found.group("ref")
+        if refs.object_of(ref) is None:
+            continue
+        # 括号只有半边：括号包的是更长的一段（“（t1、t2）”），括号原样保留，编号照常处理。
+        paired = bool(found.group("open")) and bool(found.group("close"))
+        keep_open = "" if paired else (found.group("open") or "")
+        keep_close = "" if paired else (found.group("close") or "")
+        label = refs.label_of(ref)
+        before, after = text[:found.start()].rstrip(" \t"), text[found.end():]
+        side = _beside_name(before, after, label) if label else None
+        if side:
+            # “实验报告评分（t1）：……”留下冒号；“t1：实验报告评分……”名称在后，冒号一起去掉。
+            core, colon = "", "：" if side == "before" and found.group("colon") else ""
+        elif label:
+            core, colon = ("（%s）" if paired else "%s") % label, "：" if found.group("colon") else ""
+        else:
+            raise ReplyInvalid("text 里不要写编号“%s”：用户看不到编号，直接写名称" % ref)
+        pieces.append(text[last:found.start()].rstrip(" \t"))
+        pieces.append(keep_open + core + keep_close + colon)
+        last = found.end()
+        # “t4（论文评分开发批次）”去掉编号后，名称不必再留在括号里。
+        unwrapped = _BRACKETED.match(text, last) if side == "after" else None
+        if unwrapped and _squash(unwrapped.group(1)) in _squash(label):
+            pieces.append(unwrapped.group(1))
+            last = unwrapped.end()
+    if not pieces:
+        return text
+    pieces.append(text[last:])
+    return "".join(pieces)
 
 
 def _strip_markup(text: str) -> str:
@@ -200,8 +269,9 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
         raise ReplyInvalid("参数不合格：%s" % exc.errors()[0]["msg"]) from exc
     # 注入检测与说法核对看去掉记号之后的文字：老师看到的是它。只看原文时，“评分已经**完成**”
     # 对不上“已经完成”，去掉记号后却原样显示（#78 复审）。
-    visible = _strip_markup(params.text)
-    if detect_injection(params.text) or detect_injection(visible):
+    stripped = _strip_markup(params.text)
+    visible = _replace_refs(stripped, refs)
+    if detect_injection(params.text) or detect_injection(stripped) or detect_injection(visible):
         raise ReplyInvalid("回复里出现了疑似提示注入的内容")
     if not allow_cards and (params.cards or params.next_steps or params.help_refs or params.choose):
         raise ReplyInvalid("这里只要文字，cards、next_steps、help_refs 与 choose 必须为空")
@@ -223,7 +293,9 @@ def validate_reply(arguments, refs: TurnRefs, *, allow_cards: bool = True, check
     choose = _validate_choose(params.choose, refs, cards, unavailable) if params.choose else None
     # 说法核对放在 choose 校验之后：合格的选择卡片会显示出来，“请在下面的卡片里选”就是成立的（#112 复审）。
     if check_claims:
-        problem = claims.problem(visible, refs, choosing=bool(choose))
+        # 核对看替换编号之前的文字：编号认得出是哪个对象；换掉之后只剩简称，可能对不上任何名称，
+        # 状态说法就落到“没点名”的宽松核对上（#118 复审：t3 在评分中，“t3 毕业论文评分已经完成”会被放过）。
+        problem = claims.problem(stripped, refs, choosing=bool(choose))
         if problem:
             raise ReplyInvalid(problem)
     if choose:
