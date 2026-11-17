@@ -17,8 +17,42 @@ MIN_RULES_COVERAGE = 0.9
 HEADER_SCAN_UNITS = 60
 
 
-def _trigger(code: str, message: str, unit_ids, details=None) -> dict:
-    return {"code": code, "message": message, "unit_ids": list(dict.fromkeys(unit_ids)), "details": details or {}}
+# 强信号：确定性解析之后仍然自相矛盾，导入时自动请模型识别结构（见
+# docs/评分表结构自动识别方案.md §4）。其余是弱信号，只提示、给手动入口。
+STRONG_CODES = frozenset({"E4", "E9", "E10", "E11"})
+
+
+def _trigger(code: str, message: str, unit_ids, details=None, *, strong: bool | None = None) -> dict:
+    return {"code": code, "message": message, "unit_ids": list(dict.fromkeys(unit_ids)), "details": details or {},
+            "strong": code in STRONG_CODES if strong is None else strong}
+
+
+def strong_triggers(triggers) -> list[dict]:
+    return [item for item in triggers or [] if item.get("strong")]
+
+
+def _is_number(unit) -> bool:
+    return unit.context.get("value_type") == "num"
+
+
+def _numeric_column(ledger: SourceLedger, unit_ids: list[str]) -> bool:
+    """数字占多数、且不是 1、2、3…… 连续编号的列，像是没认出来的分值列。"""
+
+    units = [ledger.unit(unit_id) for unit_id in dict.fromkeys(unit_ids) if ledger.has(unit_id)]
+    if not units:
+        return False
+    numbers = []
+    for unit in units:
+        if not _is_number(unit):
+            continue
+        try:
+            numbers.append(float(unit.text))
+        except ValueError:
+            continue
+    if len(numbers) * 2 < len(units):
+        return False
+    sequential = all(value.is_integer() for value in numbers) and numbers == [numbers[0] + i for i in range(len(numbers))]
+    return not sequential
 
 
 def header_not_found_trigger(ledger: SourceLedger) -> dict:
@@ -44,25 +78,37 @@ def detect_triggers(extraction: TableExtraction, ledger: SourceLedger, coverage:
     ]
     if wide:
         units = list(header_units)
+        numeric_columns = []
         for column in wide:
-            for row in extraction.records:
-                index = column["column"] - 1
-                if index < len(row.unit_ids) and row.unit_ids[index]:
-                    units.append(row.unit_ids[index])
+            index = column["column"] - 1
+            cells = [row.unit_ids[index] for row in extraction.records
+                     if index < len(row.unit_ids) and row.unit_ids[index]]
+            units.extend(cells)
+            if _numeric_column(ledger, cells):
+                numeric_columns.append(column["header"])
         triggers.append(
             _trigger("E3", "存在未识别用途但有内容的列：" + "、".join(c["header"] for c in wide), units,
-                     {"columns": [c["header"] for c in wide]})
+                     {"columns": [c["header"] for c in wide], "numeric_columns": numeric_columns},
+                     strong=bool(numeric_columns))
         )
 
     parsed_total = round(sum(row.criterion.max_score for row in extraction.records), 6)
-    declared = (extraction.total_row or {}).get("declared_total")
-    if declared is not None and abs(declared - parsed_total) > 1e-6:
-        units = [u for u in _row_units(ledger, extraction, extraction.total_row["row_number"]) if u]
+    declared_sources = []
+    if (extraction.total_row or {}).get("declared_total") is not None:
+        declared_sources.append(("合计行", extraction.total_row["declared_total"],
+                                 [u for u in _row_units(ledger, extraction, extraction.total_row["row_number"]) if u]))
+    if extraction.declared_total:
+        declared_sources.append(("表头声明的满分", extraction.declared_total["value"],
+                                 list(extraction.declared_total["unit_ids"])))
+    mismatch = next((item for item in declared_sources if abs(item[1] - parsed_total) > 1e-6), None)
+    if mismatch:
+        label, declared, units = mismatch
+        units = list(units)
         for item in extraction.dropped_rows:
             units.extend(item["unit_ids"])
         triggers.append(
-            _trigger("E4", f"评分项满分合计 {parsed_total:g} 与合计行 {declared:g} 不一致。", units,
-                     {"declared_total": declared, "parsed_total": parsed_total})
+            _trigger("E4", f"评分项满分合计 {parsed_total:g} 与{label} {declared:g} 不一致。", units,
+                     {"declared_total": declared, "parsed_total": parsed_total, "source": label})
         )
 
     data_rows = len(extraction.records) + len(extraction.dropped_rows)
@@ -91,7 +137,29 @@ def detect_triggers(extraction: TableExtraction, ledger: SourceLedger, coverage:
             _trigger("E8", "其他工作表中存在疑似评分规则：" + "、".join(sorted(ignored_titles)), suspicious,
                      {"sheets": sorted(ignored_titles)})
         )
+    score_column = extraction.mapping.get("max_score")
+    if score_column is not None:
+        shared: dict[str, list] = {}
+        for row in extraction.records:
+            if score_column < len(row.unit_ids) and row.unit_ids[score_column]:
+                shared.setdefault(row.unit_ids[score_column], []).append(row)
+        groups = [(unit_id, rows) for unit_id, rows in shared.items() if len(rows) > 1]
+        if groups:
+            triggers.append(
+                _trigger(
+                    "E11",
+                    "多个评分项共用同一个满分单元格，满分可能取成了上级指标的分值。",
+                    [unit_id for unit_id, _ in groups] + header_units,
+                    {"criterion_codes": [row.criterion.code for _, rows in groups for row in rows]},
+                )
+            )
     for issue in extraction.structure_issues:
+        if issue.get("code") == "DUPLICATE_SCORE_COLUMN":
+            triggers.append(
+                _trigger("E10", "表头有多列像满分列：" + issue.get("reason", ""), issue.get("unit_ids") or [],
+                         {"columns": list(issue.get("columns") or []), "reason": issue.get("reason")})
+            )
+            continue
         if issue.get("code") != "MERGED_NAME_AMBIGUOUS":
             continue
         triggers.append(

@@ -138,3 +138,65 @@ def test_merged_name_does_not_overwrite_existing_dimension_mapping():
     assert {row.criterion.dimension for row in result.records} == {"专业能力"}
     assert result.structure_issues[0]["code"] == "MERGED_NAME_AMBIGUOUS"
     assert result.structure_issues[0]["reason"] == "已经存在维度列，无法自动重新解释合并名称列。"
+
+
+def test_duplicate_score_headers_pick_item_column_and_parent_dimension():
+    result, ledger = _extract(fx.two_level_score_xlsx())
+    rows = [(row.criterion.name, row.criterion.max_score, row.criterion.dimension) for row in result.records]
+    assert rows == [
+        ("封面信息", 4.0, "一、基本信息"), ("填写规范", 2.0, "一、基本信息"), ("论文题目", 4.0, "一、基本信息"),
+        ("选题背景", 8.0, "二、选题背景"), ("研究目的", 7.0, "二、选题背景"),
+    ]
+    assert result.mapping["max_score"] == 4 and result.mapping["dimension"] == 1
+    assert result.dimension_score_columns == [2]
+    assert result.structure_issues == []
+    # 带括号说明的合计行不是评分项，它声明的满分进入核对
+    assert result.total_row == {"row_number": 10, "declared_total": 25.0}
+    assert result.declared_total["value"] == 25.0
+    # “打分规则（分档 / 扣分）”是规则正文，不拆成档位
+    first = result.records[0].criterion
+    assert first.description == "六项齐全；每缺1项扣1分，扣完为止。"
+    assert first.rubric_levels == [] and first.scoring_mode == "llm_direct"
+    assert ledger.status("xlsx:评分表!R5C3").status == "structural"
+    assert 3 not in [column["column"] for column in result.unmapped_columns]
+
+
+def test_duplicate_score_headers_with_wrong_parent_sum_are_reported():
+    result, _ = _extract(fx.two_level_score_xlsx(parent_scores=(12, 15)))
+    # 仍按每行独立的列解析，但记一条结构问题交给模型核对
+    assert [row.criterion.max_score for row in result.records] == [4.0, 2.0, 4.0, 8.0, 7.0]
+    assert [issue["code"] for issue in result.structure_issues] == ["DUPLICATE_SCORE_COLUMN"]
+
+
+@pytest.mark.parametrize("label,is_total", [
+    ("合计", True), ("合计（满分 100 分）", True), ("总分：100", True), ("总计 ", True),
+    ("总计划安排", False), ("总分析", False), ("综合合计", False),
+])
+def test_total_name_prefix(label, is_total):
+    from backend.app.services.rubric_import.extraction.table_extractor import is_total_name
+
+    assert is_total_name(label) is is_total
+
+
+def test_band_header_matched_by_containment_falls_back_to_description_for_prose():
+    workbook = Workbook()
+    workbook.active.append(["评分项", "分值", "分档与扣分"])
+    workbook.active.append(["格式", 5, "每类不符扣1分，扣完为止。"])
+    workbook.active.append(["文字", 3, "错别字每处扣0.5分，超过10处扣3分。"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    result, _ = _extract(buffer.getvalue())
+    assert "rubric_levels" not in result.mapping
+    assert [row.criterion.description for row in result.records] == [
+        "每类不符扣1分，扣完为止。", "错别字每处扣0.5分，超过10处扣3分。"]
+
+
+def test_band_header_with_tidy_levels_stays_levels():
+    workbook = Workbook()
+    workbook.active.append(["评分项", "分值", "分档"])
+    workbook.active.append(["选题", 10, "优:10 良:8 中:6"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    result, _ = _extract(buffer.getvalue())
+    assert result.records[0].criterion.rubric_levels == [
+        {"label": "优", "points": 10.0}, {"label": "良", "points": 8.0}, {"label": "中", "points": 6.0}]

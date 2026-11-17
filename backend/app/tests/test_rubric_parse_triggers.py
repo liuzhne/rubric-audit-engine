@@ -44,7 +44,8 @@ def test_complex_table_triggers_unmapped_column_total_mismatch_low_coverage_and_
 
 def test_total_mismatch_triggers_e4():
     triggers = _triggers(_book([["评分项", "分值"], ["选题", 10], ["写作", 20], ["合计", 40]]))
-    assert triggers["E4"]["details"] == {"declared_total": 40.0, "parsed_total": 30.0}
+    assert triggers["E4"]["details"] == {"declared_total": 40.0, "parsed_total": 30.0, "source": "合计行"}
+    assert triggers["E4"]["strong"] is True
 
 
 def test_dropped_row_ratio_triggers_e5():
@@ -82,3 +83,40 @@ def test_merged_parent_without_stable_item_labels_triggers_e9():
     assert "E9" in triggers
     assert triggers["E9"]["unit_ids"] == ["xlsx:Sheet!R2C2"]
     assert triggers["E9"]["details"]["criterion_codes"] == ["T02", "T03", "T04", "T05"]
+
+
+def test_two_level_table_after_fix_has_no_strong_trigger():
+    triggers = _triggers(fx.two_level_score_xlsx())
+    assert not [code for code, item in triggers.items() if item["strong"]]
+    # 序号列是连续编号，不算像分值的列
+    assert "序号" not in (triggers.get("E3") or {"details": {}})["details"].get("numeric_columns", [])
+
+
+def test_wrong_parent_sum_triggers_e10():
+    triggers = _triggers(fx.two_level_score_xlsx(parent_scores=(12, 15)))
+    assert triggers["E10"]["strong"] is True
+    assert triggers["E10"]["details"]["columns"] == [3, 5]
+
+
+def test_header_declared_total_mismatch_triggers_e4():
+    triggers = _triggers(fx.two_level_score_xlsx(total_label="合计"))
+    assert "E4" not in triggers
+    book = _book([["本表满分 100 分"], ["评分项", "分值"], ["选题", 10], ["写作", 20]])
+    triggers = _triggers(book)
+    assert triggers["E4"]["details"] == {"declared_total": 100.0, "parsed_total": 30.0, "source": "表头声明的满分"}
+
+
+def test_shared_score_cell_triggers_e11_and_numeric_unmapped_column_is_strong():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["评分项", "分值", "参考分"])
+    sheet.append(["选题", 10, 6])
+    sheet.append(["写作", None, 4])
+    sheet.merge_cells("B2:B3")
+    buffer = BytesIO()
+    workbook.save(buffer)
+    triggers = _triggers(buffer.getvalue())
+    assert triggers["E11"]["strong"] is True
+    assert triggers["E11"]["details"]["criterion_codes"] == ["C01", "C02"]
+    assert triggers["E3"]["details"]["numeric_columns"] == ["参考分"]
+    assert triggers["E3"]["strong"] is True
