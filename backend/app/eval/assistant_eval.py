@@ -60,6 +60,8 @@ MODEL_PRICES = {
     ("google", "gemini-2.5-flash"): {"input": 0.30, "cached": 0.03, "output": 2.50},
     ("open.bigmodel.cn", "glm-5.3"): {"input": round(8 / CNY_PER_USD, 4), "cached": round(2 / CNY_PER_USD, 4),
                                       "output": round(28 / CNY_PER_USD, 4), "output_per_call": 1500},
+    # 官方价目页（同上日期核对）：GLM-4.7-Flash 输入、输出、缓存全部免费。免费档同时请求数只有 1，评测是串行的。
+    ("open.bigmodel.cn", "glm-4.7-flash"): {"input": 0.0, "cached": 0.0, "output": 0.0, "output_per_call": 1500},
 }
 #: 估算用：每条说法平均几次模型调用、每次输出多少 token、工具结果与状态多少 token。
 ESTIMATE_CALLS_PER_ITEM = 3.0

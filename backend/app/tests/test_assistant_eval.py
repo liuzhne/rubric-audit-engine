@@ -305,6 +305,7 @@ VERTEX = "https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpo
     ("glm-5.3", "https://open.bigmodel.cn/api/paas/v4", True),
     ("glm-5.3", "https://gw.example.test/v1", False),
     ("glm-5.2", "https://open.bigmodel.cn/api/paas/v4", False),
+    ("glm-4.7-flash", "https://open.bigmodel.cn/api/paas/v4", True),
 ])
 def test_prices_are_looked_up_per_model_and_unknown_models_have_none(model_name, base_url, known):
     assert (assistant_eval.prices_for(model_name, base_url) is not None) == known
