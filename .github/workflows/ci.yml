@@ -131,7 +131,8 @@ jobs:
             0043_batch_owner_isolation \
             0044_atomic_rule_scope \
             0045_cached_prompt_tokens \
-            0046_document_derivations
+            0046_document_derivations \
+            0047_model_capability_overrides
           do
             uv run alembic upgrade "$revision" 2>&1 | tee -a pgs_ops_artifacts/postgres-migrations.log
           done
@@ -685,6 +686,8 @@ jobs:
           ASSISTANT_AGENT_ENABLED: ${{ vars.ASSISTANT_AGENT_ENABLED }}
           # 评分助手的过程流式（docs/评分助手过程流式方案.md）；没设即关闭，在实例上核实推送不被攒住后再设。
           ASSISTANT_STREAM_ENABLED: ${{ vars.ASSISTANT_STREAM_ENABLED }}
+          # 评分助手模型优先识别意图（docs/评分助手意图识别模型优先方案.md）；没设即开启，设为 false 回滚。
+          ASSISTANT_INTENT_MODEL_FIRST: ${{ vars.ASSISTANT_INTENT_MODEL_FIRST }}
           # 论文评分第二阶段（docs/论文评分第二阶段改造方案.md）；没设即取默认值，QWK 评测后再设。
           SCORING_TOKEN_BUDGET_TARGET: ${{ vars.SCORING_TOKEN_BUDGET_TARGET }}
           SCORING_JUDGE_SCOPE_ENABLED: ${{ vars.SCORING_JUDGE_SCOPE_ENABLED }}

@@ -425,6 +425,10 @@ def resolve_connection_runtime(
         raise ValueError("AI connection is disabled")
     if connection.status != "active" and not (allow_disabled and connection.status == "disabled"):
         raise ValueError("AI connection is unavailable")
+    # 建适配器之前刷新管理员登记的模型能力（最多每 30 秒读一次库）：适配器构造时就按能力表算好思考计划。
+    from backend.app.services.llm import capability_overrides
+
+    capability_overrides.refresh_if_stale(db)
     return ConnectionRuntime(
         connection_id=connection.id,
         key_version=connection.key_version,
@@ -554,7 +558,66 @@ def verify_connection_runtime(runtime: ConnectionRuntime) -> dict[str, str]:
         # customer or key-adjacent diagnostics and must never leave this layer.
         _log_test_failure(runtime, base_url, status=None, error_type=type(exc).__name__)
         raise ValueError("AI connection test failed") from exc
-    return {"provider_type": runtime.provider_type, "model_name": runtime.model_name}
+    return {
+        "provider_type": runtime.provider_type,
+        "model_name": runtime.model_name,
+        **thinking_observation(runtime.provider_type, base_url, runtime.model_name, response),
+    }
+
+
+#: 连接协议 → 能力表协议。
+_CAPABILITY_PROTOCOL = {"openai_compatible": "chat", "openai_responses": "responses", MESSAGES: "messages"}
+
+
+def _reasoning_seen(provider_type: str, data) -> bool | None:
+    """探测应答里有没有思考迹象；读不出来时为 None。只看计数与字段是否存在，不读正文。"""
+
+    if not isinstance(data, dict):
+        return None
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    if provider_type == "openai_responses":
+        details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
+        if details.get("reasoning_tokens"):
+            return True
+        # usage 可以缺省或为 null，思考仍以 reasoning 条目出现在 output 里（#115 复审）。只看类型，不读正文。
+        items = data.get("output") if isinstance(data.get("output"), list) else []
+        return any(isinstance(item, dict) and item.get("type") == "reasoning" for item in items)
+    if provider_type == MESSAGES:
+        blocks = data.get("content") if isinstance(data.get("content"), list) else []
+        return any(isinstance(block, dict) and block.get("type") in {"thinking", "redacted_thinking"}
+                   for block in blocks)
+    details = (usage.get("completion_tokens_details")
+               if isinstance(usage.get("completion_tokens_details"), dict) else {})
+    if details.get("reasoning_tokens"):
+        return True
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    message = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
+    if isinstance(message, dict):
+        return bool(message.get("reasoning_content") or message.get("reasoning"))
+    return None
+
+
+def thinking_observation(provider_type: str, base_url: str, model_name: str, response) -> dict:
+    """连接测试顺带报告的思考情况（docs/模型管理页与评分思考修正方案.md 3.1）。
+
+    ``thinking``：探测应答里观测到思考（observed / not_observed / unknown）。探测请求不带思考参数，
+    能关闭的模型这里也可能在思考，所以要和 ``thinking_capability`` 一起看：
+    ``forced`` 表里记着关不掉（评分按最低强度发）、``can_disable`` 能关、``unknown`` 表里没有。
+    """
+
+    from backend.app.services.llm import thinking_capabilities as thinking
+
+    try:
+        seen = _reasoning_seen(provider_type, response.json())
+    except Exception:  # noqa: BLE001 - 读不出应答只是不报告，不让测试失败
+        seen = None
+    protocol = _CAPABILITY_PROTOCOL.get(provider_type)
+    capability = thinking.lookup(protocol, base_url, model_name) if protocol else None
+    return {
+        "thinking": "unknown" if seen is None else ("observed" if seen else "not_observed"),
+        "thinking_capability": ("unknown" if capability is None
+                                else ("can_disable" if capability.can_disable else "forced")),
+    }
 
 
 def _chat_schema_probe_fields(runtime: ConnectionRuntime, base_url: str) -> dict:

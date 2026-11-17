@@ -20,7 +20,7 @@ from backend.app.tests.test_assistant_agent import rate_limited_error
 from backend.app.tests.test_assistant_agent import reply
 from backend.app.tests.test_assistant_agent import step
 
-FLASH = assistant_eval.MODEL_PRICES["gemini-2.5-flash"]
+FLASH = assistant_eval.MODEL_PRICES[("google", "gemini-2.5-flash")]
 
 
 def project_provider_error_code(exc: ProviderCallError) -> str:
@@ -301,6 +301,11 @@ VERTEX = "https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpo
     ("anthropic.claude-opus-5", "https://bedrock-runtime.ap-southeast-1.amazonaws.com", False),
     # 名字像 Gemini、端点不是 Google 的：价目对不上，同样不认。
     ("gemini-2.5-flash", "https://api.example.test/v1", False),
+    # 智谱：按人民币价换算登记；同名模型换了端点（自建网关）不认。
+    ("glm-5.3", "https://open.bigmodel.cn/api/paas/v4", True),
+    ("glm-5.3", "https://gw.example.test/v1", False),
+    ("glm-5.2", "https://open.bigmodel.cn/api/paas/v4", False),
+    ("glm-4.7-flash", "https://open.bigmodel.cn/api/paas/v4", True),
 ])
 def test_prices_are_looked_up_per_model_and_unknown_models_have_none(model_name, base_url, known):
     assert (assistant_eval.prices_for(model_name, base_url) is not None) == known
@@ -669,3 +674,14 @@ def test_judge_reads_advice_and_counts_strictly(expect, text, passes):
     observed = {"mode": "agent", "outcome": "reply", "tools_called": [], "searches": 0, "card_types": [],
                 "pending_before": None, "pending_after": None, "violations": [], "help_refs": [], "reply_text": text}
     assert (assistant_eval.judge({"expect": expect}, observed) == []) is passes
+
+
+def test_thinking_model_estimate_counts_reasoning_output():
+    """GLM-5.3 关不掉思考：估算按每次 1500 token 输出算，不能沿用不思考模型的 150。"""
+
+    glm = assistant_eval.prices_for("glm-5.3", "https://open.bigmodel.cn/api/paas/v4")
+    items = [{"id": "x"}] * 10
+    assert assistant_eval.estimate(items, glm)["completion_tokens"] == int(10 * assistant_eval.ESTIMATE_CALLS_PER_ITEM * 1500)
+    assert glm["output"] == round(28 / assistant_eval.CNY_PER_USD, 4)
+    assert assistant_eval.estimate(items, FLASH)["completion_tokens"] == int(
+        10 * assistant_eval.ESTIMATE_CALLS_PER_ITEM * assistant_eval.ESTIMATE_OUTPUT_PER_CALL)

@@ -67,7 +67,7 @@ class Capture:
 
     def scorer(self, base_url=BEDROCK, **kwargs):
         return AnthropicMessagesScorer(
-            api_key=KEY, base_url=base_url, model_name="anthropic.claude-opus-5-5",
+            api_key=KEY, base_url=base_url, model_name=kwargs.pop("model_name", "anthropic.claude-opus-5-5"),
             client=httpx.Client(transport=httpx.MockTransport(self)), **kwargs,
         )
 
@@ -257,8 +257,10 @@ def test_usage_counts_cached_input_as_prompt_tokens():
 
 
 def test_identity_records_what_is_sent():
-    plain = Capture(_message("{}")).scorer()
-    tuned = Capture(_message("{}")).scorer(top_p=0.8, thinking_type="disabled", effort="low", max_tokens=900)
+    # 用能关闭思考的模型：关不掉的模型评分也按能力表（见下面的 forced 断言）。
+    plain = Capture(_message("{}")).scorer(model_name="anthropic.claude-sonnet-5-5")
+    tuned = Capture(_message("{}")).scorer(model_name="anthropic.claude-sonnet-5-5", top_p=0.8,
+                                           thinking_type="disabled", effort="low", max_tokens=900)
 
     plain_identity = core_runtime_provider_contract(plain, artifact_hash="a" * 64)
     tuned_identity = core_runtime_provider_contract(tuned, artifact_hash="a" * 64)
@@ -276,6 +278,10 @@ def test_identity_records_what_is_sent():
     identity = core_runtime_provider_contract(structured, artifact_hash="a" * 64)
     assert identity["response_format"] == "json_schema"
     assert identity["thinking"] == {"enabled": True, "type": "adaptive"}
+    # 表里记着关不掉思考的 Opus 5.5：没配置时评分身份如实记开启、上限放开。
+    forced = core_runtime_provider_contract(Capture(_message("{}")).scorer(), artifact_hash="a" * 64)
+    assert forced["thinking"]["enabled"] is True
+    assert forced["model_version"].endswith(";max_tokens=32768")
 
 
 def test_profiles_freeze_the_claude_connection_controls():
@@ -307,16 +313,22 @@ def test_core_rule_sends_exactly_the_provider_view(base_url):
         assert "output_config" not in capture.payload
 
 
-def test_a_legacy_envelope_built_for_other_controls_is_rejected_before_network():
+@pytest.mark.parametrize("model_name, mismatch", [
+    # 能关闭思考：两边身份相同，差在采样参数（max_tokens）。
+    ("anthropic.claude-sonnet-5-5", "sampling"),
+    # 关不掉思考、只配强度：评分按能力表放开上限，max_tokens 先进了身份（#115 复审），身份先对不上。
+    ("anthropic.claude-opus-5-5", "model_version"),
+])
+def test_a_legacy_envelope_built_for_other_controls_is_rejected_before_network(model_name, mismatch):
     capture = Capture(_message("{}"))
-    scorer = capture.scorer(effort="low")
-    other = Capture(_message("{}")).scorer(effort="low", max_tokens=777)
+    scorer = capture.scorer(effort="low", model_name=model_name)
+    other = Capture(_message("{}")).scorer(effort="low", max_tokens=777, model_name=model_name)
     envelope = other.build_prompt_envelope(
         type("Paper", (), {"title": "T"})(), type("C", (), {"code": "C1", "name": "N", "max_score": 5})(),
         [{"text": "正文", "location": "1"}], [], {"criteria": []}, {}, None,
     )
 
-    with pytest.raises(ValueError, match="sampling"):
+    with pytest.raises(ValueError, match=mismatch):
         scorer.score_envelope(envelope)
     assert capture.requests == []
 
@@ -451,7 +463,8 @@ def test_connection_test_sends_the_same_controls_as_scoring(base_url, has_format
 
     result = verify_connection_runtime(_runtime(base_url, effort="low", thinking_type="adaptive", temperature=0.4))
 
-    assert result == {"provider_type": "anthropic_messages", "model_name": "anthropic.claude-opus-5-5"}
+    assert result == {"provider_type": "anthropic_messages", "model_name": "anthropic.claude-opus-5-5",
+                      "thinking": "not_observed", "thinking_capability": "forced"}
     url, payload, headers = client.calls[0]
     assert url == base_url + "/messages"
     assert headers == {"x-api-key": KEY, "anthropic-version": "2023-06-01"}

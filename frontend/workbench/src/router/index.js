@@ -113,6 +113,12 @@ const routes = [
         component: () => import("@/views/OpsView.vue"),
         meta: { title: "运维", nav: "ops" },
       },
+      {
+        path: "ops/models",
+        name: "models",
+        component: () => import("@/views/ModelsView.vue"),
+        meta: { title: "模型管理", nav: "models" },
+      },
     ],
   },
   {

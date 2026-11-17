@@ -1813,3 +1813,30 @@ def test_0045_refuses_to_downgrade_with_observations(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="ai_usage_ledger"):
         command.downgrade(config, "0044_atomic_rule_scope")
+
+
+def test_0047_creates_model_capability_overrides_and_refuses_downgrade_with_rows(monkeypatch, tmp_path):
+    """管理员登记的模型能力会改变模型的调用方式：有记录时拒绝降级，空表可以降级。"""
+    url = "sqlite+pysqlite:///%s" % (tmp_path / "model-capabilities.db")
+    monkeypatch.setattr(settings, "DATABASE_URL", url)
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    command.upgrade(config, "0047_model_capability_overrides")
+    engine = create_engine(url)
+    try:
+        assert "model_capability_overrides" in set(inspect(engine).get_table_names())
+        command.downgrade(config, "0046_document_derivations")
+        assert "model_capability_overrides" not in set(inspect(engine).get_table_names())
+        command.upgrade(config, "0047_model_capability_overrides")
+        with engine.begin() as db:
+            db.execute(text(
+                "INSERT INTO model_capability_overrides (id, protocol, host_family, model_prefix, can_disable,"
+                " enabled, note, source_url, verified_on, revision, created_at, updated_at)"
+                " VALUES ('m1', 'chat', 'zhipu', 'glm-5.3', 0, 1, '', 'https://docs.example', '2026-11-17', 1,"
+                " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ))
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="model capability override"):
+        command.downgrade(config, "0046_document_derivations")

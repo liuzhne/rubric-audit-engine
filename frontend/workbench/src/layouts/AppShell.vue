@@ -99,6 +99,16 @@ async function onLogout() {
           <RouterLink class="nav-item" :class="{ active: activeNav === 'ops' }" :to="{ name: 'ops' }">
             运维与质量
           </RouterLink>
+          <!-- 模型能力全平台共享，只给平台管理员（docs/模型管理页与评分思考修正方案.md Q1）。 -->
+          <RouterLink
+            v-if="session.can('view_platform_ops')"
+            class="nav-item"
+            :class="{ active: activeNav === 'models' }"
+            :to="{ name: 'models' }"
+            data-test="nav-models"
+          >
+            模型管理
+          </RouterLink>
         </template>
       </nav>
 
@@ -322,6 +332,11 @@ async function onLogout() {
 .workspace:not(.full-bleed) {
   padding: 30px 36px 56px;
   max-width: var(--content-max);
+  /* 宽屏下居中：只设上限不居中时，多出来的宽度全堆在右边，页面看起来偏左。 */
+  margin-inline: auto;
+  /* 窄屏下外壳改为纵向排列，auto 外边距会取消交叉轴的拉伸，内容区按内容宽度撑开、横向溢出；
+     显式占满一行，再由 max-width 封顶。 */
+  width: 100%;
 }
 
 /* 工作区内嵌：页面窄，内容边距收紧。 */

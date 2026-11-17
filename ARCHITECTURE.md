@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-17 | 评分助手回复不露引用编号 | `agent/reply.validate_reply` 去掉记号之后、注入检测与说法核对之前，把本回合登记过的编号去掉或换成名称（`TurnRefs.label_of`），没有名称可换整体作废；提示词与工具定义不变，调用链与持久化边界不变 |
 | 2026-11-16 | 评分助手选择卡片（#112 复审） | `agent/reply.validate_reply` 的说法核对移到 choose 校验之后，`claims.problem` 加 `choosing`；`TurnRefs.name_of`；`runner._choose_rubric` 记已选前先查已发布列表；模块边界不变 |
 | 2026-11-16 | 评分助手选择卡片（提示词 @7） | 新模块 `services/assistant/choices.py`；Agent 回复契约加 `choose`（`agent/reply.py`），`runner` 统一选择卡片的点击、打字兜底与选完接着回答；查询图改出 `choice` 卡片；前端 `components/assistant/ChoiceCard.vue`；历史与压缩摘要记下按钮文字与选了哪个；契约版本 `2026-11-16.assistant-choice`；无迁移 |
 | 2026-11-16 | 评分助手等选文件时按名称或序号换评分标准 | `runner._start_flow` 在等选文件时收到带 `preset_rubric_id` 的评分流程，改为 `resume` 同一张卡片的 `change_rubric`（与工作区换标准同一条路）；`agent/business._action_start_grading` 的 `rubric_name` 认序号（与 `rubric_list` 同序）；模块边界与持久化不变，无迁移 |
@@ -1627,7 +1628,7 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 - `evaluated.py`：评测达标过的助手模型名单（端点家族 + 模型名，现在只有 Google 端点上的 `gemini-2.5-flash`）；不在名单里的模型不走 Agent 回合。部署门槛 `assistant_eval_gate` 要求名单里每个模型都有当前提示词指纹上的达标评测。
 - `refs.py`：引用编号（`t1`、`p1`、`r1`、`i1`，焦点里的 `t0`、`p0`），模型看不到数据库 ID。
 - `context.py`：请求组装与确定性渲染；历史每轮是用户原话、加载记录（合成的 `tool_search(select:…)` 调用与结果）与回复文字，卡片只留占位；已加载名单从历史推出；系统指令版本 `assistant-agent@1`。
-- `reply.py`：输出契约（整体作废、去 Markdown 记号、单句丢弃、截断）；`budget.py`：每回合 8 次工具调用（2 次搜索）、60 秒，每次模型调用 20 秒，每人每天回合数。
+- `reply.py`：输出契约（整体作废、去 Markdown 记号、正文里的引用编号换成名称、单句丢弃、截断）；`budget.py`：每回合 8 次工具调用（2 次搜索）、60 秒，每次模型调用 20 秒，每人每天回合数。
 - `compaction.py`：历史压缩（12 轮或 8,000 token，或缓存已冷），三部分：代码整理的事实要点、模型摘要的老师要求、仍在使用的工具。
 - `turn.py`：Agent 回合子图与入口。
 - `llm/tool_calls.py` + `openai_compatible_adapter.complete_with_tools`：原生工具调用一步；响应里的助手消息原样放回下一步（含 Gemini 的思考签名）。
@@ -1980,7 +1981,7 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
 
 模块：
 - `llm/hosts.py`：`host_family(base_url)` 把主机归成 `vertex`、`gemini_api`、`zhipu`、`openrouter`、`dashscope`、`deepseek`、`moonshot`、`openai`、`anthropic`、`bedrock`、`other`。`auth_headers.is_vertex_host` 与 `thinking_params.is_google_openai_host` 都改为调用它。
-- `llm/thinking_capabilities.py`：能力表 `CAPABILITIES`（每条：协议、主机族、模型名前缀、能否关闭、关闭写法、最低强度与写法、最大输出、来源、核实日期）；`lookup` 按规整后的模型名取最长前缀，前缀必须落在版本号边界上；`resolve_chat` / `resolve_messages` / `resolve_responses` 按“显式配置 → 表 → 未知模型”得到不可变的 `ThinkingPlan`；`legacy_*_plan` 复现改动前的行为；`plans()` 按 `THINKING_CAPABILITY_SCOPE` 返回 `(辅助计划, 评分计划)`。
+- `llm/thinking_capabilities.py`：能力表 `CAPABILITIES`（每条：协议、主机族、模型名前缀、能否关闭、关闭写法、最低强度与写法、最大输出、来源、核实日期）；`lookup` 按规整后的模型名取最长前缀，前缀必须落在版本号边界上；`resolve_chat` / `resolve_messages` / `resolve_responses` 按“显式配置 → 表 → 未知模型”得到不可变的 `ThinkingPlan`；`legacy_*_plan` 复现改动前的行为；`plans()` 按 `THINKING_CAPABILITY_SCOPE` 返回 `(辅助计划, 评分计划)`；`auxiliary` 下表里记着关不掉思考、旧行为却声明不思考的模型，评分计划也取能力表计划（2026-11-17）。
 - `llm/thinking_params.py`：只剩旧行为（评分路径在 scope 不是 `all` 时用），`google_can_disable_thinking` 改查表。
 
 调用链：
@@ -2171,3 +2172,37 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - 判定账本身份（`decision_identity`）哈希整个请求信封，信封里有 `runtime_identity` 与 `policy_hash`；本次两者都不变，所以已有判定照常复用。
 
 维护记录：2026-11-16 · 扣分合计超满分封底于 0：聚合行为与展示变化，模块边界不变，无迁移。
+
+### 2026-11-17 关不掉思考的模型照常评分
+
+- `llm/thinking_capabilities.plans()`：新增 `_legacy_certain_to_fail` 判定（能力表来源，或显式配置且命中的能力记录关不掉），命中时评分计划等于辅助计划，其余情况不变。
+- `services/ai_connections.verify_connection_runtime`：返回值增加 `thinking_observation()` 的两个字段，只读探测应答的推理计数与思考块，不读正文、不多发请求；`/ai-connections/test-draft` 与 `/{id}/test` 透传，前端 `lib/connection-thinking.js` 生成提示。
+
+维护记录：2026-11-17 · 关不掉思考的模型照常评分：评分计划的选择与连接测试返回值变化，无迁移。
+
+### 2026-11-17 评分助手意图识别：模型优先
+
+- `services/assistant/intents.py`：新增 `interpret_model_first`。有可用助手模型（不是 Mock）时先调模型识别意图，模型失败或输出不合格才用 `match_rules`；`_guard`（问句不触发写操作）对两者同样生效。意图表增加 `list_rubrics`、`list_tasks`，规则里列清单排在导入之前，`import_rubric` 不再匹配“已导入的 / 上传过的”。关不掉思考的模型识别超时为 60 秒。
+- `services/assistant/runner.py`：Agent 没有接手时，`ASSISTANT_INTENT_MODEL_FIRST`（默认开）决定走模型优先还是原来的规则优先；Agent 刚降级的这一句仍不调模型。附件、快捷按钮、按钮原文、打字回答选择卡片照旧不经模型。
+- `services/assistant/queries.py`：`list_rubrics` / `list_tasks` 两个函数（不进查询图），复用 `tools` 的 `list_published_rubrics` / `list_recent_batches`，两个以上时给选择卡片（`use_rubric` / `focus_task`）。
+
+维护记录：2026-11-17 · 评分助手意图识别模型优先：识别顺序与意图表变化，无迁移，Agent 提示词指纹不变。
+
+维护记录：2026-11-17 · 助手评测登记 GLM-5.3 价目：`eval/assistant_eval.MODEL_PRICES` 改按（端点家族, 模型）查，模块边界不变。
+
+### 2026-11-17 宽屏布局：工作台居中、首页宽屏补一列
+
+- 工作台外壳（`layouts/AppShell.vue`）的内容区仍以 `--content-max`（1380px）为上限，加 `margin-inline: auto` 居中；之前只有上限、没有居中，宽屏下多出的宽度全在右侧。整屏三栏（`meta.chrome === "full"`）不受影响。
+- 宣传页首屏（`site/LandingPage.vue`）新增静态示意块“评审记录”（`.hero-ledger`，逐项得分 + 复核留痕），只在 `min-width: 1500px` 且 `min-aspect-ratio: 16/9` 时显示，此时首屏三栏不换行、左侧留白由 18vw 收到 9vw。数据写在组件里，不调接口。
+
+维护记录：2026-11-17 · 宽屏布局：只改前端样式与首屏示意块，模块边界与数据流不变，无迁移。
+
+### 2026-11-17 模型管理页（迁移 0047）
+
+- 新表 `model_capability_overrides`（全平台共享，不按组织）：平台管理员登记的模型思考能力，字段与 `ThinkingCapability` 一一对应，外加启用、来源、核实日期、`revision` 与审计字段。迁移给 `pgs_app` 授权并建 RLS，已加进 `postgres_verifier.RUNTIME_ACCESS_TABLES`。
+- `llm/capability_overrides.py`：进程内缓存。`thinking_capabilities.lookup` 把启用的管理员记录与代码表一起比（前缀最长的胜出，一样长时管理员记录优先）。刷新只发生在手里有会话的入口：`ai_connections.resolve_connection_runtime` 与 `llm.factory._platform_runtime`，最多每 30 秒按“行数 + 最近更新时间 + revision 之和”判断要不要重读；写入接口提交后让本进程立即失效。
+- 运行身份：命中管理员记录的计划 `entry` 为 `db:<内容哈希前 8 位>`，`model_version` 追加 `;cap=<同一哈希>`，改了记录就不复用旧判定。
+- 接口 `api/routes/model_capabilities.py`：`GET/POST /api/admin/model-capabilities`、`PATCH /…/{id}`（带 `revision`），全部 `require_platform_admin`；列表合并代码表与管理员记录，带“已被覆盖”和命中的启用连接数，另附助手 Agent 已评测模型（只读）。请求写法只收 `thinking`、`reasoning_effort`、`reasoning`、`extra_body`、`output_config`，不超过 1 KB、4 层。
+- 前端：`views/ModelsView.vue`（`/workbench/ops/models`），侧栏“运维”分组下的“模型管理”只对 `view_platform_ops` 显示；表单换算在 `lib/model-capabilities.js`。
+
+维护记录：2026-11-17 · 模型管理页：新增一张表、一个缓存模块、一组平台管理员接口与一个页面；迁移 head 为 `0047_model_capability_overrides`。

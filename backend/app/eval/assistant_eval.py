@@ -48,12 +48,21 @@ from backend.app.services.assistant.agent import evaluated as agent_evaluated
 from backend.app.services.assistant.agent.context import estimate_tokens
 from backend.app.services.assistant.agent.context import system_prompt
 from backend.app.services.assistant.agent.context import tools_array
-from backend.app.services.llm.thinking_params import is_google_openai_host
 
 EVAL_SET = Path(__file__).with_name("assistant_eval_set.jsonl")
-#: 每百万 token 的美元价，按模型查（Google 的端点：Vertex 或 Gemini API；隐式缓存命中按输入价的一成）。
+#: 每百万 token 的美元价，按（端点家族, 模型）查，端点家族与 Agent 评测名单同一口径（``agent_evaluated.family``）。
 #: 查不到就拒绝估算与运行，不拿别的模型的价格凑数——A1 第一次估算就把平台上的 Claude 按 Gemini 价算了。
-MODEL_PRICES = {"gemini-2.5-flash": {"input": 0.30, "cached": 0.03, "output": 2.50}}
+#: ``output_per_call``：估算用的每次调用输出 token，思考模型的输出含推理，要比默认值大得多。
+#: 智谱按人民币计价（open.bigmodel.cn/pricing，2026-11-17 核对：GLM-5.3 输入 8 元、缓存命中 2 元、输出 28 元
+#: 每百万 token），按 1 美元 = 7.0 元换算——比实际汇率偏低，算出的美元偏高，预算只会更保守。
+CNY_PER_USD = 7.0
+MODEL_PRICES = {
+    ("google", "gemini-2.5-flash"): {"input": 0.30, "cached": 0.03, "output": 2.50},
+    ("open.bigmodel.cn", "glm-5.3"): {"input": round(8 / CNY_PER_USD, 4), "cached": round(2 / CNY_PER_USD, 4),
+                                      "output": round(28 / CNY_PER_USD, 4), "output_per_call": 1500},
+    # 官方价目页（同上日期核对）：GLM-4.7-Flash 输入、输出、缓存全部免费。免费档同时请求数只有 1，评测是串行的。
+    ("open.bigmodel.cn", "glm-4.7-flash"): {"input": 0.0, "cached": 0.0, "output": 0.0, "output_per_call": 1500},
+}
 #: 估算用：每条说法平均几次模型调用、每次输出多少 token、工具结果与状态多少 token。
 ESTIMATE_CALLS_PER_ITEM = 3.0
 ESTIMATE_OUTPUT_PER_CALL = 150
@@ -126,12 +135,14 @@ def eval_set_version(path: Path = EVAL_SET) -> str:
 
 
 def prices_for(model_name, base_url) -> dict | None:
-    """这条连接的价目；不是 Google 的端点、或模型没登记，返回 None。"""
+    """这条连接的价目；端点家族与模型没有一起登记过，返回 None。"""
 
-    if not is_google_openai_host(base_url):
-        return None
-    prices = MODEL_PRICES.get(str(model_name or "").strip().casefold().rsplit("/", 1)[-1])
+    prices = MODEL_PRICES.get((agent_evaluated.family(base_url), agent_evaluated.model_id(model_name)))
     return dict(prices) if prices else None
+
+
+def price_labels() -> list[str]:
+    return sorted("%s · %s" % key for key in MODEL_PRICES)
 
 
 def cost_usd(tokens: dict, prices: dict) -> float:
@@ -147,7 +158,7 @@ def estimate(items: list[dict], prices: dict) -> dict:
     prefix = estimate_tokens(catalog.render(tools_array())) + estimate_tokens(system_prompt())
     calls = len(items) * ESTIMATE_CALLS_PER_ITEM
     input_tokens = int(calls * (prefix + ESTIMATE_EXTRA_INPUT_PER_CALL))
-    output_tokens = int(calls * ESTIMATE_OUTPUT_PER_CALL)
+    output_tokens = int(calls * prices.get("output_per_call", ESTIMATE_OUTPUT_PER_CALL))
     usd = cost_usd({"prompt_tokens": input_tokens, "completion_tokens": output_tokens}, prices)
     return {"items": len(items), "model_calls": calls, "prompt_tokens": input_tokens,
             "completion_tokens": output_tokens, "usd": round(usd, 4)}
@@ -586,5 +597,5 @@ def run_eval(scorer, items: list[dict], *, prices: dict, round_budget: float, pa
     return {"results": results, "skipped": 0, "stopped": None}
 
 
-__all__ = ["EVAL_SET", "MODEL_PRICES", "check_budget", "cost_usd", "estimate", "eval_set_version", "judge",
+__all__ = ["CNY_PER_USD", "EVAL_SET", "MODEL_PRICES", "price_labels", "check_budget", "cost_usd", "estimate", "eval_set_version", "judge",
            "load_items", "not_measured", "prices_for", "rate_limited", "run_eval", "summarize"]

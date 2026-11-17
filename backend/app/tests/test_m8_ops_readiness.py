@@ -336,6 +336,7 @@ def test_postgres_verifier_freezes_complete_migration_and_stable_order_contract(
     "0044_atomic_rule_scope",
         "0045_cached_prompt_tokens",
         "0046_document_derivations",
+        "0047_model_capability_overrides",
     )
     assert stable_ordering_clause() == ("created_at", "id")
     script = (ROOT / "backend/app/scripts/verify_postgres_ops.py").read_text(
