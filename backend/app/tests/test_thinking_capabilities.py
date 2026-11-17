@@ -276,8 +276,62 @@ def test_responses_resolution(model, expected):
     ],
 )
 def test_scope_decides_which_paths_use_the_table(scope, auxiliary_source, scoring_source):
-    auxiliary, scoring = thinking.plans(thinking.CHAT, ZHIPU, "glm-5.3", thinking_type="", scope=scope)
+    # glm-5.2 能关闭思考：auxiliary 下评分路径照旧用旧行为。
+    auxiliary, scoring = thinking.plans(thinking.CHAT, ZHIPU, "glm-5.2", thinking_type="", scope=scope)
     assert (auxiliary.source, scoring.source) == (auxiliary_source, scoring_source)
+
+
+@pytest.mark.parametrize(
+    "protocol, base_url, model, thinking_type, expected_source",
+    [
+        # 表里记着关不掉：旧行为必定被思考守卫停下，评分路径改按能力表（方案 3.1）。
+        (thinking.CHAT, ZHIPU, "glm-5.3", "", thinking.SOURCE_TABLE),
+        (thinking.CHAT, ZHIPU, "glm-5.3", "disabled", thinking.SOURCE_ADJUSTED),
+        (thinking.MESSAGES, ANTHROPIC, "claude-opus-5-5", None, thinking.SOURCE_TABLE),
+        (thinking.RESPONSES, OPENAI, "gpt-5", None, thinking.SOURCE_TABLE),
+        # 能关闭、不认识、或旧行为本来就记开启（Google 关不掉的模型）：评分路径仍是旧行为。
+        (thinking.CHAT, ZHIPU, "glm-5.2", "", thinking.SOURCE_LEGACY),
+        (thinking.CHAT, ZHIPU, "some-new-model", "disabled", thinking.SOURCE_LEGACY),
+        (thinking.CHAT, VERTEX, "gemini-2.5-pro", "", thinking.SOURCE_LEGACY),
+        (thinking.MESSAGES, ANTHROPIC, "claude-sonnet-5-5", None, thinking.SOURCE_LEGACY),
+    ],
+)
+def test_auxiliary_scope_scores_forced_thinking_models_by_the_table(protocol, base_url, model, thinking_type,
+                                                                    expected_source):
+    _, scoring = thinking.plans(protocol, base_url, model, thinking_type=thinking_type, scope="auxiliary")
+    assert scoring.source == expected_source
+    if expected_source != thinking.SOURCE_LEGACY:
+        assert scoring.thinking_on and scoring.raises_output_limit
+
+
+@pytest.mark.parametrize(
+    "model, thinking_type, effort, switched",
+    [
+        # 只配了强度、关不掉思考的 Claude：旧行为不发 thinking、记不思考，必定被守卫停下（#115 复审）。
+        ("claude-opus-5-5", None, "low", True),
+        ("claude-opus-5-5", None, "high", True),
+        # 能关闭的模型只配强度：省略 thinking 即不思考，评分路径仍是旧行为。
+        ("claude-sonnet-5-5", None, "low", False),
+        # 显式 adaptive：旧行为本来就记开启。
+        ("claude-opus-5-5", "adaptive", "low", False),
+    ],
+)
+def test_explicit_effort_on_a_forced_model_scores_by_the_table(model, thinking_type, effort, switched):
+    _, scoring = thinking.plans(thinking.MESSAGES, ANTHROPIC, model, thinking_type=thinking_type, effort=effort,
+                                scope="auxiliary")
+    assert (scoring.source != thinking.SOURCE_LEGACY) is switched
+    if switched:
+        assert scoring.thinking_on and scoring.effort == effort and scoring.raises_output_limit
+
+
+def test_explicit_effort_on_a_forced_model_records_thinking_and_sends_the_effort():
+    capture = _Capture({"content": [{"type": "text", "text": "{}"}]})
+    scorer = AnthropicMessagesScorer(api_key="k", base_url=ANTHROPIC, model_name="claude-opus-5-5", effort="high",
+                                     client=capture.client())
+    contract = core_runtime_provider_contract(scorer, artifact_hash="a" * 64)
+    assert contract["thinking"] == {"enabled": True, "type": thinking.PROVIDER_DEFAULT}
+    assert contract["model_version"] == "messages-2023-06-01;effort=high;max_tokens=32768"
+    assert scorer.scoring_thinking_plan.fields() == {"output_config": {"effort": "high"}}
 
 
 def test_plan_fields_are_copies():
@@ -355,17 +409,22 @@ def test_explicit_connection_limits_still_win_for_a_thinking_model():
 
 @pytest.mark.parametrize("factory", ["chat", "responses", "messages"])
 def test_scoring_json_call_keeps_the_previous_timeout_under_auxiliary(factory):
-    """``scoring=True`` 的超时与上限取自同一份计划：auxiliary 下评分计划是旧行为，不放到 240 秒。"""
+    """``scoring=True`` 的超时与上限取自同一份计划：auxiliary 下评分计划是旧行为，不放到 240 秒。
+
+    用表里没有记录的模型：辅助计划按可能在思考处理（放开上限），评分计划仍是旧行为。
+    表里记着关不掉的模型评分也按能力表，见 ``test_auxiliary_scope_scores_forced_thinking_models_by_the_table``。
+    """
 
     if factory == "chat":
         capture = _Capture(_chat_body())
-        scorer = _chat(ZHIPU, "glm-5.3", capture)
+        scorer = _chat(ZHIPU, "some-new-model", capture)
     elif factory == "responses":
         capture = _Capture({"id": "r", "status": "completed", "output_text": '{"ok": true}', "usage": {}})
-        scorer = OpenAIResponsesScorer(api_key="k", base_url=OPENAI, model_name="gpt-5", client=capture.client())
+        scorer = OpenAIResponsesScorer(api_key="k", base_url=OPENAI, model_name="some-new-model",
+                                       client=capture.client())
     else:
         capture = _Capture(_message_body())
-        scorer = AnthropicMessagesScorer(api_key="k", base_url=ANTHROPIC, model_name="claude-opus-5-5",
+        scorer = AnthropicMessagesScorer(api_key="k", base_url=ANTHROPIC, model_name="some-new-model",
                                          client=capture.client(), structured_output="off")
     assert scorer.thinking_plan.raises_output_limit and scorer.scoring_thinking_plan.legacy
 
@@ -603,15 +662,15 @@ def test_no_fallback_outside_a_guessed_limit_rejected_once(monkeypatch, case):
 @pytest.mark.parametrize(
     "factory, thinking_identity, model_version",
     [
-        # 评分路径默认旧行为（auxiliary）：与改动前逐字节相同。
-        (lambda capture: _chat(ZHIPU, "glm-5.3", capture), {"enabled": False, "type": None}, "chat-completions"),
+        # 评分路径默认旧行为（auxiliary）：与改动前逐字节相同。表里记着关不掉思考的模型除外，见下一个测试。
+        (lambda capture: _chat(ZHIPU, "glm-5.2", capture), {"enabled": False, "type": None}, "chat-completions"),
         (lambda capture: _chat(VERTEX, "gemini-2.5-pro", capture),
          {"enabled": True, "type": thinking.PROVIDER_DEFAULT}, "chat-completions"),
         (lambda capture: _chat(VERTEX, "gemini-2.5-flash", capture), {"enabled": False, "type": "none"}, "chat-completions"),
-        (lambda capture: AnthropicMessagesScorer(api_key="k", base_url=ANTHROPIC, model_name="claude-opus-5-5",
+        (lambda capture: AnthropicMessagesScorer(api_key="k", base_url=ANTHROPIC, model_name="claude-sonnet-5-5",
                                                  client=capture.client()),
          {"enabled": False, "type": None}, "messages-2023-06-01"),
-        (lambda capture: OpenAIResponsesScorer(api_key="k", base_url=OPENAI, model_name="gpt-5",
+        (lambda capture: OpenAIResponsesScorer(api_key="k", base_url=OPENAI, model_name="gpt-4.1-mini",
                                                client=capture.client()),
          {"enabled": False, "type": None}, "responses-api"),
     ],
@@ -620,6 +679,27 @@ def test_scoring_identity_is_unchanged_until_scope_all(factory, thinking_identit
     scorer = factory(_Capture({}))
     contract = core_runtime_provider_contract(scorer, artifact_hash="a" * 64)
     assert contract["thinking"] == thinking_identity
+    assert contract["model_version"] == model_version
+
+
+@pytest.mark.parametrize(
+    "factory, model_version",
+    [
+        (lambda capture: _chat(ZHIPU, "glm-5.3", capture), "chat-completions;effort=low;max_tokens=32768"),
+        (lambda capture: AnthropicMessagesScorer(api_key="k", base_url=ANTHROPIC, model_name="claude-opus-5-5",
+                                                 client=capture.client()),
+         "messages-2023-06-01;effort=low;max_tokens=32768"),
+        (lambda capture: OpenAIResponsesScorer(api_key="k", base_url=OPENAI, model_name="gpt-5",
+                                               client=capture.client()),
+         "responses-api;effort=minimal;max_tokens=32768"),
+    ],
+)
+def test_forced_thinking_models_record_thinking_on_under_auxiliary_scope(factory, model_version):
+    """关不掉思考的模型：auxiliary 下评分身份如实记开启，思考守卫不再把整份停下。"""
+
+    scorer = factory(_Capture({}))
+    contract = core_runtime_provider_contract(scorer, artifact_hash="a" * 64)
+    assert contract["thinking"] == {"enabled": True, "type": thinking.PROVIDER_DEFAULT}
     assert contract["model_version"] == model_version
 
 
@@ -870,12 +950,17 @@ def test_semantic_coherence_uses_the_scoring_plan(monkeypatch):
     from backend.app.services.coherence.semantic import analyze_semantic_coherence
 
     monkeypatch.setattr(settings, "COHERENCE_SEMANTIC_ENABLED", True)
-    capture = _Capture(_chat_body('{"research_questions": [], "conclusion_claims": []}'))
-    scorer = _chat(ZHIPU, "glm-5.3", capture)
     parsed = {"sections": [{"title": "绪论", "paragraphs": [{"text": "研究问题"}]},
                            {"title": "结论", "paragraphs": [{"text": "结论"}]}],
               "full_text": "正文"}
-    analyze_semantic_coherence(parsed, scorer)
+    capture = _Capture(_chat_body('{"research_questions": [], "conclusion_claims": []}'))
+    analyze_semantic_coherence(parsed, _chat(ZHIPU, "some-new-model", capture))
     # 评分路径在 scope=auxiliary 时是旧行为：不发强度、上限不放开。
     assert "reasoning_effort" not in capture.payload
     assert capture.payload["max_tokens"] == 2048
+
+    # 表里记着关不掉思考：评分路径同样发最低强度、放开上限。
+    capture = _Capture(_chat_body('{"research_questions": [], "conclusion_claims": []}'))
+    analyze_semantic_coherence(parsed, _chat(ZHIPU, "glm-5.3", capture))
+    assert capture.payload["reasoning_effort"] == "low"
+    assert capture.payload["max_tokens"] == thinking.THINKING_ON_MAX_TOKENS_CAP

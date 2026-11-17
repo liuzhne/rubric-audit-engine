@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 
 import { api, ApiError, StaleContextError } from "@/api/client.js";
 import { useAnchorHighlight } from "@/lib/anchor-highlight.js";
+import { thinkingNotice } from "@/lib/connection-thinking.js";
 import {
   CLAUDE_PROTOCOL,
   EFFORT_CHOICES,
@@ -148,6 +149,8 @@ const { highlighted: aiHighlighted } = useAnchorHighlight("ai-connections");
 
 const connections = ref([]);
 const connectionsError = ref(null);
+// 测试已保存连接时的思考提示（见 lib/connection-thinking.js）。
+const connectionsNotice = ref(null);
 const draft = reactive({
   name: "我的 AI 连接",
   // auto：由服务端按地址后缀、已知平台和探测请求识别；手动选择只在「高级设置」里。
@@ -291,7 +294,8 @@ async function onTestDraft() {
       base_url: probe.base_url || draft.base_url.trim().replace(/\/+$/, ""),
       model_name: probe.model_name,
     };
-    draft.result = `配置校验通过：${protocolLabel(probe.provider_type)} · ${probe.model_name}`;
+    const notice = thinkingNotice(probe);
+    draft.result = `配置校验通过：${protocolLabel(probe.provider_type)} · ${probe.model_name}${notice ? `。${notice}` : ""}`;
   } catch (error) {
     if (!(error instanceof StaleContextError)) {
       draft.error = error?.message || "测试失败";
@@ -327,9 +331,12 @@ async function connectionAction(connection, action) {
   const organizationId = orgId.value;
   connBusy[connection.id] = action;
   connectionsError.value = null;
+  connectionsNotice.value = null;
   try {
     if (action === "test") {
-      await api.post(`/ai-connections/${connection.id}/test`, {}, { organizationId });
+      const probe = await api.post(`/ai-connections/${connection.id}/test`, {}, { organizationId });
+      const notice = thinkingNotice(probe);
+      connectionsNotice.value = notice ? `${connection.name}：${notice}` : null;
     } else if (action === "activate") {
       await api.post(`/ai-connections/${connection.id}/activate`, {}, { organizationId });
     } else if (action === "disable") {
@@ -556,6 +563,7 @@ onMounted(async () => {
       </div>
 
       <p v-if="connectionsError" class="notice notice-danger" role="alert">{{ connectionsError }}</p>
+      <p v-else-if="connectionsNotice" class="notice" role="status" data-test="connection-thinking-notice">{{ connectionsNotice }}</p>
 
       <div class="table-wrap">
         <table class="table">

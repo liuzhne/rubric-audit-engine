@@ -9,7 +9,9 @@
 结果是一个不可变的 ``ThinkingPlan``，适配器在构造时算好，每次请求只合并它的 ``fields()``。
 
 作用范围由 ``THINKING_CAPABILITY_SCOPE`` 决定：``off`` 全部旧行为；``auxiliary``（默认）AI 任务与评分助手
-按能力表、评分路径旧行为；``all`` 评分路径也按能力表（QWK 复核、维护者批准后再切）。
+按能力表、评分路径旧行为——例外是表里记着关不掉思考、旧行为却声明不思考的模型，评分路径也按能力表
+（旧行为必定被思考守卫停下，2026-11-17，docs/模型管理页与评分思考修正方案.md 3.1）；``all`` 评分路径
+全部按能力表（QWK 复核、维护者批准后再切）。
 
 **改了某条记录的请求写法，必须同时改它的身份值（换强度名）或升 ``CORE_PROVIDER_PROMPT_VERSION``**：
 运行身份只记开关与强度，不记写法（方案第 6.2 节）；``test_thinking_capabilities`` 的写法快照会提醒。
@@ -567,7 +569,30 @@ def plans(protocol, base_url, model_name, *, thinking_type=None, effort=None, sc
         auxiliary = resolve_messages(base_url, model_name, thinking_type, effort)
     else:
         auxiliary = resolve_responses(base_url, model_name)
-    return auxiliary, (auxiliary if scope == SCOPE_ALL else legacy)
+    capability = lookup(protocol, base_url, model_name)
+    forced = capability is not None and not capability.can_disable
+    if scope == SCOPE_ALL or _legacy_certain_to_fail(legacy, auxiliary, forced=forced):
+        return auxiliary, auxiliary
+    return auxiliary, legacy
+
+
+#: 能力表明确记着「关不掉思考」的计划来源（族默认也算：那是厂商文档写明的整族行为）。
+_FORCED_BY_TABLE = frozenset({SOURCE_TABLE, SOURCE_FAMILY_DEFAULT, SOURCE_ADJUSTED})
+
+
+def _legacy_certain_to_fail(legacy: ThinkingPlan, auxiliary: ThinkingPlan, *, forced: bool = False) -> bool:
+    """旧行为声明不思考、能力表却记着这个模型关不掉思考（docs/模型管理页与评分思考修正方案.md 3.1）。
+
+    这时旧行为的评分必定被思考守卫停下（``PROVIDER_THINKING_NOT_DISABLED``），没有可回归的基线，
+    所以评分路径也按能力表发最低强度、如实记开启。能关闭的模型与表里没有记录的模型不受影响。
+
+    ``forced``：命中的能力记录是关不掉的。连接只配了强度（Claude 的 ``effort``）时计划来源是显式配置，
+    但模型照样关不掉，也算（#115 复审）；显式配置的其他情况不算，免得改动能关闭的模型。
+    """
+
+    if legacy.thinking_on or not auxiliary.thinking_on:
+        return False
+    return auxiliary.source in _FORCED_BY_TABLE or (auxiliary.source == SOURCE_EXPLICIT and forced)
 
 
 def model_version_suffix(plan: ThinkingPlan, *, max_tokens_explicit: bool) -> str:

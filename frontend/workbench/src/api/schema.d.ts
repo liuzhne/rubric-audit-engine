@@ -3121,6 +3121,18 @@ export interface components {
              * @constant
              */
             status: "verified";
+            /**
+             * Thinking
+             * @default unknown
+             * @enum {string}
+             */
+            thinking: "observed" | "not_observed" | "unknown";
+            /**
+             * Thinking Capability
+             * @default unknown
+             * @enum {string}
+             */
+            thinking_capability: "forced" | "can_disable" | "unknown";
         };
         /** AIConnectionRead */
         AIConnectionRead: {
