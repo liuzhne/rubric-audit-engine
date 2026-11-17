@@ -17,12 +17,14 @@ logger = logging.getLogger(__name__)
 
 # 改提示词或意图表时 bump。独立于评分的 PROMPT_VERSION：助手不参与评分，
 # 改这里不影响评分缓存，也不需要重新锚定 QWK。
-ASSISTANT_PROMPT_VERSION = "assistant-intent@2"
+ASSISTANT_PROMPT_VERSION = "assistant-intent@3"
 
 # 意图 → 给模型看的说明。前端 `lib/assistant-intents.js` 的 INTENTS 必须同名。
 INTENTS: dict[str, str] = {
     "start_grading": "开始评分，或上传待评分的文件",
     "import_rubric": "使用自己的评分规则和评分模板（上传新的评分标准）",
+    "list_rubrics": "查看我能用的评分标准 / 评分模板有哪些（已导入、已发布的列表）",
+    "list_tasks": "查看我最近的评分任务有哪些",
     "query_progress": "查询评分进度、是否评完",
     "query_paper": "查询某一份材料的得分、扣分点或证据",
     "query_review": "查询哪些材料或评分项需要人工复核",
@@ -34,6 +36,8 @@ INTENTS: dict[str, str] = {
 }
 
 MODEL_TIMEOUT_SECONDS = 30
+#: 关不掉思考的模型（如 glm-5.3）识别一句话也要先思考，30 秒常常不够（方案 3.4）。
+THINKING_MODEL_TIMEOUT_SECONDS = 60
 MODEL_MAX_OUTPUT_TOKENS = 300
 MAX_TEXT_CHARS = 500
 
@@ -54,8 +58,20 @@ _RULES: tuple[tuple[str, re.Pattern], ...] = (
     ("help", re.compile(r"能做什么|怎么用|如何使用|帮助|你是谁|有什么功能")),
     ("cancel_job", re.compile(r"(取消|停止|停下|终止|别评)(了)?(评分|任务|评阅)?")),
     ("retry_failed", re.compile(r"重试|再试一次|(失败|没评完|未评完|没有评完)的.{0,12}(重新|再)")),
+    # 列清单排在导入之前：“查看已导入的评分模板列表”说的是看，不是导（2026-11-17 生产误判）。
+    ("list_rubrics", re.compile(
+        r"(有哪些|有什么|哪几[个份种]|列表|列出|清单|查看|看看|看一下|所有|全部|现有|已有).{0,10}"
+        r"(评分规则|评分标准|评分模板)"
+        r"|(评分规则|评分标准|评分模板)(都)?(有哪些|有什么|有几[个份种]|列表|清单)"
+    )),
+    ("list_tasks", re.compile(
+        r"(有哪些|有什么|列表|列出|清单|查看|看看|看一下|所有|全部|最近).{0,8}评分任务"
+        r"|评分任务(都)?(有哪些|有什么|有几个|列表|清单)"
+    )),
     ("import_rubric", re.compile(
-        r"(上传|导入|用我的|用自己的|新的|换成?).{0,6}(评分规则|评分标准|评分模板|规则文件|模板文件)"
+        # “已导入的 / 上传过的”是修饰语，不是要导入。
+        r"((?<![已经])(上传|导入)(?![的过])|用我的|用自己的|新的|换成?).{0,6}"
+        r"(评分规则|评分标准|评分模板|规则文件|模板文件)"
         r"|(评分规则|评分标准|评分模板)和.{0,4}(模板|规则)"
     )),
     ("query_review", re.compile(r"复核|人工确认|需要确认|待确认|需要人工")),
@@ -229,7 +245,7 @@ def _validated(raw) -> IntentResult | None:
                         source="model")
 
 
-def _call_model(scorer, text: str, focus: dict, recent: list[str]):
+def _call_model(scorer, text: str, focus: dict, recent: list[str], *, timeout: int = MODEL_TIMEOUT_SECONDS):
     # 模型只看到这句话、用户最近 3 句原话与任务名、评分标准名（方案 M1）；
     # 看不到论文原文、证据，也看不到助手自己之前的回复。
     payload = {
@@ -250,13 +266,60 @@ def _call_model(scorer, text: str, focus: dict, recent: list[str]):
             response_schema=_output_schema(),
             default_max_tokens=MODEL_MAX_OUTPUT_TOKENS,
             attempts_limit=1,
-            default_timeout_seconds=MODEL_TIMEOUT_SECONDS,
+            default_timeout_seconds=timeout,
             rate_limit_retries=0,
-            deadline=time.monotonic() + MODEL_TIMEOUT_SECONDS,
+            deadline=time.monotonic() + timeout,
         )
     except TypeError:
         # 只接受 (instructions, payload) 的适配器（测试替身等）。
         return scorer.complete_json(INSTRUCTIONS, payload)
+
+
+def _usable(scorer) -> bool:
+    return scorer is not None and getattr(scorer, "provider", "") != "mock"
+
+
+def _timeout_for(scorer) -> int:
+    plan = getattr(scorer, "thinking_plan", None)
+    return THINKING_MODEL_TIMEOUT_SECONDS if getattr(plan, "thinking_on", False) else MODEL_TIMEOUT_SECONDS
+
+
+def interpret_model_first(text: str, *, focus: dict | None = None, scorer=None,
+                          recent: list[str] | None = None) -> IntentResult:
+    """模型优先（docs/评分助手意图识别模型优先方案.md 3.1）：有可用模型先问模型，失败才退回规则。
+
+    模型不可用（没有、或是 Mock）时等于 ``match_rules``。模型出错或输出不合格时用规则的结果；
+    规则也认不出时带上错误码，运行器据此告诉用户“助手模型暂时没有响应”。
+    ``_guard``（问句不触发写操作）对模型与规则的结果同样生效。
+    """
+
+    cleaned = (text or "").strip()[:MAX_TEXT_CHARS]
+    ruled = match_rules(cleaned)
+    if not _usable(scorer):
+        return ruled
+    model_name = getattr(scorer, "model_name", None)
+    error_code = None
+    try:
+        raw = _call_model(scorer, cleaned, focus or {}, recent or [], timeout=_timeout_for(scorer))
+    except Exception as exc:  # 模型失败只是退回规则，不能让一句话的识别报 500。
+        logger.warning("assistant_intent_model_failed error=%s", type(exc).__name__)
+        raw, error_code = None, "ASSISTANT_MODEL_FAILED"
+    result = _validated(raw) if raw is not None else None
+    if raw is not None and result is None:
+        logger.info("assistant_intent_model_invalid")
+        error_code = "ASSISTANT_MODEL_OUTPUT_INVALID"
+    if result is None:
+        if ruled.intent != "unknown" or error_code is None:
+            return replace(ruled, model_name=model_name)
+        return IntentResult(intent="unknown", source="none", model_name=model_name, error_code=error_code)
+    return _guard(IntentResult(
+        intent=result.intent,
+        paper_ordinal=result.paper_ordinal if result.paper_ordinal is not None else ruled.paper_ordinal,
+        paper_name=result.paper_name,
+        clarify=result.clarify,
+        source="model",
+        model_name=model_name,
+    ), cleaned)
 
 
 def interpret(text: str, *, focus: dict | None = None, scorer=None, recent: list[str] | None = None) -> IntentResult:

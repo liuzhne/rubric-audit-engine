@@ -634,6 +634,13 @@ def test_lightsail_deploy_job_renders_the_assistant_stream_switch():
     assert "ASSISTANT_STREAM_ENABLED: ${{ vars.ASSISTANT_STREAM_ENABLED }}" in lightsail
 
 
+def test_lightsail_deploy_job_renders_the_intent_model_first_switch():
+    # 评分助手模型优先识别意图（docs/评分助手意图识别模型优先方案.md）：没设即开启，仓库变量设 false 回滚。
+    for name in ("ci.yml", "production-cutover.yml"):
+        workflow = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        assert "ASSISTANT_INTENT_MODEL_FIRST: ${{ vars.ASSISTANT_INTENT_MODEL_FIRST }}" in workflow
+
+
 def test_both_caddy_files_keep_the_assistant_stream_out_of_compression():
     # 压缩器会攒够一段才发：SSE 的进度会攒到最后一起到（docs/评分助手过程流式方案.md §6）。
     for path in (ROOT / "deploy" / "production" / "caddy" / "Caddyfile", ROOT / "deploy" / "Caddyfile"):

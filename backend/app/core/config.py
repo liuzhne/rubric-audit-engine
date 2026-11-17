@@ -123,6 +123,9 @@ class Settings(BaseSettings):
     ASSISTANT_AGENT_ENABLED: bool = False
     # 每人每天的 Agent 回合上限（防止误用耗尽额度），超出后当天只用规则模式。
     ASSISTANT_AGENT_DAILY_TURNS: int = 300
+    # Agent 不可用时，一句话先让助手模型识别意图，模型失败才退回正则规则
+    # （docs/评分助手意图识别模型优先方案.md，维护者 2026-11-17 确认默认打开）。关闭即回到“规则优先”。
+    ASSISTANT_INTENT_MODEL_FIRST: bool = True
     # 评分助手的过程流式（docs/评分助手过程流式方案.md）：回合进行时把“现在在做哪一步”推给前端。默认关闭：
     # 关闭时 `/runs/stream` 返回 404，前端照旧走 `/runs`。在生产上核实代理不会攒住推送之后再打开。
     ASSISTANT_STREAM_ENABLED: bool = False
