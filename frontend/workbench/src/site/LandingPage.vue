@@ -30,6 +30,21 @@ defineProps({
   showProductCard: { type: Boolean, default: true },
 });
 
+// 宽屏右侧“评审记录”的示意数据（静态，不来自接口）：总分 84 = 各项之和，第三项与首屏卡片同一项。
+const ledgerRows = [
+  { name: "选题背景与意义", score: 13, max: 15 },
+  { name: "文献综述", score: 17, max: 20 },
+  { name: "研究方法与技术方案", score: 21, max: 25, active: true },
+  { name: "研究计划与进度", score: 16, max: 20 },
+  { name: "写作规范", score: 17, max: 20 },
+];
+const ledgerTrail = [
+  { label: "评分标准入库", note: "23 条细则", tone: "done" },
+  { label: "AI 逐项初评", note: "扣分附出处", tone: "done" },
+  { label: "人工复核", note: "维持 21 分", tone: "review" },
+  { label: "导出成绩与报告", note: "待确认", tone: "pending" },
+];
+
 const section = ref(/** @type {HTMLElement|null} */ (null));
 
 const pinnedReduced = landingMotionPinnedReduced();
@@ -220,6 +235,28 @@ function focusTrial() {
             </div>
           </div>
           <div class="connector" />
+        </div>
+
+        <!-- 宽屏补充：一份材料的逐项评分与复核留痕。只在又宽又扁的屏幕上出现，窄屏不占位。 -->
+        <div v-if="showProductCard" class="hero-ledger" aria-hidden="true" data-test="hero-ledger">
+          <div class="ledger-head">
+            <span class="ledger-title">评审记录 · 开题报告</span>
+            <span class="ledger-total">84<span class="ledger-max"> / 100</span></span>
+          </div>
+          <ul class="ledger-rows">
+            <li v-for="row in ledgerRows" :key="row.name" :class="{ active: row.active }">
+              <span class="ledger-name">{{ row.name }}</span>
+              <span class="ledger-bar"><span :style="{ width: `${(row.score / row.max) * 100}%` }" /></span>
+              <span class="ledger-score">{{ row.score }}<span class="ledger-max"> / {{ row.max }}</span></span>
+            </li>
+          </ul>
+          <ol class="ledger-trail">
+            <li v-for="step in ledgerTrail" :key="step.label" :class="step.tone">
+              <span class="trail-dot" />
+              <span class="trail-label">{{ step.label }}</span>
+              <span class="trail-note">{{ step.note }}</span>
+            </li>
+          </ol>
         </div>
       </section>
 
@@ -879,6 +916,168 @@ h1 {
   border-top: 1.5px dashed #c9953f;
   border-right: 1.5px dashed #c9953f;
   border-radius: 0 18px 0 0;
+}
+
+/*
+ * 宽屏右侧的“评审记录”。默认不显示：只有又宽又扁的屏幕（≥1500px 且宽高比 ≥ 16:9）首屏右边才会
+ * 空出一大块，这时三栏不换行，并把左侧留白从 18vw 收到 9vw，整体居中。
+ */
+.hero-ledger {
+  display: none;
+}
+
+@media (min-width: 1500px) and (min-aspect-ratio: 16/9) {
+  .hero-main {
+    flex-wrap: nowrap;
+    justify-content: center;
+    gap: clamp(32px, 3vw, 64px);
+    padding-left: clamp(20px, 9vw, 240px);
+    padding-right: clamp(20px, 6vw, 160px);
+  }
+
+  .hero-card {
+    flex: 0 0 380px;
+  }
+
+  .hero-ledger {
+    display: block;
+    flex: 0 0 300px;
+    padding: 20px 22px 18px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.04);
+    backdrop-filter: blur(6px);
+    color: #e9ece8;
+  }
+}
+
+.ledger-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.ledger-title {
+  font-family: var(--font-mono-cjk);
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  color: #a9b3ae;
+}
+
+.ledger-total {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  color: #fff;
+}
+
+.ledger-max {
+  font-size: 11px;
+  color: #8a948f;
+}
+
+.ledger-rows {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ledger-rows li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 54px auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  font-size: 12.5px;
+}
+
+.ledger-rows li.active {
+  background: rgba(201, 149, 63, 0.14);
+  box-shadow: inset 2px 0 0 #c9953f;
+}
+
+.ledger-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #d3d9d5;
+}
+
+.ledger-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.ledger-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: #4f9e8c;
+}
+
+.ledger-rows li.active .ledger-bar span {
+  background: #c9953f;
+}
+
+.ledger-score {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  text-align: right;
+  color: #fff;
+}
+
+.ledger-trail {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 14px 8px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.ledger-trail li {
+  display: grid;
+  grid-template-columns: 8px auto minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: center;
+}
+
+.trail-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4f9e8c;
+}
+
+.ledger-trail li.review .trail-dot {
+  background: #c9953f;
+}
+
+.ledger-trail li.pending .trail-dot {
+  background: transparent;
+  border: 1.5px solid #6f7a75;
+}
+
+.trail-label {
+  font-size: 12.5px;
+  color: #e9ece8;
+}
+
+.trail-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 11px;
+  color: #8a948f;
 }
 
 /* 波浪静止时压在这里；它本身是空的，只占高度。 */

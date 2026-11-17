@@ -3592,3 +3592,14 @@ python -m backend.app.scripts.estimate_section_summaries <document_snapshot_id>
   - 仍然出现：看用户消息的 `model_name`。为空说明没调模型（Agent 刚降级、没有可用模型或开关被关），走的是规则。
 
 维护记录：2026-11-17 · 评分助手意图识别模型优先：新开关、版本号与一条排错。
+
+### 2026-11-17 宽屏布局
+
+- 改的是前端样式，发布前照常 `python scripts/build_web_static.py --with-workbench` 重建 `public/`（漂移门禁）。AppShell 是共享块，改它会让几乎所有 `public/workbench/assets/*` 的哈希一起变，这是正常的。
+- 首页的“评审记录”只在 `min-width: 1500px` 且 `min-aspect-ratio: 16/9` 下出现：在 1440 宽或 16:10 屏上看不到它不是 bug。验证要把视口设成 1920×960 一类。
+- 排错：桌面 App 内置浏览器打开 `http://localhost:5173` 报 navigation denied，指向的是预览面板，真正原因是该面板对本地地址的访问没有放行；本机可用 Playwright（`@playwright/test` 的 `chromium`）对 `npx vite --host 127.0.0.1` 起的服务截图代替。
+- 排错：窄屏浏览器验收（`responsive.spec.js`、`rubric-design.spec.js` 的 390 宽一段）报横向溢出 65–214 像素。
+  - 报错指向：页面里的表单或表格太宽。
+  - 真正原因：`.workspace` 加了 `margin-inline: auto` 居中，900 像素以下外壳改为纵向 flex，auto 外边距会取消交叉轴的拉伸，内容区按内容宽度撑开。给 `.workspace:not(.full-bleed)` 显式 `width: 100%`（全局 `border-box`，再由 `max-width` 封顶）。
+
+维护记录：2026-11-17 · 宽屏布局：记录重建产物与断点验证方法；补窄屏横向溢出的排错。
