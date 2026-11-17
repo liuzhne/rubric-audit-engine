@@ -573,7 +573,11 @@ def _reasoning_seen(provider_type: str, data) -> bool | None:
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
     if provider_type == "openai_responses":
         details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
-        return bool(details.get("reasoning_tokens"))
+        if details.get("reasoning_tokens"):
+            return True
+        # usage 可以缺省或为 null，思考仍以 reasoning 条目出现在 output 里（#115 复审）。只看类型，不读正文。
+        items = data.get("output") if isinstance(data.get("output"), list) else []
+        return any(isinstance(item, dict) and item.get("type") == "reasoning" for item in items)
     if provider_type == MESSAGES:
         blocks = data.get("content") if isinstance(data.get("content"), list) else []
         return any(isinstance(block, dict) and block.get("type") in {"thinking", "redacted_thinking"}

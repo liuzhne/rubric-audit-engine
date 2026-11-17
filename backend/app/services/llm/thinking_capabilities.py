@@ -569,7 +569,9 @@ def plans(protocol, base_url, model_name, *, thinking_type=None, effort=None, sc
         auxiliary = resolve_messages(base_url, model_name, thinking_type, effort)
     else:
         auxiliary = resolve_responses(base_url, model_name)
-    if scope == SCOPE_ALL or _legacy_certain_to_fail(legacy, auxiliary):
+    capability = lookup(protocol, base_url, model_name)
+    forced = capability is not None and not capability.can_disable
+    if scope == SCOPE_ALL or _legacy_certain_to_fail(legacy, auxiliary, forced=forced):
         return auxiliary, auxiliary
     return auxiliary, legacy
 
@@ -578,15 +580,19 @@ def plans(protocol, base_url, model_name, *, thinking_type=None, effort=None, sc
 _FORCED_BY_TABLE = frozenset({SOURCE_TABLE, SOURCE_FAMILY_DEFAULT, SOURCE_ADJUSTED})
 
 
-def _legacy_certain_to_fail(legacy: ThinkingPlan, auxiliary: ThinkingPlan) -> bool:
+def _legacy_certain_to_fail(legacy: ThinkingPlan, auxiliary: ThinkingPlan, *, forced: bool = False) -> bool:
     """旧行为声明不思考、能力表却记着这个模型关不掉思考（docs/模型管理页与评分思考修正方案.md 3.1）。
 
     这时旧行为的评分必定被思考守卫停下（``PROVIDER_THINKING_NOT_DISABLED``），没有可回归的基线，
     所以评分路径也按能力表发最低强度、如实记开启。能关闭的模型与表里没有记录的模型不受影响。
+
+    ``forced``：命中的能力记录是关不掉的。连接只配了强度（Claude 的 ``effort``）时计划来源是显式配置，
+    但模型照样关不掉，也算（#115 复审）；显式配置的其他情况不算，免得改动能关闭的模型。
     """
 
-    return (not legacy.thinking_on and auxiliary.thinking_on
-            and auxiliary.source in _FORCED_BY_TABLE)
+    if legacy.thinking_on or not auxiliary.thinking_on:
+        return False
+    return auxiliary.source in _FORCED_BY_TABLE or (auxiliary.source == SOURCE_EXPLICIT and forced)
 
 
 def model_version_suffix(plan: ThinkingPlan, *, max_tokens_explicit: bool) -> str:

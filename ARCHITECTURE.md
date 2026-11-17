@@ -2175,7 +2175,7 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 
 ### 2026-11-17 关不掉思考的模型照常评分
 
-- `llm/thinking_capabilities.plans()`：新增 `_legacy_certain_to_fail` 判定，命中时评分计划等于辅助计划，其余情况不变。
+- `llm/thinking_capabilities.plans()`：新增 `_legacy_certain_to_fail` 判定（能力表来源，或显式配置且命中的能力记录关不掉），命中时评分计划等于辅助计划，其余情况不变。
 - `services/ai_connections.verify_connection_runtime`：返回值增加 `thinking_observation()` 的两个字段，只读探测应答的推理计数与思考块，不读正文、不多发请求；`/ai-connections/test-draft` 与 `/{id}/test` 透传，前端 `lib/connection-thinking.js` 生成提示。
 
 维护记录：2026-11-17 · 关不掉思考的模型照常评分：评分计划的选择与连接测试返回值变化，无迁移。
