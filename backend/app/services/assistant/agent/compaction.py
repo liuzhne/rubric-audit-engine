@@ -57,6 +57,7 @@ _INTENT_FACTS = {
     "query_progress": "问过评分进度", "query_paper": "查过材料的得分与扣分", "query_review": "看过需要复核的材料",
     "query_overview": "看过整体分数情况", "retry_failed": "要求重试失败项", "cancel_job": "要求取消评分",
     "start_grading": "要求开始评分", "import_rubric": "要求导入评分标准",
+    "list_rubrics": "看过可用的评分标准", "list_tasks": "看过最近的评分任务",
 }
 _CARD_FACTS = {
     ("confirm_start", "done"): "确认开始了一次评分", ("confirm_start", "dismissed"): "放弃了一次开始评分",

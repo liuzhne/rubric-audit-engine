@@ -87,8 +87,10 @@ _DATABASE_PASSWORD = re.compile(r"^[A-Za-z0-9]{24,}$")
 #: 新镜像跑 assistant_eval_gate：当前提示词指纹上没有达标的评测报告就不部署（§12.5）。
 #: SCORING_JUDGE_SCOPE_ENABLED：按细则的适用范围取证据（docs/评分细则适用范围方案.md 第 8 节），QWK 评测后再打开。
 #: ASSISTANT_STREAM_ENABLED：评分助手的过程流式（docs/评分助手过程流式方案.md），在实例上核实代理不攒推送后再打开。
+#: ASSISTANT_INTENT_MODEL_FIRST：评分助手模型优先识别意图（docs/评分助手意图识别模型优先方案.md）。它的默认值是
+#: 开启：没设即开启，设为 false 是回滚。
 OPTIONAL_SWITCHES = ("SITE_LEADS_ENABLED", "ASSISTANT_AGENT_ENABLED", "SCORING_JUDGE_SCOPE_ENABLED",
-                     "ASSISTANT_STREAM_ENABLED")
+                     "ASSISTANT_STREAM_ENABLED", "ASSISTANT_INTENT_MODEL_FIRST")
 #: 取值不是 true / false 的可选设置：没设时不写进 .env，应用取默认值。第一个取值是默认值。
 #: SCORING_TOKEN_BUDGET_TARGET=envelope 是预算检查的回退；SCORING_INSUFFICIENT_EVIDENCE_MODE=review 打开“证据不足”；
 #: SCORING_DECISION_BASIS_MODE=cite 让每条判定都给依据（docs/评分证据与理由改造方案.md）。
