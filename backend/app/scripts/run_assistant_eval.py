@@ -9,7 +9,7 @@
 - 模型默认用平台模型（管理员配置的那一条）；`--connection-id` 改用一条指定的 AI 连接（维护者自己的）。
   配置都在一个**只读事务**里读出，读完即回滚，凭据不离开服务器；输出里只有模型名、主机与来源，
   不打印连接名称与所属的人（仓库公开，运行日志谁都能看）；
-- 价目按模型查（`assistant_eval.MODEL_PRICES`），只认 Google 端点上登记过的模型；查不到就拒绝，不估也不跑；
+- 价目按（端点家族, 模型）查（`assistant_eval.MODEL_PRICES`），只认登记过的组合；查不到就拒绝，不估也不跑；
 - 评测在隔离的内存数据库里跑，只有合成的种子数据，不读写业务数据；
 - 两道预算：本轮预计不超过 `--round-budget-usd`；历次已花（`--spent-usd`，由工作流按仓库里的报告合计）加本轮
   预计不超过 `--total-budget-usd`。`run` 还要求 `--confirm-usd`（维护者看过估算后确认的金额）不小于本轮预计；
@@ -156,8 +156,8 @@ def main(argv=None) -> int:
         return EXIT_NO_MODEL
     prices = assistant_eval.prices_for(runtime.model_name, runtime.base_url)
     if prices is None:
-        payload["refused"] = "没有登记这个模型的价目（只认 Google 端点上的 %s），不估也不跑" % "、".join(
-            sorted(assistant_eval.MODEL_PRICES))
+        payload["refused"] = "没有登记这个模型的价目（只认 %s），不估也不跑" % "、".join(
+            assistant_eval.price_labels())
         payload["finished_at"] = _now()
         emit(payload)
         return EXIT_REFUSED

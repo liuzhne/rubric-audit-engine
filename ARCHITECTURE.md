@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-17 | 评分助手回复不露引用编号 | `agent/reply.validate_reply` 去掉记号之后、注入检测与说法核对之前，把本回合登记过的编号去掉或换成名称（`TurnRefs.label_of`），没有名称可换整体作废；提示词与工具定义不变，调用链与持久化边界不变 |
 | 2026-11-16 | 评分助手选择卡片（#112 复审） | `agent/reply.validate_reply` 的说法核对移到 choose 校验之后，`claims.problem` 加 `choosing`；`TurnRefs.name_of`；`runner._choose_rubric` 记已选前先查已发布列表；模块边界不变 |
 | 2026-11-16 | 评分助手选择卡片（提示词 @7） | 新模块 `services/assistant/choices.py`；Agent 回复契约加 `choose`（`agent/reply.py`），`runner` 统一选择卡片的点击、打字兜底与选完接着回答；查询图改出 `choice` 卡片；前端 `components/assistant/ChoiceCard.vue`；历史与压缩摘要记下按钮文字与选了哪个；契约版本 `2026-11-16.assistant-choice`；无迁移 |
 | 2026-11-16 | 评分助手等选文件时按名称或序号换评分标准 | `runner._start_flow` 在等选文件时收到带 `preset_rubric_id` 的评分流程，改为 `resume` 同一张卡片的 `change_rubric`（与工作区换标准同一条路）；`agent/business._action_start_grading` 的 `rubric_name` 认序号（与 `rubric_list` 同序）；模块边界与持久化不变，无迁移 |
@@ -1627,7 +1628,7 @@ message ─▶ 带 quick_action 键？─是─▶ 按键直接分派（不经�
 - `evaluated.py`：评测达标过的助手模型名单（端点家族 + 模型名，现在只有 Google 端点上的 `gemini-2.5-flash`）；不在名单里的模型不走 Agent 回合。部署门槛 `assistant_eval_gate` 要求名单里每个模型都有当前提示词指纹上的达标评测。
 - `refs.py`：引用编号（`t1`、`p1`、`r1`、`i1`，焦点里的 `t0`、`p0`），模型看不到数据库 ID。
 - `context.py`：请求组装与确定性渲染；历史每轮是用户原话、加载记录（合成的 `tool_search(select:…)` 调用与结果）与回复文字，卡片只留占位；已加载名单从历史推出；系统指令版本 `assistant-agent@1`。
-- `reply.py`：输出契约（整体作废、去 Markdown 记号、单句丢弃、截断）；`budget.py`：每回合 8 次工具调用（2 次搜索）、60 秒，每次模型调用 20 秒，每人每天回合数。
+- `reply.py`：输出契约（整体作废、去 Markdown 记号、正文里的引用编号换成名称、单句丢弃、截断）；`budget.py`：每回合 8 次工具调用（2 次搜索）、60 秒，每次模型调用 20 秒，每人每天回合数。
 - `compaction.py`：历史压缩（12 轮或 8,000 token，或缓存已冷），三部分：代码整理的事实要点、模型摘要的老师要求、仍在使用的工具。
 - `turn.py`：Agent 回合子图与入口。
 - `llm/tool_calls.py` + `openai_compatible_adapter.complete_with_tools`：原生工具调用一步；响应里的助手消息原样放回下一步（含 Gemini 的思考签名）。
@@ -2179,6 +2180,8 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - `services/assistant/queries.py`：`list_rubrics` / `list_tasks` 两个函数（不进查询图），复用 `tools` 的 `list_published_rubrics` / `list_recent_batches`，两个以上时给选择卡片（`use_rubric` / `focus_task`）。
 
 维护记录：2026-11-17 · 评分助手意图识别模型优先：识别顺序与意图表变化，无迁移，Agent 提示词指纹不变。
+
+维护记录：2026-11-17 · 助手评测登记 GLM-5.3 价目：`eval/assistant_eval.MODEL_PRICES` 改按（端点家族, 模型）查，模块边界不变。
 
 ### 2026-11-17 宽屏布局：工作台居中、首页宽屏补一列
 
