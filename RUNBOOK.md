@@ -1359,6 +1359,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 | 2026-11-11 | 评分细则适用范围（分期 A：评分标准侧） | 迁移 `0044_atomic_rule_scope`（先跑迁移工作流再部署，有范围数据时拒绝降级）；契约版本升为 `2026-11-11.rule-scope`；排错补“规则显示尚未识别”“编辑报 applies_to 是禁止字段”“识别后部分规则仍按全文” |
 | 2026-11-11 | AI 起草互斥组规整（#94 第二轮复审） | 核对脚本的 `blocks_publish` 与发布校验对齐：组里有分档细则时不看排除，照样算阻断；排错补“重新编译报 `RUBRIC_RECOMPILE_BLOCKED`、原因是互斥组重名” |
 | 2026-11-11 | 邀请与重置：直接给链接 | 无新命令、无后端变化；`public/` 已重建；邀请新成员的操作改为“复制链接发给对方”；排错：对方打不开邀请链接 |
+| 2026-11-17 | 模型管理页 | 迁移 `0047_model_capability_overrides`（新表，已给 `pgs_app` 授权并建 RLS，有记录时拒绝降级）；先从 develop 跑迁移工作流再合发布 PR；新页面 `/workbench/ops/models`；排错：登记后评分仍按旧写法 |
 | 2026-11-17 | 关不掉思考的模型照常评分 | 无迁移、无新开关；连接测试返回 `thinking` / `thinking_capability`；排错：`glm-5.3` 整批 `PROVIDER_THINKING_NOT_DISABLED` |
 | 2026-11-17 | 评分助手意图识别模型优先 | 新开关 `ASSISTANT_INTENT_MODEL_FIRST`（默认开）；无迁移；排错：“查看已导入的评分模板”启动了导入流程 |
 | 2026-11-11 | 按模型能力表决定思考（复审修正） | 表外模型的猜测上限被 400 拒绝时按放开前的上限重发一次，新增日志 `thinking_output_limit_fallback` 与对应排错；写明只有严格 Schema 才是正式输出的硬上界 |
@@ -3639,3 +3640,15 @@ python -m backend.app.scripts.estimate_section_summaries <document_snapshot_id>
   - 真正原因：`.workspace` 加了 `margin-inline: auto` 居中，900 像素以下外壳改为纵向 flex，auto 外边距会取消交叉轴的拉伸，内容区按内容宽度撑开。给 `.workspace:not(.full-bleed)` 显式 `width: 100%`（全局 `border-box`，再由 `max-width` 封顶）。
 
 维护记录：2026-11-17 · 宽屏布局：记录重建产物与断点验证方法；补窄屏横向溢出的排错。
+
+### 2026-11-17 模型管理页
+
+- 发布：迁移 `0047_model_capability_overrides`（新表 `model_capability_overrides`；迁移里已给 `pgs_app` 授权并建 RLS，表已加进 `postgres_verifier.RUNTIME_ACCESS_TABLES`）。生产先从 develop 跑迁移工作流再合发布 PR：新代码在解析连接时就会读这张表，表不存在会让评分请求出错。有记录时拒绝降级。
+- 使用：平台管理员在侧栏“运维 → 模型管理”登记。代码表里已有的模型点“覆盖”，以它为底稿新建一条；新模型点“登记模型”。只依据厂商文档或生产日志填写，来源链接必填。请求写法只收 `thinking`、`reasoning_effort`、`reasoning`、`extra_body`、`output_config`。
+- 生效：写入的那个进程立即生效；其它进程（worker）在下一次解析连接时检查，最多晚 30 秒。已经在跑的任务不受影响，新任务才按新记录。命中管理员记录的运行身份带 `;cap=<哈希>`，改了记录旧判定不复用。
+- 排错：登记了“关不掉思考”，新建的评分任务仍以 `PROVIDER_THINKING_NOT_DISABLED` 停下。
+  - 报错指向：像是登记没生效。
+  - 真正原因（按常见程度）：前缀没命中（前缀后紧跟版本号不算命中，`glm-5` 不会命中 `glm-5-2`；看列表里“启用中连接”是不是 0）；主机族填错（自建网关是 `other`）；协议填错（连接是 Chat 兼容就填 chat）；任务是登记之前建的（任务在开始评分时就算好了计划，重新建任务）。
+  - 核对：列表里这条记录的“启用中连接”应当大于 0；`llm_call` 日志里的思考字段应当是开启、强度为登记的最低强度。
+
+维护记录：2026-11-17 · 模型管理页：记录发布顺序、使用方法与一条排错。

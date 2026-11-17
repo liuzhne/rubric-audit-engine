@@ -43,6 +43,17 @@ def tests_bring_their_own_byok_master_key(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def model_capability_overrides_start_empty():
+    """管理员登记的模型能力是进程内缓存；每个测试的数据库都是新的，缓存不能跨测试残留。"""
+
+    from backend.app.services.llm import capability_overrides
+
+    capability_overrides.reset()
+    yield
+    capability_overrides.reset()
+
+
+@pytest.fixture(autouse=True)
 def never_let_tests_reach_a_remote_database(tmp_path, monkeypatch):
     """Neutralise an ambient DATABASE_URL that points at a real deployment.
 

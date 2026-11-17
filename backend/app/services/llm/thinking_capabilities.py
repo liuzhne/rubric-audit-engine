@@ -55,6 +55,9 @@ SOURCE_LEGACY = "legacy"
 #: 能力表做出的「可以关闭」判断：观测到思考时记一行 thinking_capability_mismatch。
 TABLE_SOURCES = frozenset({SOURCE_TABLE, SOURCE_FAMILY_DEFAULT})
 
+#: 管理员记录的 key 前缀；``model_version`` 据此追加 ``;cap=<哈希前 8 位>``。
+OVERRIDE_KEY_PREFIX = "db:"
+
 SCOPE_OFF = "off"
 SCOPE_AUXILIARY = "auxiliary"
 SCOPE_ALL = "all"
@@ -86,6 +89,8 @@ class ThinkingCapability:
     sources: tuple[str, ...]
     verified_on: str
     note: str = ""
+    #: 管理员在“模型管理”登记的记录：内容哈希（docs/模型管理页与评分思考修正方案.md 3.2）。代码记录为空。
+    override_hash: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "off_request", _frozen(self.off_request))
@@ -93,6 +98,9 @@ class ThinkingCapability:
 
     @property
     def key(self) -> str:
+        if self.override_hash:
+            # 管理员记录的 key 带内容哈希：改了记录，运行身份跟着变（见 ``model_version_suffix``）。
+            return "%s%s" % (OVERRIDE_KEY_PREFIX, self.override_hash[:8])
         return "%s:%s:%s" % ("+".join(self.protocols), "+".join(self.families), self.model_prefix or "*")
 
 
@@ -358,16 +366,23 @@ def prefix_matches(name: str, prefix: str) -> bool:
 
 
 def lookup(protocol: str, base_url, model_name) -> ThinkingCapability | None:
-    """同一协议与主机族里前缀命中、且最长的那条记录。"""
+    """同一协议与主机族里前缀命中、且最长的那条记录。
+
+    管理员在“模型管理”登记的记录与代码表一起比（docs/模型管理页与评分思考修正方案.md 3.2）：
+    前缀最长的胜出，一样长时管理员记录优先。
+    """
+
+    from backend.app.services.llm import capability_overrides
 
     family = hosts.host_family(base_url)
     name = normalize_model_name(model_name)
     best = None
-    for capability in CAPABILITIES:
+    for capability in (*capability_overrides.current(), *CAPABILITIES):
         if protocol not in capability.protocols or family not in capability.families:
             continue
         if not prefix_matches(name, capability.model_prefix):
             continue
+        # 管理员记录排在前面，所以同样长时只有更长的才能替换它。
         if best is None or len(capability.model_prefix) > len(best.model_prefix):
             best = capability
     return best
@@ -599,6 +614,9 @@ def model_version_suffix(plan: ThinkingPlan, *, max_tokens_explicit: bool) -> st
     """强度与放开后的请求上限写进 ``model_version``（PromptEnvelope 的 provider 是封闭结构）。"""
 
     parts = []
+    if plan.entry and plan.entry.startswith(OVERRIDE_KEY_PREFIX):
+        # 管理员记录可以随时改写法，而运行身份只记开关与强度：带上记录的内容哈希，改了就不复用旧判定。
+        parts.append(";cap=%s" % plan.entry[len(OVERRIDE_KEY_PREFIX):])
     if plan.effort:
         parts.append(";effort=%s" % plan.effort)
     if plan.raises_output_limit and not max_tokens_explicit:

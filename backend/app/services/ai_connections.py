@@ -425,6 +425,10 @@ def resolve_connection_runtime(
         raise ValueError("AI connection is disabled")
     if connection.status != "active" and not (allow_disabled and connection.status == "disabled"):
         raise ValueError("AI connection is unavailable")
+    # 建适配器之前刷新管理员登记的模型能力（最多每 30 秒读一次库）：适配器构造时就按能力表算好思考计划。
+    from backend.app.services.llm import capability_overrides
+
+    capability_overrides.refresh_if_stale(db)
     return ConnectionRuntime(
         connection_id=connection.id,
         key_version=connection.key_version,
