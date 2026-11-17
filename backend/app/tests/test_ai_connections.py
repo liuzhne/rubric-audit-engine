@@ -460,6 +460,8 @@ def test_draft_probe_uses_key_only_server_side_without_persisting_it(client, mon
         "status": "verified",
         "detection": "manual",
         "base_url": "https://api.openai.com/v1",
+        "thinking": "unknown",
+        "thinking_capability": "unknown",
     }
     assert "secret-key" not in response.text
     with client.session_factory() as session:

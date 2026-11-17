@@ -246,7 +246,8 @@ def test_test_draft_returns_detected_protocol_source_and_trimmed_url(client, mon
         "粘贴完整地址", "https://gw.example/v1/chat/completions"))
     assert response.status_code == 200, response.text
     assert response.json() == {"provider_type": CHAT, "model_name": "model-x", "status": "verified",
-                               "detection": "url_suffix", "base_url": "https://gw.example/v1"}
+                               "detection": "url_suffix", "base_url": "https://gw.example/v1",
+                               "thinking": "unknown", "thinking_capability": "unknown"}
     assert calls == [(CHAT, "https://gw.example/v1")]
 
 
@@ -260,3 +261,49 @@ def test_saved_connection_test_keeps_stored_protocol(client, monkeypatch):
     assert tested.json()["provider_type"] == RESPONSES
     assert tested.json()["detection"] == "stored"
     assert calls == [(RESPONSES, "https://gw.example/v1")]
+
+
+# ---------------------------------------------------------------- 连接测试顺带报告思考（模型管理页与评分思考修正方案 3.1）
+
+ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4"
+
+
+@pytest.mark.parametrize(
+    "provider_type, base_url, model, body, expected",
+    [
+        (CHAT, ZHIPU_URL, "glm-5.3",
+         {"choices": [{"message": {"content": "OK", "reasoning_content": "想一想"}}]},
+         {"thinking": "observed", "thinking_capability": "forced"}),
+        (CHAT, ZHIPU_URL, "glm-5.2",
+         {"choices": [{"message": {"content": "OK"}}], "usage": {"completion_tokens_details": {"reasoning_tokens": 0}}},
+         {"thinking": "not_observed", "thinking_capability": "can_disable"}),
+        (CHAT, "https://gw.example/v1", "brand-new-model",
+         {"choices": [{"message": {"content": "OK"}}], "usage": {"completion_tokens_details": {"reasoning_tokens": 12}}},
+         {"thinking": "observed", "thinking_capability": "unknown"}),
+        (RESPONSES, "https://api.openai.com/v1", "gpt-5",
+         {"usage": {"output_tokens_details": {"reasoning_tokens": 64}}},
+         {"thinking": "observed", "thinking_capability": "forced"}),
+        (CHAT, ZHIPU_URL, "glm-5.3", "not json", {"thinking": "unknown", "thinking_capability": "forced"}),
+    ],
+)
+def test_connection_probe_reports_thinking(provider_type, base_url, model, body, expected):
+    from backend.app.services.ai_connections import thinking_observation
+
+    request = httpx.Request("POST", base_url)
+    response = (httpx.Response(200, json=body, request=request) if isinstance(body, dict)
+                else httpx.Response(200, text=body, request=request))
+    assert thinking_observation(provider_type, base_url, model, response) == expected
+
+
+def test_draft_test_returns_the_thinking_observation(client, monkeypatch):
+    _login(client, monkeypatch, "proto-thinking")
+
+    def fake_probe(runtime):
+        return {"provider_type": runtime.provider_type, "model_name": runtime.model_name,
+                "thinking": "observed", "thinking_capability": "unknown"}
+
+    monkeypatch.setattr("backend.app.api.routes.ai_connections.verify_connection_runtime", fake_probe)
+    tested = client.post("/api/ai-connections/test-draft", json=_payload("网关", "https://gw.example/v1", CHAT))
+    assert tested.status_code == 200, tested.text
+    assert tested.json()["thinking"] == "observed"
+    assert tested.json()["thinking_capability"] == "unknown"

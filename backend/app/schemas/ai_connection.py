@@ -72,3 +72,6 @@ class AIConnectionProbeResult(BaseModel):
     # 测试已保存连接不重新识别，依据为 stored。
     detection: ProtocolDetection = "stored"
     base_url: str | None = None
+    # 探测应答里有没有思考、能力表怎么记（docs/模型管理页与评分思考修正方案.md 3.1）。
+    thinking: Literal["observed", "not_observed", "unknown"] = "unknown"
+    thinking_capability: Literal["forced", "can_disable", "unknown"] = "unknown"

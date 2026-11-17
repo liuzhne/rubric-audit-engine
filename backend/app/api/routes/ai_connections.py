@@ -48,8 +48,12 @@ def _enforce_rate_limit(principal: CurrentPrincipal) -> None:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
-def _resolve_protocol(payload: AIConnectionCreate, organization_id: str, *, verify: bool) -> ProtocolResolution:
-    """Validate the draft fields, then decide the protocol (see ai_connection_protocol)."""
+def _resolve_protocol(payload: AIConnectionCreate, organization_id: str, *, verify: bool,
+                      probe_results: list | None = None) -> ProtocolResolution:
+    """Validate the draft fields, then decide the protocol (see ai_connection_protocol).
+
+    ``probe_results`` 收集每次成功探测的结果（测试草稿时取最后一次的思考观测）。
+    """
 
     base_url = validate_base_url(payload.base_url)
     options = validate_provider_options(payload.provider_options)
@@ -60,7 +64,7 @@ def _resolve_protocol(payload: AIConnectionCreate, organization_id: str, *, veri
     def probe(provider_type: str, candidate_base_url: str) -> None:
         # 协议相关的参数校验在发请求之前：Claude 专属参数不能发给 Chat/Responses，反之亦然。
         validate_provider_options_for(provider_type, options)
-        verify_connection_runtime(ConnectionRuntime(
+        result = verify_connection_runtime(ConnectionRuntime(
             connection_id="draft",
             key_version=0,
             organization_id=organization_id,
@@ -70,6 +74,8 @@ def _resolve_protocol(payload: AIConnectionCreate, organization_id: str, *, veri
             provider_options=options,
             api_key=api_key,
         ))
+        if probe_results is not None and isinstance(result, dict):
+            probe_results.append(result)
 
     try:
         return resolve_protocol(requested=payload.provider_type, base_url=base_url, verify=verify, probe=probe)
@@ -185,8 +191,9 @@ def test_draft_connection(
 ):
     _enforce_rate_limit(principal)
     organization_id = _organization_id(principal)
+    probes: list = []
     try:
-        resolution = _resolve_protocol(payload, organization_id, verify=True)
+        resolution = _resolve_protocol(payload, organization_id, verify=True, probe_results=probes)
     except ValueError as exc:
         audit(db, "ai_connection.draft_test_failed", actor_id=principal.user_id, organization_id=organization_id, metadata={"provider_type": payload.provider_type})
         db.commit()
@@ -201,6 +208,7 @@ def test_draft_connection(
         "status": "verified",
         "detection": resolution.source,
         "base_url": resolution.base_url,
+        **{key: probes[-1][key] for key in ("thinking", "thinking_capability") if probes and key in probes[-1]},
     }
 
 

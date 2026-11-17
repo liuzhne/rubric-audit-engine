@@ -1980,7 +1980,7 @@ ChatThread：local === "failed" 的气泡下面显示“没有发出去 · 重�
 
 模块：
 - `llm/hosts.py`：`host_family(base_url)` 把主机归成 `vertex`、`gemini_api`、`zhipu`、`openrouter`、`dashscope`、`deepseek`、`moonshot`、`openai`、`anthropic`、`bedrock`、`other`。`auth_headers.is_vertex_host` 与 `thinking_params.is_google_openai_host` 都改为调用它。
-- `llm/thinking_capabilities.py`：能力表 `CAPABILITIES`（每条：协议、主机族、模型名前缀、能否关闭、关闭写法、最低强度与写法、最大输出、来源、核实日期）；`lookup` 按规整后的模型名取最长前缀，前缀必须落在版本号边界上；`resolve_chat` / `resolve_messages` / `resolve_responses` 按“显式配置 → 表 → 未知模型”得到不可变的 `ThinkingPlan`；`legacy_*_plan` 复现改动前的行为；`plans()` 按 `THINKING_CAPABILITY_SCOPE` 返回 `(辅助计划, 评分计划)`。
+- `llm/thinking_capabilities.py`：能力表 `CAPABILITIES`（每条：协议、主机族、模型名前缀、能否关闭、关闭写法、最低强度与写法、最大输出、来源、核实日期）；`lookup` 按规整后的模型名取最长前缀，前缀必须落在版本号边界上；`resolve_chat` / `resolve_messages` / `resolve_responses` 按“显式配置 → 表 → 未知模型”得到不可变的 `ThinkingPlan`；`legacy_*_plan` 复现改动前的行为；`plans()` 按 `THINKING_CAPABILITY_SCOPE` 返回 `(辅助计划, 评分计划)`；`auxiliary` 下表里记着关不掉思考、旧行为却声明不思考的模型，评分计划也取能力表计划（2026-11-17）。
 - `llm/thinking_params.py`：只剩旧行为（评分路径在 scope 不是 `all` 时用），`google_can_disable_thinking` 改查表。
 
 调用链：
@@ -2171,3 +2171,10 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - 判定账本身份（`decision_identity`）哈希整个请求信封，信封里有 `runtime_identity` 与 `policy_hash`；本次两者都不变，所以已有判定照常复用。
 
 维护记录：2026-11-16 · 扣分合计超满分封底于 0：聚合行为与展示变化，模块边界不变，无迁移。
+
+### 2026-11-17 关不掉思考的模型照常评分
+
+- `llm/thinking_capabilities.plans()`：新增 `_legacy_certain_to_fail` 判定，命中时评分计划等于辅助计划，其余情况不变。
+- `services/ai_connections.verify_connection_runtime`：返回值增加 `thinking_observation()` 的两个字段，只读探测应答的推理计数与思考块，不读正文、不多发请求；`/ai-connections/test-draft` 与 `/{id}/test` 透传，前端 `lib/connection-thinking.js` 生成提示。
+
+维护记录：2026-11-17 · 关不掉思考的模型照常评分：评分计划的选择与连接测试返回值变化，无迁移。
