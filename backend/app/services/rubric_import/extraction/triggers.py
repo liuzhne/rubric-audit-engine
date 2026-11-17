@@ -156,7 +156,7 @@ def detect_triggers(extraction: TableExtraction, ledger: SourceLedger, coverage:
     for issue in extraction.structure_issues:
         if issue.get("code") == "DUPLICATE_SCORE_COLUMN":
             triggers.append(
-                _trigger("E10", "表头有多列像满分列：" + issue.get("reason", ""), issue.get("unit_ids") or [],
+                _trigger("E10", "表头有多列都像满分列，" + issue.get("reason", ""), issue.get("unit_ids") or [],
                          {"columns": list(issue.get("columns") or []), "reason": issue.get("reason")})
             )
             continue

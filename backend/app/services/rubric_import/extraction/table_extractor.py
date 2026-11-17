@@ -479,7 +479,7 @@ def _resolve_score_columns(sheet: SheetView, header_index: int, mapping: dict, h
     issue = {"code": DUPLICATE_SCORE_COLUMN, "columns": [column + 1 for column in candidates],
              "unit_ids": [unit for unit in sheet.row_units(header_index) if unit]}
     if len(per_row) != 1 or not merged:
-        return mapping, [], {**issue, "reason": "多列表头都像满分列，无法判断哪一列是评分项满分。"}
+        return mapping, [], {**issue, "reason": "无法判断哪一列是评分项满分。"}
     revised = dict(mapping)
     revised["max_score"] = per_row[0]
     if not _parent_sums_match(sheet, header_index, per_row[0], merged):
