@@ -198,6 +198,70 @@ def cancel_job(state: QueryState, runtime: Runtime[RunContext]):
     return {"next": END}
 
 
+# --- 列清单（docs/评分助手意图识别模型优先方案.md 3.2）：不需要先选任务，不进查询图 --------------------
+
+LIST_LIMIT = 8
+RUBRICS_LINK = {"type": "link", "label": "打开评分标准页", "path": "/rubrics"}
+TASKS_LINK = {"type": "link", "label": "打开评分任务页", "path": "/tasks"}
+
+
+def _unpublished_rubric_count(ctx: RunContext) -> int:
+    from backend.app.api import actions
+
+    return sum(1 for rubric in actions.list_visible_rubrics(ctx.db, ctx.principal)
+               if rubric.status not in {"published", "archived"})
+
+
+def _numbered(lines: list[str]) -> str:
+    return "\n".join("%d. %s" % (index, line) for index, line in enumerate(lines, start=1))
+
+
+def list_rubrics(ctx: RunContext) -> None:
+    """我能用的评分标准：已发布的逐条列出，两份以上给选择卡片（点一份就用它开始评分）。"""
+
+    from backend.app.services.assistant.views import document_type_label
+
+    rubrics = tools.call(ctx, "list_published_rubrics")
+    unpublished = _unpublished_rubric_count(ctx)
+    drafts = "；另有 %d 份还没发布，在评分标准页发布后才能用来评分" % unpublished if unpublished else ""
+    if not rubrics:
+        ctx.say("还没有已发布的评分标准%s。可以上传你的评分规则和模板，我来帮你导入。" % drafts,
+                [quick_actions_card(["import_rubric"]), RUBRICS_LINK], intent="list_rubrics")
+        return
+    lines = ["%s（%s · 第 %s 版）" % (item["name"], document_type_label(item["business_profile_key"]), item["version"])
+             for item in rubrics[:LIST_LIMIT]]
+    more = "，下面是最新发布的 %d 份" % LIST_LIMIT if len(rubrics) > LIST_LIMIT else ""
+    text = "你能用的评分标准有 %d 份%s%s：\n%s" % (len(rubrics), more, drafts, _numbered(lines))
+    if len(rubrics) >= choices.MIN_OPTIONS and not choices.unavailable(ctx, "use_rubric"):
+        current = choices.current_id(ctx, "use_rubric")
+        ctx.say(text + "\n点一份就用它开始评分。", [choices.card(
+            "use_rubric",
+            [{"id": item["id"], "label": item["name"], "current": item["id"] == current} for item in rubrics],
+        ), RUBRICS_LINK], intent="list_rubrics")
+        return
+    ctx.say(text, [quick_actions_card(["start_grading"]), RUBRICS_LINK], intent="list_rubrics")
+
+
+def list_tasks(ctx: RunContext) -> None:
+    """我最近的评分任务：逐条列出，两个以上给选择卡片（选中后可以接着问进度、扣分）。"""
+
+    batches = tools.call(ctx, "list_recent_batches", limit=LIST_LIMIT)
+    if not batches:
+        ctx.say("还没有评分任务。要开始评分吗？", [quick_actions_card(["start_grading"])], intent="list_tasks")
+        return
+    text = "你最近的评分任务（最新的在前）：\n%s" % _numbered([batch["name"] for batch in batches])
+    if len(batches) >= choices.MIN_OPTIONS:
+        current = (ctx.conversation.focus or {}).get("batch_id")
+        ctx.say(text + "\n选一个，就可以接着问它的进度和扣分。", [choices.card(
+            "focus_task",
+            [{"id": batch["id"], "label": batch["name"], "current": batch["id"] == current} for batch in batches],
+        ), TASKS_LINK], intent="list_tasks")
+        return
+    ctx.set_focus(batch_id=batches[0]["id"], batch_name=batches[0]["name"])
+    ctx.say(text + "\n可以接着问它的进度和扣分。", [quick_actions_card(["query_progress", "query_overview"]), TASKS_LINK],
+            intent="list_tasks")
+
+
 def build_query_graph():
     builder = StateGraph(QueryState, context_schema=RunContext)
     builder.add_node("resolve_batch", resolve_batch)

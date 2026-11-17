@@ -180,6 +180,7 @@ jobs:
           SITE_LEADS_ENABLED: ${{ vars.SITE_LEADS_ENABLED }}
           ASSISTANT_AGENT_ENABLED: ${{ vars.ASSISTANT_AGENT_ENABLED }}
           ASSISTANT_STREAM_ENABLED: ${{ vars.ASSISTANT_STREAM_ENABLED }}
+          ASSISTANT_INTENT_MODEL_FIRST: ${{ vars.ASSISTANT_INTENT_MODEL_FIRST }}
         run: |
           set -euo pipefail
           host="${SITE_URL#https://}"

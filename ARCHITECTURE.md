@@ -2171,3 +2171,11 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - 判定账本身份（`decision_identity`）哈希整个请求信封，信封里有 `runtime_identity` 与 `policy_hash`；本次两者都不变，所以已有判定照常复用。
 
 维护记录：2026-11-16 · 扣分合计超满分封底于 0：聚合行为与展示变化，模块边界不变，无迁移。
+
+### 2026-11-17 评分助手意图识别：模型优先
+
+- `services/assistant/intents.py`：新增 `interpret_model_first`。有可用助手模型（不是 Mock）时先调模型识别意图，模型失败或输出不合格才用 `match_rules`；`_guard`（问句不触发写操作）对两者同样生效。意图表增加 `list_rubrics`、`list_tasks`，规则里列清单排在导入之前，`import_rubric` 不再匹配“已导入的 / 上传过的”。关不掉思考的模型识别超时为 60 秒。
+- `services/assistant/runner.py`：Agent 没有接手时，`ASSISTANT_INTENT_MODEL_FIRST`（默认开）决定走模型优先还是原来的规则优先；Agent 刚降级的这一句仍不调模型。附件、快捷按钮、按钮原文、打字回答选择卡片照旧不经模型。
+- `services/assistant/queries.py`：`list_rubrics` / `list_tasks` 两个函数（不进查询图），复用 `tools` 的 `list_published_rubrics` / `list_recent_batches`，两个以上时给选择卡片（`use_rubric` / `focus_task`）。
+
+维护记录：2026-11-17 · 评分助手意图识别模型优先：识别顺序与意图表变化，无迁移，Agent 提示词指纹不变。
