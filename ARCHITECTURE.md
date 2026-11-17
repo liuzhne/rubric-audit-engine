@@ -2171,3 +2171,5 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - 判定账本身份（`decision_identity`）哈希整个请求信封，信封里有 `runtime_identity` 与 `policy_hash`；本次两者都不变，所以已有判定照常复用。
 
 维护记录：2026-11-16 · 扣分合计超满分封底于 0：聚合行为与展示变化，模块边界不变，无迁移。
+
+维护记录：2026-11-17 · 助手评测登记 GLM-5.3 价目：`eval/assistant_eval.MODEL_PRICES` 改按（端点家族, 模型）查，模块边界不变。
