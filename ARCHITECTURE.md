@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-17 | 导入评分表时自动识别表格结构 | 新增 `rubric_import/structure_check.py`、`ai_tasks/wake.py`、`ImportStructureCheck.vue`；导入会话有强信号时自动建结构识别任务，对照与采用走代码；状态存 `draft_data.structure_check`，无迁移 |
 | 2026-11-17 | 同名分值列、带说明的合计行与强信号 | `rubric_import/extraction/table_extractor.py` 区分评分项满分与上级分值、识别带说明的合计行与表头声明满分、档位列降级为说明；`triggers.py` 增加 `strong` 与 E10/E11；无迁移，调用链不变 |
 | 2026-11-17 | 评分助手回复不露引用编号 | `agent/reply.validate_reply` 去掉记号之后、注入检测与说法核对之前，把本回合登记过的编号去掉或换成名称（`TurnRefs.label_of`），没有名称可换整体作废；提示词与工具定义不变，调用链与持久化边界不变 |
 | 2026-11-16 | 评分助手选择卡片（#112 复审） | `agent/reply.validate_reply` 的说法核对移到 choose 校验之后，`claims.problem` 加 `choosing`；`TurnRefs.name_of`；`runner._choose_rubric` 记已选前先查已发布列表；模块边界不变 |
@@ -843,6 +844,30 @@ XLSX 适配器继续以 `unit_id` 保留合并单元格来源；确定性表格�
 `extraction/triggers.py` 给每条触发加 `strong`：E4（合计行或表头声明的满分与解析合计不一致）、E9、E10（同名满分列未能确定）、E11（多个评分项共用一个满分单元格）以及“未识别列里数字占多数且不是连续编号”的 E3 为强信号，其余为弱信号。本节只改确定性抽取与触发判定；数据库、接口、提示词与评分链不变，无迁移。
 
 维护记录：2026-11-17 · 同名分值列与强信号：核对表头解析、台账登记与触发链路；`raw_parse_output.triggers` 每条多一个 `strong` 字段，其余持久化不变。
+
+### 2026-11-17 导入评分表时自动识别表格结构
+
+`IMPORT_STRUCTURE_AUTO_ENABLED` 打开后，导入链路多一段（`services/rubric_import/structure_check.py`）：
+
+```
+POST /import-sessions（或会话 reupload-confirm）
+  → prepare_file_import（确定性）→ import_sessions.create / apply_reupload
+  → structure_check.start：strong_triggers 非空 → structure_state.import_structure_request（会话里保存的原文件；
+    known_mapping 去掉可疑的满分列，extra_rows 补发合计行、丢弃行与信号所在行）
+    → create_ai_task(kind=structure_suggestion, rubric_id=None, 目标 import) → ai_tasks.wake.wake_task
+GET /import-sessions/{id} → structure_check.refresh（任务成功后把结果缓存进会话）→ view：按原表行号对齐当前草稿
+    与 import_structure_preview（按模型结构从原表取出的评分项），给出逐行差异、合计、列用途变化
+POST …/structure/apply → 用会话原文件带 structure_override 重新 prepare_file_import，apply_reupload 替换草稿
+POST …/structure/dismiss → 只记选择
+```
+
+- 持久化：`RubricImportSession.draft_data.structure_check`（`task_id`、`signals`、建任务时的 `state_version`、缓存的 `result`、`current_columns`、`dismissed` / `applied`），无迁移。会话版本与建任务时不同即为 `stale`，不能采用。
+- 模型只输出结构；对照与采用后的草稿全部由代码从原表单元格取得。识别失败、不可用都不影响导入。
+- 已建评分标准重新上传（`POST /rubrics/{id}/reupload-confirm`）后，新编译记录有强信号且还没有结构建议时，`structure_check.start_for_rubric` 自动建草稿目标的识别任务，结果进现有的结构建议面板（`StructureSuggestionPanel`），合入流程不变。
+- 任务叫醒从 `api/routes/ai_tasks.py` 移到 `services/ai_tasks/wake.py`，路由与导入会话共用。
+- 前端：`ImportStructureCheck.vue` 放在导入页“解析出的评分项”上方；`RubricsView` 在 `running` 时每 3 秒刷新会话；对照未处理（`running` / `differs`）时点“确认评分项，下一步”先二次确认。
+
+维护记录：2026-11-17 · 导入评分表时自动识别表格结构：核对导入、AI 任务、会话持久化与前端调用链；无迁移，评分链不变。
 
 ### 2026-09-21 合并父级评分项层级展示修正
 

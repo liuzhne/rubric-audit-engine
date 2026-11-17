@@ -222,6 +222,44 @@ export const useRubricsStore = defineStore("rubrics", () => {
     return result;
   }
 
+  /**
+   * 表格结构自动识别进行中时刷新会话（只换 structure_check 与版本，不覆盖本地草稿编辑之外的内容）。
+   * 会话已不是当前会话或已结束时返回 null。
+   */
+  async function refreshImportStructure() {
+    const current = activeImportSession.value;
+    if (!current?.id) return null;
+    const result = await api.get(`/rubrics/import-sessions/${current.id}`);
+    const latest = activeImportSession.value;
+    if (latest?.id !== current.id || result?.status !== "draft") return null;
+    // 读取期间本地又保存过（版本更新）：丢弃这次较旧的结果，等下一轮。
+    if (Number(result.state_version) < Number(latest.state_version)) return null;
+    activeImportSession.value = result;
+    return result;
+  }
+
+  /** 采用自动识别的表格结构：按模型结构从原表重新解析，替换草稿。 */
+  async function applyImportStructure() {
+    const current = activeImportSession.value;
+    if (!current?.id) throw new Error("当前没有待确认的导入会话。");
+    const result = await api.post(`/rubrics/import-sessions/${current.id}/structure/apply`, {
+      expected_state_version: current.state_version,
+    });
+    activeImportSession.value = result;
+    return result;
+  }
+
+  /** 保留当前解析结果，不采用识别结果（只记选择）。 */
+  async function dismissImportStructure() {
+    const current = activeImportSession.value;
+    if (!current?.id) throw new Error("当前没有待确认的导入会话。");
+    const result = await api.post(`/rubrics/import-sessions/${current.id}/structure/dismiss`, {
+      expected_state_version: current.state_version,
+    });
+    activeImportSession.value = result;
+    return result;
+  }
+
   async function cancelImportSession() {
     const current = activeImportSession.value;
     if (!current?.id) throw new Error("当前没有待确认的导入会话。");
@@ -704,6 +742,9 @@ export const useRubricsStore = defineStore("rubrics", () => {
     error,
     loading,
     activeImportSession,
+    refreshImportStructure,
+    applyImportStructure,
+    dismissImportStructure,
     lastImport,
     reset,
     load,

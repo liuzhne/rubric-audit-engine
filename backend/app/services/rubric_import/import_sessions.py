@@ -146,9 +146,10 @@ def create(
     return row
 
 
-def serialize(row: models.RubricImportSession) -> dict:
+def serialize(row: models.RubricImportSession, *, structure_check: dict | None = None) -> dict:
     draft = row.draft_data or {}
     return {
+        "structure_check": structure_check,
         "id": row.id,
         "status": row.status,
         "state_version": row.state_version,

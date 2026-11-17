@@ -57,6 +57,40 @@ def sheets_from_ledger_mapping(mapping: dict):
     return pipeline._override_sheets(SourceLedger.from_mapping(mapping))
 
 
+# 强信号指向满分列可能取错时，当前映射里的满分列不作为提示发给模型，免得把它带偏。
+_SUSPECT_SCORE_CODES = {"E3", "E4", "E10", "E11"}
+
+
+def _model_hints(extraction, triggers) -> tuple[dict, dict]:
+    """已知映射与补发行：被丢弃行、合计行、强信号涉及的行，避免模型只看到前 15 行。"""
+
+    mapping = {name: column + 1 for name, column in extraction.mapping.items()}
+    strong = [item for item in triggers if item.get("strong")]
+    if any(item["code"] in _SUSPECT_SCORE_CODES for item in strong):
+        mapping.pop("max_score", None)
+    rows = [item["row_number"] for item in extraction.dropped_rows]
+    if extraction.total_row:
+        rows.append(extraction.total_row["row_number"])
+    prefix = f"xlsx:{extraction.sheet_title}!R"
+    for item in strong:
+        for unit_id in item.get("unit_ids") or []:
+            if unit_id.startswith(prefix):
+                rows.append(int(unit_id[len(prefix):].split("C", 1)[0]))
+    return mapping, {extraction.sheet_title: sorted(set(rows))}
+
+
+def current_mapping_columns(sheets, extraction) -> list[dict]:
+    """当前解析用到的列：列号、表头文字、字段，供对照“列用途”的变化。"""
+
+    sheet = next((item for item in sheets if item.title == extraction.sheet_title), None)
+    headers = sheet.rows[extraction.header_index] if sheet else ()
+    return [
+        {"column": column + 1, "header": str(headers[column] or "").strip() if column < len(headers) else "",
+         "field": field_name}
+        for field_name, column in sorted(extraction.mapping.items(), key=lambda item: item[1])
+    ]
+
+
 def import_structure_request(*, rules_bytes, template_bytes, business_profile_key: str = "thesis") -> dict:
     """导入前识别的冻结输入：上传文件只解析成台账（不落库），连同失败码与发送内容。"""
 
@@ -76,17 +110,22 @@ def import_structure_request(*, rules_bytes, template_bytes, business_profile_ke
         raise ParseStateError(422, "NO_TABLE", "文档中没有可以识别结构的表格。")
     scratch = SourceLedger.from_mapping(ledger.to_mapping())
     known_mapping: dict = {}
+    extra_rows: dict = {}
+    current_columns: list = []
     try:
         extraction = extract_table(sheets, scratch, header_aliases=header_aliases_for(business_profile_key))
-        codes = [item["code"] for item in detect_triggers(extraction, scratch, compute_coverage(scratch))]
-        known_mapping = {name: column + 1 for name, column in extraction.mapping.items()}
+        triggers = detect_triggers(extraction, scratch, compute_coverage(scratch))
+        codes = [item["code"] for item in triggers]
+        known_mapping, extra_rows = _model_hints(extraction, triggers)
+        current_columns = current_mapping_columns(sheets, extraction)
     except ValueError:
         codes = [failure_code]
     try:
-        request = build_table_payload(sheets, failure_codes=codes, known_mapping=known_mapping)
+        request = build_table_payload(sheets, failure_codes=codes, known_mapping=known_mapping, extra_rows=extra_rows)
     except StructureError as exc:
         raise _structure_problem(exc) from exc
-    return {"ledger": ledger.to_mapping(), "failure_codes": codes, "request": request}
+    return {"ledger": ledger.to_mapping(), "failure_codes": codes, "request": request,
+            "current_columns": current_columns}
 
 
 def estimate_import_structure(*, rules_bytes, template_bytes, business_profile_key: str = "thesis") -> dict:
@@ -105,9 +144,12 @@ def import_structure_preview(ledger_mapping: dict, result: dict, *, failure_code
         **result,
         "failure_codes": list(failure_codes),
         "preview": [
-            {"name": row.criterion.name, "max_score": row.criterion.max_score, "row_number": row.row_number}
+            {"name": row.criterion.name, "max_score": row.criterion.max_score, "row_number": row.row_number,
+             "dimension": row.criterion.dimension}
             for row in preview.records
         ],
+        "proposed_columns": current_mapping_columns(sheets, preview),
+        "declared_total": (preview.total_row or {}).get("declared_total"),
     }
 
 
@@ -209,8 +251,17 @@ def draft_structure_request(session: Session, rubric_id: str) -> dict:
     extra = [item["row_number"] for item in extraction.get("dropped_rows") or []]
     if extraction.get("total_row"):
         extra.append(extraction["total_row"]["row_number"])
-    options = {"failure_codes": codes, "known_mapping": extraction.get("mapping") or {},
-               "extra_rows": {extraction.get("sheet_title"): extra}}
+    known_mapping = dict(extraction.get("mapping") or {})
+    strong = [item for item in raw.get("triggers") or [] if item.get("strong")]
+    if any(item["code"] in _SUSPECT_SCORE_CODES for item in strong):
+        known_mapping.pop("max_score", None)
+    prefix = f"xlsx:{extraction.get('sheet_title')}!R"
+    for item in strong:
+        for unit_id in item.get("unit_ids") or []:
+            if unit_id.startswith(prefix):
+                extra.append(int(unit_id[len(prefix):].split("C", 1)[0]))
+    options = {"failure_codes": codes, "known_mapping": known_mapping,
+               "extra_rows": {extraction.get("sheet_title"): sorted(set(extra))}}
     try:
         request = build_table_payload(sheets, **options)
     except StructureError as exc:

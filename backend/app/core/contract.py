@@ -8,6 +8,6 @@
 """
 
 API_CONTRACT_HEADER = "X-PGS-Contract"
-API_CONTRACT_VERSION = "2026-11-16.assistant-choice"
+API_CONTRACT_VERSION = "2026-11-17.import-structure-check"
 
 __all__ = ["API_CONTRACT_HEADER", "API_CONTRACT_VERSION"]

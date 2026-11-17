@@ -1744,6 +1744,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rubrics/import-sessions/{session_id}/structure/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply Rubric Import Structure
+         * @description 采用自动识别的表格结构：用会话里保存的原文件带结构重新解析，替换草稿。
+         */
+        post: operations["apply_rubric_import_structure_api_rubrics_import_sessions__session_id__structure_apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rubrics/import-sessions/{session_id}/structure/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dismiss Rubric Import Structure
+         * @description 保留当前解析结果，不采用自动识别的结构（只记用户的选择，不改草稿）。
+         */
+        post: operations["dismiss_rubric_import_structure_api_rubrics_import_sessions__session_id__structure_dismiss_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/rubrics/import-template.xlsx": {
         parameters: {
             query?: never;
@@ -5488,6 +5528,7 @@ export interface components {
              * @enum {string}
              */
             status: "draft" | "confirmed" | "expired" | "cancelled";
+            structure_check?: components["schemas"]["RubricImportStructureCheck"] | null;
             /** Template Summary */
             template_summary?: {
                 [key: string]: unknown;
@@ -5549,6 +5590,78 @@ export interface components {
             text: string;
             /** Unit Id */
             unit_id?: string | null;
+        };
+        /** RubricImportStructureCheck */
+        RubricImportStructureCheck: {
+            comparison?: components["schemas"]["RubricImportStructureComparison"] | null;
+            /** Message */
+            message?: string | null;
+            /** Signals */
+            signals?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "running" | "unavailable" | "failed" | "differs" | "consistent" | "dismissed" | "applied" | "stale";
+            /** Task Id */
+            task_id?: string | null;
+        };
+        /** RubricImportStructureColumn */
+        RubricImportStructureColumn: {
+            /** Column */
+            column: number;
+            /** Current Field */
+            current_field?: string | null;
+            /**
+             * Header
+             * @default
+             */
+            header: string;
+            /** Proposed Field */
+            proposed_field?: string | null;
+        };
+        /** RubricImportStructureComparison */
+        RubricImportStructureComparison: {
+            /** Columns */
+            columns?: components["schemas"]["RubricImportStructureColumn"][];
+            /** Consistent */
+            consistent: boolean;
+            /** Current Total */
+            current_total: number;
+            /** Declared Total */
+            declared_total?: number | null;
+            /** Proposed Total */
+            proposed_total: number;
+            /** Reasons */
+            reasons?: {
+                [key: string]: unknown;
+            }[];
+            /** Rows */
+            rows?: components["schemas"]["RubricImportStructureRow"][];
+        };
+        /** RubricImportStructureRow */
+        RubricImportStructureRow: {
+            /**
+             * Change
+             * @enum {string}
+             */
+            change: "same" | "changed" | "added" | "removed";
+            /** Current Max Score */
+            current_max_score?: number | null;
+            /** Current Name */
+            current_name?: string | null;
+            /** Fields */
+            fields?: string[];
+            /** Proposed Dimension */
+            proposed_dimension?: string | null;
+            /** Proposed Max Score */
+            proposed_max_score?: number | null;
+            /** Proposed Name */
+            proposed_name?: string | null;
+            /** Row Number */
+            row_number: number;
         };
         /** RubricLifecycleReason */
         RubricLifecycleReason: {
@@ -10278,6 +10391,84 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RubricImportSourcePreview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    apply_rubric_import_structure_api_rubrics_import_sessions__session_id__structure_apply_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RubricImportSessionStateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricImportSessionRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dismiss_rubric_import_structure_api_rubrics_import_sessions__session_id__structure_dismiss_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RubricImportSessionStateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RubricImportSessionRead"];
                 };
             };
             /** @description Validation Error */

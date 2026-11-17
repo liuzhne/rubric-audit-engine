@@ -24,7 +24,7 @@ from backend.app.services.llm.errors import ProviderJSONOutputError
 from backend.app.services.llm.errors import ProviderCallError
 
 logger = logging.getLogger(__name__)
-STRUCTURE_PROMPT_VERSION = "rubric-structure@2"
+STRUCTURE_PROMPT_VERSION = "rubric-structure@3"
 STRUCTURE_MAX_OUTPUT_TOKENS = 8192
 DEFAULT_BUDGET_CHARS = 24_000
 _NUMERIC_RE = re.compile(r"^\d+(?:\.\d+)?$")
