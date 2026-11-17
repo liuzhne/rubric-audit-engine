@@ -1936,6 +1936,42 @@ class DocumentDerivation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
 
+class ModelCapabilityOverride(Base):
+    """平台管理员在“模型管理”登记的模型思考能力（docs/模型管理页与评分思考修正方案.md 3.2）。
+
+    全平台共享，不按组织：模型能不能关闭思考是厂商定的事实。代码里的能力表是默认值，这里的启用记录
+    与它一起参与匹配（前缀最长的胜出，一样长时这里优先）；停用即退回代码表。
+    """
+
+    __tablename__ = "model_capability_overrides"
+    __table_args__ = (
+        UniqueConstraint("protocol", "host_family", "model_prefix", name="uq_model_capability_overrides_key"),
+        CheckConstraint(
+            "protocol IN ('chat', 'responses', 'messages')", name="ck_model_capability_overrides_protocol"
+        ),
+        CheckConstraint("revision >= 1", name="ck_model_capability_overrides_revision"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    protocol: Mapped[str] = mapped_column(String(16), nullable=False)
+    host_family: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_prefix: Mapped[str] = mapped_column(String(120), nullable=False)
+    can_disable: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    off_request: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    lowest_effort: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    effort_request: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    note: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    source_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    verified_on: Mapped[str] = mapped_column(String(10), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
 @event.listens_for(Session, "before_flush")
 def _protect_document_snapshot_immutability(session, _flush_context, _instances):
     for candidate in tuple(session.dirty) + tuple(session.deleted):

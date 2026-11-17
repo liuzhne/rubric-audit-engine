@@ -4,6 +4,41 @@
  */
 
 export interface paths {
+    "/api/admin/model-capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Model Capabilities */
+        get: operations["list_model_capabilities_api_admin_model_capabilities_get"];
+        put?: never;
+        /** Create Model Capability */
+        post: operations["create_model_capability_api_admin_model_capabilities_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/model-capabilities/{capability_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update Model Capability */
+        patch: operations["update_model_capability_api_admin_model_capabilities__capability_id__patch"];
+        trace?: never;
+    };
     "/api/ai-connections": {
         parameters: {
             query?: never;
@@ -4629,6 +4664,157 @@ export interface components {
             /** Role */
             role: string;
         };
+        /** ModelCapabilityCreate */
+        ModelCapabilityCreate: {
+            /** Can Disable */
+            can_disable: boolean;
+            /** Effort Request */
+            effort_request?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Host Family */
+            host_family: string;
+            /** Lowest Effort */
+            lowest_effort?: string | null;
+            /** Max Output Tokens */
+            max_output_tokens?: number | null;
+            /** Model Prefix */
+            model_prefix: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /** Off Request */
+            off_request?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Protocol
+             * @enum {string}
+             */
+            protocol: "chat" | "responses" | "messages";
+            /** Source Url */
+            source_url: string;
+            /**
+             * Verified On
+             * Format: date
+             */
+            verified_on: string;
+        };
+        /**
+         * ModelCapabilityEntry
+         * @description 列表里的一行：代码表或管理员记录。
+         */
+        ModelCapabilityEntry: {
+            /**
+             * Active Connections
+             * @default 0
+             */
+            active_connections: number;
+            /** Can Disable */
+            can_disable: boolean;
+            /** Effort Request */
+            effort_request?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Host Family */
+            host_family: string;
+            /** Id */
+            id?: string | null;
+            /** Key */
+            key: string;
+            /** Lowest Effort */
+            lowest_effort?: string | null;
+            /** Max Output Tokens */
+            max_output_tokens?: number | null;
+            /** Model Prefix */
+            model_prefix: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /** Off Request */
+            off_request?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Overridden
+             * @default false
+             */
+            overridden: boolean;
+            /** Protocol */
+            protocol: string;
+            /** Revision */
+            revision?: number | null;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "code" | "admin";
+            /** Sources */
+            sources?: string[];
+            /** Updated At */
+            updated_at?: string | null;
+            /** Verified On */
+            verified_on: string;
+        };
+        /** ModelCapabilityList */
+        ModelCapabilityList: {
+            /** Agent Evaluated */
+            agent_evaluated: string[];
+            /** Host Families */
+            host_families: string[];
+            /** Items */
+            items: components["schemas"]["ModelCapabilityEntry"][];
+        };
+        /** ModelCapabilityUpdate */
+        ModelCapabilityUpdate: {
+            /** Can Disable */
+            can_disable: boolean;
+            /** Effort Request */
+            effort_request?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Lowest Effort */
+            lowest_effort?: string | null;
+            /** Max Output Tokens */
+            max_output_tokens?: number | null;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /** Off Request */
+            off_request?: {
+                [key: string]: unknown;
+            } | null;
+            /** Revision */
+            revision: number;
+            /** Source Url */
+            source_url: string;
+            /**
+             * Verified On
+             * Format: date
+             */
+            verified_on: string;
+        };
         /** OrganizationContextRequest */
         OrganizationContextRequest: {
             /** Organization Id */
@@ -6176,6 +6362,115 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_model_capabilities_api_admin_model_capabilities_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelCapabilityList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_model_capability_api_admin_model_capabilities_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelCapabilityCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelCapabilityEntry"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_model_capability_api_admin_model_capabilities__capability_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Organization-ID"?: string | null;
+            };
+            path: {
+                capability_id: string;
+            };
+            cookie?: {
+                pgs_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelCapabilityUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelCapabilityEntry"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_connections_api_ai_connections_get: {
         parameters: {
             query?: never;

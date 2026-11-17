@@ -21,6 +21,7 @@ from backend.app.api.routes import batches
 from backend.app.api.routes import batch_jobs
 from backend.app.api.routes import calibration
 from backend.app.api.routes import exports
+from backend.app.api.routes import model_capabilities
 from backend.app.api.routes import organizations
 from backend.app.api.routes import papers
 from backend.app.api.routes import release_gates
@@ -146,6 +147,7 @@ def create_app():
     app.include_router(system.router, prefix=settings.API_PREFIX)
     # 官网申请：公开提交不登录，管理接口在路由里逐个校验平台管理员。
     app.include_router(site.router, prefix=settings.API_PREFIX)
+    app.include_router(model_capabilities.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(calibration.router, prefix=settings.API_PREFIX, dependencies=guarded)
     app.include_router(assistant.router, prefix=settings.API_PREFIX, dependencies=guarded)
 

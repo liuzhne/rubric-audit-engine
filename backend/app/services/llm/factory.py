@@ -24,6 +24,9 @@ def _platform_runtime(session=None):
     from backend.app.services import platform_llm
 
     def _resolve(active_session):
+        from backend.app.services.llm import capability_overrides
+
+        capability_overrides.refresh_if_stale(active_session)
         config = platform_llm.get_active_config(active_session)
         if config is None:
             return None

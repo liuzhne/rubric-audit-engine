@@ -8,7 +8,7 @@ describe("thinkingNotice", () => {
   });
 
   it("观测到思考而能力表没有记录时提示登记", () => {
-    expect(thinkingNotice({ thinking: "observed", thinking_capability: "unknown" })).toContain("平台管理员登记");
+    expect(thinkingNotice({ thinking: "observed", thinking_capability: "unknown" })).toContain("模型管理");
   });
 
   it("能关闭思考、没观测到或读不出来时不提示", () => {

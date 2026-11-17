@@ -2178,3 +2178,13 @@ post_with_retry(call_context=…, output_limit_fallback=…)
 - `services/ai_connections.verify_connection_runtime`：返回值增加 `thinking_observation()` 的两个字段，只读探测应答的推理计数与思考块，不读正文、不多发请求；`/ai-connections/test-draft` 与 `/{id}/test` 透传，前端 `lib/connection-thinking.js` 生成提示。
 
 维护记录：2026-11-17 · 关不掉思考的模型照常评分：评分计划的选择与连接测试返回值变化，无迁移。
+
+### 2026-11-17 模型管理页（迁移 0047）
+
+- 新表 `model_capability_overrides`（全平台共享，不按组织）：平台管理员登记的模型思考能力，字段与 `ThinkingCapability` 一一对应，外加启用、来源、核实日期、`revision` 与审计字段。迁移给 `pgs_app` 授权并建 RLS，已加进 `postgres_verifier.RUNTIME_ACCESS_TABLES`。
+- `llm/capability_overrides.py`：进程内缓存。`thinking_capabilities.lookup` 把启用的管理员记录与代码表一起比（前缀最长的胜出，一样长时管理员记录优先）。刷新只发生在手里有会话的入口：`ai_connections.resolve_connection_runtime` 与 `llm.factory._platform_runtime`，最多每 30 秒按“行数 + 最近更新时间 + revision 之和”判断要不要重读；写入接口提交后让本进程立即失效。
+- 运行身份：命中管理员记录的计划 `entry` 为 `db:<内容哈希前 8 位>`，`model_version` 追加 `;cap=<同一哈希>`，改了记录就不复用旧判定。
+- 接口 `api/routes/model_capabilities.py`：`GET/POST /api/admin/model-capabilities`、`PATCH /…/{id}`（带 `revision`），全部 `require_platform_admin`；列表合并代码表与管理员记录，带“已被覆盖”和命中的启用连接数，另附助手 Agent 已评测模型（只读）。请求写法只收 `thinking`、`reasoning_effort`、`reasoning`、`extra_body`、`output_config`，不超过 1 KB、4 层。
+- 前端：`views/ModelsView.vue`（`/workbench/ops/models`），侧栏“运维”分组下的“模型管理”只对 `view_platform_ops` 显示；表单换算在 `lib/model-capabilities.js`。
+
+维护记录：2026-11-17 · 模型管理页：新增一张表、一个缓存模块、一组平台管理员接口与一个页面；迁移 head 为 `0047_model_capability_overrides`。

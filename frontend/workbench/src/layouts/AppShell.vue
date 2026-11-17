@@ -99,6 +99,16 @@ async function onLogout() {
           <RouterLink class="nav-item" :class="{ active: activeNav === 'ops' }" :to="{ name: 'ops' }">
             运维与质量
           </RouterLink>
+          <!-- 模型能力全平台共享，只给平台管理员（docs/模型管理页与评分思考修正方案.md Q1）。 -->
+          <RouterLink
+            v-if="session.can('view_platform_ops')"
+            class="nav-item"
+            :class="{ active: activeNav === 'models' }"
+            :to="{ name: 'models' }"
+            data-test="nav-models"
+          >
+            模型管理
+          </RouterLink>
         </template>
       </nav>
 
