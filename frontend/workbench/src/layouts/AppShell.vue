@@ -324,6 +324,9 @@ async function onLogout() {
   max-width: var(--content-max);
   /* 宽屏下居中：只设上限不居中时，多出来的宽度全堆在右边，页面看起来偏左。 */
   margin-inline: auto;
+  /* 窄屏下外壳改为纵向排列，auto 外边距会取消交叉轴的拉伸，内容区按内容宽度撑开、横向溢出；
+     显式占满一行，再由 max-width 封顶。 */
+  width: 100%;
 }
 
 /* 工作区内嵌：页面窄，内容边距收紧。 */
