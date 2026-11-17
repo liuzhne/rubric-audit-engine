@@ -50,6 +50,8 @@ from backend.app.services.assistant.flow import USER_WAIT_KINDS
 from backend.app.services.assistant.flow import build_flow_graph
 from backend.app.services.assistant.queries import QUERY_INTENTS
 from backend.app.services.assistant.queries import build_query_graph
+from backend.app.services.assistant.queries import list_rubrics
+from backend.app.services.assistant.queries import list_tasks
 from backend.app.services.assistant.views import CHIP_ACTIONS
 from backend.app.services.assistant.views import FLOW_LABELS
 from backend.app.services.assistant.views import MAX_FILES
@@ -365,7 +367,9 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
         if handled:
             return
         result = intents.match_rules(text)
-        if result.intent == "unknown" and not degraded:
+        if not degraded and (settings.ASSISTANT_INTENT_MODEL_FIRST or result.intent == "unknown"):
+            # 模型优先（docs/评分助手意图识别模型优先方案.md）：有可用模型先问模型，规则只兜底；
+            # 开关关闭时是原来的“规则优先，规则认不出才问模型”。Agent 刚降级的这一句不再调模型。
             effective = assistant_model.effective_model(
                 ctx.db, user_id=ctx.user_id, organization_id=ctx.principal.organization_id
             )
@@ -373,7 +377,8 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
                 ctx.db, effective, user_id=ctx.user_id, organization_id=ctx.principal.organization_id
             )
             focus = dict(ctx.conversation.focus or {})
-            result = intents.interpret(
+            interpret = intents.interpret_model_first if settings.ASSISTANT_INTENT_MODEL_FIRST else intents.interpret
+            result = interpret(
                 text, focus=focus, scorer=scorer, recent=_recent_user_texts(ctx, message.id)
             )
         elif result.intent == "unknown":
@@ -393,6 +398,10 @@ def _handle_message(ctx: RunContext, saver: SqlCheckpointSaver, text: str, attac
         })
     elif result.intent == "import_rubric":
         _start_flow(ctx, saver, {"mode": "import"})
+    elif result.intent == "list_rubrics":
+        list_rubrics(ctx)
+    elif result.intent == "list_tasks":
+        list_tasks(ctx)
     elif result.intent == "help":
         ctx.say(help_text((ctx.conversation.pending or {}).get("kind")), [quick_actions_card()], intent="help")
     elif result.intent == "next_steps":

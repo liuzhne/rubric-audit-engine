@@ -283,6 +283,13 @@ ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4"
         (RESPONSES, "https://api.openai.com/v1", "gpt-5",
          {"usage": {"output_tokens_details": {"reasoning_tokens": 64}}},
          {"thinking": "observed", "thinking_capability": "forced"}),
+        # usage 为 null，思考只以 reasoning 条目出现（#115 复审）。
+        (RESPONSES, "https://gw.example/v1", "brand-new-model",
+         {"output": [{"id": "rs_1", "type": "reasoning", "summary": []}], "usage": None},
+         {"thinking": "observed", "thinking_capability": "unknown"}),
+        (RESPONSES, "https://gw.example/v1", "brand-new-model",
+         {"output": [{"type": "message", "content": []}], "usage": None},
+         {"thinking": "not_observed", "thinking_capability": "unknown"}),
         (CHAT, ZHIPU_URL, "glm-5.3", "not json", {"thinking": "unknown", "thinking_capability": "forced"}),
     ],
 )

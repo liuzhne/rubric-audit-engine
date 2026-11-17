@@ -313,16 +313,22 @@ def test_core_rule_sends_exactly_the_provider_view(base_url):
         assert "output_config" not in capture.payload
 
 
-def test_a_legacy_envelope_built_for_other_controls_is_rejected_before_network():
+@pytest.mark.parametrize("model_name, mismatch", [
+    # 能关闭思考：两边身份相同，差在采样参数（max_tokens）。
+    ("anthropic.claude-sonnet-5-5", "sampling"),
+    # 关不掉思考、只配强度：评分按能力表放开上限，max_tokens 先进了身份（#115 复审），身份先对不上。
+    ("anthropic.claude-opus-5-5", "model_version"),
+])
+def test_a_legacy_envelope_built_for_other_controls_is_rejected_before_network(model_name, mismatch):
     capture = Capture(_message("{}"))
-    scorer = capture.scorer(effort="low")
-    other = Capture(_message("{}")).scorer(effort="low", max_tokens=777)
+    scorer = capture.scorer(effort="low", model_name=model_name)
+    other = Capture(_message("{}")).scorer(effort="low", max_tokens=777, model_name=model_name)
     envelope = other.build_prompt_envelope(
         type("Paper", (), {"title": "T"})(), type("C", (), {"code": "C1", "name": "N", "max_score": 5})(),
         [{"text": "正文", "location": "1"}], [], {"criteria": []}, {}, None,
     )
 
-    with pytest.raises(ValueError, match="sampling"):
+    with pytest.raises(ValueError, match=mismatch):
         scorer.score_envelope(envelope)
     assert capture.requests == []
 

@@ -13,7 +13,7 @@ export function thinkingNotice(probe) {
     return "这个模型关不掉思考：评分会按最低思考强度发送，耗时和费用会比不思考的模型高一些。";
   }
   if (probe.thinking === "observed" && probe.thinking_capability === "unknown") {
-    return "测试时观测到这个模型在思考，但模型能力表里还没有它：直接评分会因为“没有关闭思考”而停下。请先把模型名转告平台管理员在「模型管理」里登记，或换一个能关闭思考的模型。";
+    return "测试时观测到这个模型在思考，但模型能力表里还没有它：如果评分没有关闭思考，评分会因为“没有关闭思考”而停下。请先把模型名转告平台管理员登记，或换一个能关闭思考的模型。";
   }
   return null;
 }

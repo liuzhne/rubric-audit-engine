@@ -1139,3 +1139,126 @@ def test_unrecognized_text_uses_the_assistant_model(client, monkeypatch):
     assert scorer.calls[0]["payload"]["recent_user_messages"] == ["评分进度"]
     assert body["conversation"]["focus"] == {} or "workspace" not in body["conversation"]["focus"]
     assert client.get(f"/api/assistant/conversations/{conversation_id}").headers["cache-control"] == "private, no-store"
+
+
+# --- 模型优先识别与列清单（docs/评分助手意图识别模型优先方案.md） --------------------------------
+
+@pytest.mark.parametrize(
+    ("text", "intent"),
+    [
+        # 2026-11-17 生产的三句话：规则兜底时也要认对。
+        ("我的评分模板有哪些？", "list_rubrics"),
+        ("查看所有的评分模板", "list_rubrics"),
+        ("查看当前已导入的评分模板列表", "list_rubrics"),
+        ("评分标准有几个", "list_rubrics"),
+        ("我上传过的评分标准有哪些", "list_rubrics"),
+        ("现在有哪些评分任务?", "list_tasks"),
+        ("看看最近的评分任务", "list_tasks"),
+        # 导入的说法不受影响。
+        ("我要上传自己的评分规则和模板", "import_rubric"),
+        ("导入新的评分标准", "import_rubric"),
+    ],
+)
+def test_rules_tell_listing_from_importing(text, intent):
+    assert intents.match_rules(text).intent == intent
+
+
+def _model_result(intent, **extra):
+    return {"intent": intent, "paper_ordinal": None, "paper_name": None, "clarify": None, **extra}
+
+
+def test_model_first_asks_the_model_even_when_a_rule_matches():
+    scorer = _FakeScorer(result=_model_result("list_rubrics"))
+    # 规则会把这句认成导入；模型优先时以模型为准。
+    result = intents.interpret_model_first("帮我看看用自己的评分标准都有啥", scorer=scorer)
+    assert (result.intent, result.source, result.model_name) == ("list_rubrics", "model", "fake-intent-model")
+    assert len(scorer.calls) == 1
+    assert scorer.calls[0]["payload"]["intents"]["list_rubrics"]
+
+
+def test_model_first_falls_back_to_rules_and_keeps_the_question_guard():
+    failed = intents.interpret_model_first("取消评分", scorer=_FakeScorer(error=RuntimeError("boom")))
+    assert (failed.intent, failed.source) == ("cancel_job", "rules")
+
+    invalid = intents.interpret_model_first("查看所有的评分模板", scorer=_FakeScorer(result="not an object"))
+    assert (invalid.intent, invalid.source) == ("list_rubrics", "rules")
+
+    nothing = intents.interpret_model_first("随便聊聊", scorer=_FakeScorer(error=RuntimeError("boom")))
+    assert (nothing.intent, nothing.error_code) == ("unknown", "ASSISTANT_MODEL_FAILED")
+
+    # 模型把问句判成写操作：照样改成回答帮助。
+    guarded = intents.interpret_model_first("评分模板怎么上传？", scorer=_FakeScorer(result=_model_result("import_rubric")))
+    assert guarded.intent == "help"
+
+
+def test_model_first_without_a_usable_model_is_the_rules():
+    class Mock(_FakeScorer):
+        provider = "mock"
+
+    scorer = Mock(result=_model_result("help"))
+    assert intents.interpret_model_first("查看当前已导入的评分模板列表", scorer=scorer).intent == "list_rubrics"
+    assert intents.interpret_model_first("查看当前已导入的评分模板列表", scorer=None).source == "rules"
+    assert scorer.calls == []
+
+
+def test_thinking_models_get_a_longer_intent_timeout():
+    class Plan:
+        thinking_on = True
+
+    scorer = _FakeScorer(result=_model_result("help"))
+    scorer.thinking_plan = Plan()
+    intents.interpret_model_first("你好", scorer=scorer)
+    assert scorer.calls[0]["options"]["default_timeout_seconds"] == intents.THINKING_MODEL_TIMEOUT_SECONDS
+
+
+def test_runner_asks_the_model_first_and_lists_rubrics(client, monkeypatch):
+    # 不登录（开发模式）：种子评分标准在默认组织里，登录后的新组织看不到它。
+    rubric_id, rubric_name = _seed_published_rubric(client)
+    scorer = _FakeScorer(result=_model_result("list_rubrics"))
+    monkeypatch.setattr(assistant_model, "build_scorer", lambda *args, **kwargs: scorer)
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "查看当前已导入的评分模板列表")
+    user_message, reply = body["messages"][0], body["messages"][-1]
+    assert user_message["intent"] == "list_rubrics" and user_message["model_name"] == "fake-intent-model"
+    assert body["pending"] is None  # 没有开始导入流程
+    assert rubric_name in reply["text"] and "有 1 份" in reply["text"]
+    assert [card["type"] for card in reply["cards"]] == ["quick_actions", "link"]
+
+
+def test_runner_keeps_rules_first_when_the_switch_is_off(client, monkeypatch):
+    _login(client, monkeypatch, "assistant-rules-first")
+    monkeypatch.setattr(settings, "ASSISTANT_INTENT_MODEL_FIRST", False)
+    scorer = _FakeScorer(result=_model_result("help"))
+    monkeypatch.setattr(assistant_model, "build_scorer", lambda *args, **kwargs: scorer)
+    conversation_id = _conversation(client)
+    body = _say(client, conversation_id, "查看当前已导入的评分模板列表")
+    assert body["messages"][0]["intent"] == "list_rubrics"
+    assert scorer.calls == []
+
+
+def test_listing_rubrics_offers_a_choice_when_there_are_several(client, monkeypatch):
+    from backend.app.services.assistant import tools as assistant_tools
+
+    _login(client, monkeypatch, "assistant-list-rubrics")
+    original = assistant_tools.call
+
+    def fake_call(ctx, name, /, **kwargs):
+        if name == "list_published_rubrics":
+            return [{"id": "r1", "name": "开题报告评分", "version": 2, "business_profile_key": "thesis"},
+                    {"id": "r2", "name": "课程作业评分", "version": 1, "business_profile_key": "general_document"}]
+        return original(ctx, name, **kwargs)
+
+    monkeypatch.setattr(assistant_tools, "call", fake_call)
+    conversation_id = _conversation(client)
+    reply = _say(client, conversation_id, "我的评分模板有哪些？")["messages"][-1]
+    assert "1. 开题报告评分（毕业论文 · 第 2 版）" in reply["text"]
+    assert "2. 课程作业评分（通用文档 · 第 1 版）" in reply["text"]
+    choice = next(card for card in reply["cards"] if card["type"] == "choice")
+    assert choice["purpose"] == "use_rubric" and [item["id"] for item in choice["options"]] == ["r1", "r2"]
+
+
+def test_listing_tasks_without_any_task_offers_to_start(client, monkeypatch):
+    _login(client, monkeypatch, "assistant-list-tasks")
+    conversation_id = _conversation(client)
+    reply = _say(client, conversation_id, "现在有哪些评分任务?")["messages"][-1]
+    assert reply["intent"] == "list_tasks" and "还没有评分任务" in reply["text"]

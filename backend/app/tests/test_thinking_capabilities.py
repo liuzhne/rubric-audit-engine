@@ -304,6 +304,36 @@ def test_auxiliary_scope_scores_forced_thinking_models_by_the_table(protocol, ba
         assert scoring.thinking_on and scoring.raises_output_limit
 
 
+@pytest.mark.parametrize(
+    "model, thinking_type, effort, switched",
+    [
+        # 只配了强度、关不掉思考的 Claude：旧行为不发 thinking、记不思考，必定被守卫停下（#115 复审）。
+        ("claude-opus-5-5", None, "low", True),
+        ("claude-opus-5-5", None, "high", True),
+        # 能关闭的模型只配强度：省略 thinking 即不思考，评分路径仍是旧行为。
+        ("claude-sonnet-5-5", None, "low", False),
+        # 显式 adaptive：旧行为本来就记开启。
+        ("claude-opus-5-5", "adaptive", "low", False),
+    ],
+)
+def test_explicit_effort_on_a_forced_model_scores_by_the_table(model, thinking_type, effort, switched):
+    _, scoring = thinking.plans(thinking.MESSAGES, ANTHROPIC, model, thinking_type=thinking_type, effort=effort,
+                                scope="auxiliary")
+    assert (scoring.source != thinking.SOURCE_LEGACY) is switched
+    if switched:
+        assert scoring.thinking_on and scoring.effort == effort and scoring.raises_output_limit
+
+
+def test_explicit_effort_on_a_forced_model_records_thinking_and_sends_the_effort():
+    capture = _Capture({"content": [{"type": "text", "text": "{}"}]})
+    scorer = AnthropicMessagesScorer(api_key="k", base_url=ANTHROPIC, model_name="claude-opus-5-5", effort="high",
+                                     client=capture.client())
+    contract = core_runtime_provider_contract(scorer, artifact_hash="a" * 64)
+    assert contract["thinking"] == {"enabled": True, "type": thinking.PROVIDER_DEFAULT}
+    assert contract["model_version"] == "messages-2023-06-01;effort=high;max_tokens=32768"
+    assert scorer.scoring_thinking_plan.fields() == {"output_config": {"effort": "high"}}
+
+
 def test_plan_fields_are_copies():
     plan = thinking.resolve_chat(VERTEX, "gemini-2.5-flash", "")
     plan.fields()["extra_body"]["google"]["thinking_config"]["thinking_budget"] = 99
