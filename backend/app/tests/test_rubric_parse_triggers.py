@@ -1,3 +1,4 @@
+import pytest
 from io import BytesIO
 
 from openpyxl import Workbook
@@ -120,3 +121,15 @@ def test_shared_score_cell_triggers_e11_and_numeric_unmapped_column_is_strong():
     assert triggers["E11"]["details"]["criterion_codes"] == ["C01", "C02"]
     assert triggers["E3"]["details"]["numeric_columns"] == ["参考分"]
     assert triggers["E3"]["strong"] is True
+
+
+@pytest.mark.parametrize("numbers,strong", [
+    ([1, 2, 3, 1, 2], False),  # 分组重新编号
+    ([1, 2, 3, 4], False),     # 连续编号
+    ([1, 1, 1], True),         # 都是 1 分：像分值
+    ([5, 3, 2], True),
+])
+def test_unmapped_numbering_is_not_a_strong_signal(numbers, strong):
+    rows = [["评分项", "分值", "序号"]] + [[f"项{i}", 10, n] for i, n in enumerate(numbers)]
+    triggers = _triggers(_book(rows))
+    assert triggers["E3"]["strong"] is strong

@@ -200,3 +200,63 @@ def test_band_header_with_tidy_levels_stays_levels():
     result, _ = _extract(buffer.getvalue())
     assert result.records[0].criterion.rubric_levels == [
         {"label": "优", "points": 10.0}, {"label": "良", "points": 8.0}, {"label": "中", "points": 6.0}]
+
+
+def _book(build):
+    workbook = Workbook()
+    build(workbook.active)
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _two_level(sheet, item_scores=(4, 6), footer_rows=1):
+    sheet.title = "评分表"
+    sheet.append(["一级指标", "分值", "评分项", "分值"])  # R1
+    sheet.append(["一、基本信息", 10, "封面信息", item_scores[0]])  # R2
+    sheet.append([None, None, "填写规范", item_scores[1]])  # R3
+    sheet.merge_cells("A2:A3")
+    sheet.merge_cells("B2:B3")
+    sheet.append(["评分说明：逐项打分，扣分不超过该项分值。"])  # R4
+    sheet.merge_cells(f"A4:D{3 + footer_rows}")
+
+
+def test_score_text_with_unit_counts_as_item_score_column():
+    result, _ = _extract(_book(lambda sheet: _two_level(sheet, item_scores=("4分", "6分"))))
+    assert [row.criterion.max_score for row in result.records] == [4.0, 6.0]
+    assert result.mapping["max_score"] == 3 and result.dimension_score_columns == [1]
+
+
+def test_score_text_with_wrong_parent_sum_is_reported():
+    result, _ = _extract(_book(lambda sheet: _two_level(sheet, item_scores=("4分", "5分"))))
+    assert [row.criterion.max_score for row in result.records] == [4.0, 5.0]
+    assert [issue["code"] for issue in result.structure_issues] == ["DUPLICATE_SCORE_COLUMN"]
+
+
+def test_footer_spanning_rows_and_columns_does_not_hide_item_score_column():
+    result, _ = _extract(_book(lambda sheet: _two_level(sheet, footer_rows=2)))
+    assert [row.criterion.max_score for row in result.records] == [4.0, 6.0]
+    assert result.structure_issues == []
+
+
+@pytest.mark.parametrize("label,declared", [("总分：100", 100.0), ("合计 100 分", 100.0), ("合计（满分 100 分）", 100.0)])
+def test_total_label_declares_value(label, declared):
+    def build(sheet):
+        sheet.append(["评分项", "分值"])
+        sheet.append(["选题", 10])
+        sheet.append([label, None])
+    result, _ = _extract(_book(build))
+    assert result.total_row == {"row_number": 3, "declared_total": declared}
+
+
+def test_override_reparse_keeps_header_declared_total():
+    from backend.app.services.rubric_import.extraction.structure_override import extract_with_override
+
+    data = _book(lambda sheet: (sheet.append(["满分 100 分"]), sheet.append(["评分项", "分值"]),
+                                sheet.append(["选题", 10]), sheet.append(["写作", 20])))
+    ledger = SourceLedger()
+    sheets = load_xlsx(data, ledger, doc_id="rules", doc_role="rules")
+    override = {"sheet": sheets[0].title, "header_row": 2, "column_mapping": {"name": 1, "max_score": 2}, "row_types": {}}
+    result = extract_with_override(sheets, ledger, override)
+    assert result.declared_total["value"] == 100.0
+    assert ledger.status(result.declared_total["unit_ids"][0]).status == "structural"

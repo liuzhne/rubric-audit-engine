@@ -51,8 +51,30 @@ def _numeric_column(ledger: SourceLedger, unit_ids: list[str]) -> bool:
             continue
     if len(numbers) * 2 < len(units):
         return False
-    sequential = all(value.is_integer() for value in numbers) and numbers == [numbers[0] + i for i in range(len(numbers))]
-    return not sequential
+    return not _is_numbering(numbers)
+
+
+def _is_numbering(numbers: list[float]) -> bool:
+    """编号列：整段 1、2、3……，或分组后每段都从 1 重新编号（1、2、3、1、2）。
+
+    每段都只有一个 1（1、1、1……）更像都是 1 分的分值列，不算编号。"""
+
+    if not numbers or not all(value.is_integer() for value in numbers):
+        return False
+    if numbers == [numbers[0] + i for i in range(len(numbers))]:
+        return True
+    runs, length = [], 0
+    for index, value in enumerate(numbers):
+        if index and value == numbers[index - 1] + 1:
+            length += 1
+            continue
+        if value != 1:
+            return False
+        if length:
+            runs.append(length)
+        length = 1
+    runs.append(length)
+    return max(runs) >= 2
 
 
 def header_not_found_trigger(ledger: SourceLedger) -> dict:
