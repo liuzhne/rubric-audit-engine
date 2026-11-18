@@ -181,6 +181,7 @@ jobs:
           ASSISTANT_AGENT_ENABLED: ${{ vars.ASSISTANT_AGENT_ENABLED }}
           ASSISTANT_STREAM_ENABLED: ${{ vars.ASSISTANT_STREAM_ENABLED }}
           ASSISTANT_INTENT_MODEL_FIRST: ${{ vars.ASSISTANT_INTENT_MODEL_FIRST }}
+          IMPORT_STRUCTURE_AUTO_ENABLED: ${{ vars.IMPORT_STRUCTURE_AUTO_ENABLED }}
         run: |
           set -euo pipefail
           host="${SITE_URL#https://}"

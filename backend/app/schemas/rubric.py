@@ -228,6 +228,42 @@ class RubricScoreAdjustment(BaseModel):
     message: str
 
 
+class RubricImportStructureRow(BaseModel):
+    row_number: int
+    change: Literal["same", "changed", "added", "removed"]
+    fields: list[str] = Field(default_factory=list)
+    current_name: Optional[str] = None
+    current_max_score: Optional[float] = None
+    proposed_name: Optional[str] = None
+    proposed_max_score: Optional[float] = None
+    proposed_dimension: Optional[str] = None
+
+
+class RubricImportStructureColumn(BaseModel):
+    column: int
+    header: str = ""
+    current_field: Optional[str] = None
+    proposed_field: Optional[str] = None
+
+
+class RubricImportStructureComparison(BaseModel):
+    rows: list[RubricImportStructureRow] = Field(default_factory=list)
+    current_total: float
+    proposed_total: float
+    declared_total: Optional[float] = None
+    columns: list[RubricImportStructureColumn] = Field(default_factory=list)
+    reasons: list[dict] = Field(default_factory=list)
+    consistent: bool
+
+
+class RubricImportStructureCheck(BaseModel):
+    status: Literal["running", "unavailable", "failed", "differs", "consistent", "dismissed", "applied", "stale"]
+    signals: list[dict] = Field(default_factory=list)
+    task_id: Optional[str] = None
+    message: Optional[str] = None
+    comparison: Optional[RubricImportStructureComparison] = None
+
+
 class RubricImportSessionRead(BaseModel):
     id: str
     status: Literal["draft", "confirmed", "expired", "cancelled"]
@@ -248,6 +284,8 @@ class RubricImportSessionRead(BaseModel):
     expires_at: datetime
     #: 上传时选择的文档类型；上传后只读（通用文档评分改造方案 §3.1）。
     business_profile_key: str = "thesis"
+    #: 导入时的表格结构自动识别（docs/评分表结构自动识别方案.md）；没有强信号或开关关闭时为空。
+    structure_check: Optional[RubricImportStructureCheck] = None
 
 
 class RubricImportSessionUpdate(BaseModel):

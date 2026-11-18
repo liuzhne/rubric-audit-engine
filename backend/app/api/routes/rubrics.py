@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 from copy import deepcopy
 from datetime import datetime
@@ -79,6 +80,8 @@ from backend.app.services.scoring.core.policy import validate_weight_configurati
 from backend.app.services.scoring.core.policy import retarget_policy_total
 from backend.app.services.rubric_import import pipeline as rubric_pipeline
 from backend.app.services.rubric_import import import_sessions
+from backend.app.services.rubric_import import structure_check
+from backend.app.services.ai_tasks.wake import wake_task
 from backend.app.services.rubric_import.source_workspace import read_source_workspace
 from backend.app.services.rubrics import lifecycle as rubric_lifecycle
 from backend.app.services.rubrics.draft_graph import read_execution_draft
@@ -88,6 +91,7 @@ from backend.app.services.scoring.profiles.registry import WORKBENCH_PROFILE_KEY
 from backend.app.services.rubrics.review_workspace import read_review_workspace, confirm_rule
 from backend.app.services.rubrics.review_workspace import exclude_rule, restore_rule
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/rubrics", tags=["rubrics"])
 
 
@@ -149,6 +153,31 @@ def _visible_rubric(
 
 
 _visible_import_session = guards.visible_import_session
+
+
+def _session_out(db: Session, row: RubricImportSession) -> dict:
+    """会话响应带上结构识别状态；任务成功后第一次读取时把结果缓存进会话。"""
+
+    if structure_check.refresh(db, row):
+        db.commit()
+        db.refresh(row)
+    return import_sessions.serialize(row, structure_check=structure_check.view(db, row))
+
+
+def _start_structure_check(db: Session, row: RubricImportSession, principal: CurrentPrincipal) -> None:
+    """导入或换文件后：有强信号就自动建结构识别任务，提交后叫醒执行者。失败不影响导入。"""
+
+    try:
+        task = structure_check.start(db, row, principal)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("import_structure_check_failed session_id=%s", row.id)
+        return
+    db.refresh(row)
+    if task is not None:
+        wake_task(db, task, reason="create")
+        db.refresh(row)
 
 
 @router.post("", response_model=RubricRead)
@@ -290,7 +319,9 @@ def create_rubric_import_session(
         raise HTTPException(status_code=422, detail=exc.message) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return import_sessions.serialize(row)
+    if override is None:
+        _start_structure_check(db, row, principal)
+    return _session_out(db, row)
 
 
 @router.get("/import-sessions/{session_id}", response_model=RubricImportSessionRead)
@@ -299,7 +330,96 @@ def get_rubric_import_session(
     db: Session = Depends(get_db),
     principal: CurrentPrincipal = Depends(current_principal),
 ):
-    return import_sessions.serialize(_visible_import_session(db, session_id, principal))
+    return _session_out(db, _visible_import_session(db, session_id, principal))
+
+
+@router.post(
+    "/import-sessions/{session_id}/structure/apply",
+    response_model=RubricImportSessionRead,
+)
+def apply_rubric_import_structure(
+    session_id: str,
+    payload: RubricImportSessionStateRequest,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """采用自动识别的表格结构：用会话里保存的原文件带结构重新解析，替换草稿。"""
+
+    require_organization_role(principal, "org_admin", "teacher")
+    row = _visible_import_session(db, session_id, principal, for_update=True)
+    try:
+        override = structure_check.override_for_apply(
+            db, row, expected_state_version=payload.expected_state_version
+        )
+        prepared = rubric_pipeline.prepare_file_import(
+            command=_file_import_command(
+                name=row.name,
+                version=row.version,
+                description=row.description,
+                rules_file_name=row.rules_file_name,
+                template_file_name=row.template_file_name,
+                business_profile_key=import_sessions.profile_key(row),
+            ),
+            rules_bytes=row.rules_file_bytes,
+            template_bytes=row.template_file_bytes,
+            scorer=None,
+            structure_override=override,
+        ).to_mapping()
+        draft, adjustments = import_sessions.draft_from_prepared(prepared)
+        draft["criteria"] = structure_check.keep_manual_items(
+            (row.draft_data or {}).get("criteria") or [], draft["criteria"]
+        )
+        check = (row.draft_data or {}).get("structure_check")
+        import_sessions.apply_reupload(
+            row,
+            prepared=prepared,
+            draft={**draft, "structure_check": check},
+            adjustments=adjustments,
+            rules_file_name=row.rules_file_name,
+            rules_file_bytes=row.rules_file_bytes,
+            template_file_name=row.template_file_name,
+            template_file_bytes=row.template_file_bytes,
+        )
+        structure_check.mark(row, applied=True)
+        db.commit()
+    except structure_check.StructureCheckError as exc:
+        db.rollback()
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+    except StructureOverrideError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=exc.message) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.refresh(row)
+    return _session_out(db, row)
+
+
+@router.post(
+    "/import-sessions/{session_id}/structure/dismiss",
+    response_model=RubricImportSessionRead,
+)
+def dismiss_rubric_import_structure(
+    session_id: str,
+    payload: RubricImportSessionStateRequest,
+    db: Session = Depends(get_db),
+    principal: CurrentPrincipal = Depends(current_principal),
+):
+    """保留当前解析结果，不采用自动识别的结构（只记用户的选择，不改草稿）。"""
+
+    require_organization_role(principal, "org_admin", "teacher")
+    row = _visible_import_session(db, session_id, principal, for_update=True)
+    if row.status != "draft":
+        raise HTTPException(status_code=409, detail="只有待确认的导入会话可以修改")
+    if row.state_version != payload.expected_state_version:
+        raise HTTPException(status_code=409, detail="导入草稿已更新，请刷新后再操作")
+    try:
+        structure_check.mark(row, dismissed=True)
+    except structure_check.StructureCheckError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+    db.commit()
+    db.refresh(row)
+    return _session_out(db, row)
 
 
 @router.get(
@@ -349,7 +469,7 @@ def update_rubric_import_session(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return import_sessions.serialize(row)
+    return _session_out(db, row)
 
 
 @router.post(
@@ -384,7 +504,7 @@ def resolve_rubric_import_session_conflict(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return import_sessions.serialize(row)
+    return _session_out(db, row)
 
 
 @router.post(
@@ -409,7 +529,7 @@ def cancel_rubric_import_session(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return import_sessions.serialize(row)
+    return _session_out(db, row)
 
 
 def _prepare_import_session_reupload(
@@ -545,7 +665,8 @@ def confirm_rubric_import_session_reupload(
     )
     db.commit()
     db.refresh(row)
-    return import_sessions.serialize(row)
+    _start_structure_check(db, row, principal)
+    return _session_out(db, row)
 
 
 @router.post(
@@ -985,6 +1106,14 @@ def confirm_confirmed_rubric_reupload(
     except ValueError as exc:
         status = 409 if "stale" in str(exc) else 422
         raise HTTPException(status_code=status, detail=str(exc)) from exc
+    try:
+        task = structure_check.start_for_rubric(db, identity.rubric_id, principal)
+        db.commit()
+        if task is not None:
+            wake_task(db, task, reason="create")
+    except Exception:
+        db.rollback()
+        logger.exception("rubric_structure_auto_failed rubric_id=%s", identity.rubric_id)
     return _load_rubric(db, identity.rubric_id)
 
 

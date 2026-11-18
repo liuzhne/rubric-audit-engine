@@ -1276,6 +1276,22 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 开发模式（`AUTH_ENABLED=false`）恒为 true——本地复现不了这一整套，要用
 `playwright test --project=llm-setup`。
 
+### 11.22 「导入的评分项满分都一样，合计远超满分」
+
+**现象**：导入 Excel 后，同一个一级指标下的评分项满分全相同（10、10、10 / 25×5……），合计比表上写的满分大很多，还多出一项“合计（满分 100 分）”。
+
+**报错指向**：评分项列表与合计；页面没有报错，导入“成功”。
+
+**真正原因**：表头有两列都叫“分值”——一列是一级指标分值（纵向合并），一列是评分项分值。2026-11-17 之前抽取器只取第一列；合计行只认完全等于“合计 / 总分 / 总计”的写法。
+
+**怎么查**：本地用同一份文件跑抽取器，看 `mapping["max_score"]`、`dimension_score_columns`、`total_row` 与 `structure_issues`：
+
+```bash
+.venv/bin/python -c "import sys;from backend.app.services.rubric_import.sources.units import SourceLedger as L;from backend.app.services.rubric_import.sources.xlsx_adapter import load_xlsx;from backend.app.services.rubric_import.extraction.table_extractor import extract_table;l=L();r=extract_table(load_xlsx(open(sys.argv[1],'rb').read(),l,doc_id='excel',doc_role='rules'),l);print(r.mapping,r.dimension_score_columns,r.total_row,r.declared_total,r.structure_issues);[print(x.row_number,x.criterion.name,x.criterion.max_score,x.criterion.dimension) for x in r.records]" 评分表.xlsx
+```
+
+2026-11-18 起，判断哪一列是上下合并的上级分值时，会排除整行合并的表尾说明（它跨多行时会让每一列都像上下合并），“4分”这类文字也算分值。修复后：纵向合并的分值列记入 `dimension_score_columns`，各组加总与上级分值不一致时 `structure_issues` 有 `DUPLICATE_SCORE_COLUMN`（触发 E10，强信号）。合计行或表头声明的满分与合计不一致时触发 E4。已经导入的会话不会自动改正，需要重新上传。
+
 ### 评分标准条款确认与原型还原（2026-09-13，已部署，待登录验收）
 
 症状：导入后有“待确认”但无正文/确认入口；完整度无缺失仍可能有编译阻断。
@@ -1339,6 +1355,9 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-18 | 同名分值列评审修正 | 无迁移、无新命令；排错 11.22 补充整行说明与“4分”写法 |
+| 2026-11-17 | 导入评分表时自动识别表格结构 | 新开关 `IMPORT_STRUCTURE_AUTO_ENABLED`（默认关）；无迁移；新接口 `…/structure/apply`、`…/structure/dismiss`；契约版本 `2026-11-17.import-structure-check`；提示词 `rubric-structure@3`；排错：卡片一直识别中、识别结果过期 |
+| 2026-11-17 | 同名分值列与强信号 | 无迁移、无新命令、无新开关；触发条件多一个 `strong` 字段与 E10/E11；排错 11.22（满分都一样、合计远超满分） |
 | 2026-11-17 | 评分助手回复不露引用编号 | 无迁移、无新命令、提示词指纹不变（评测报告仍有效）；新增一条排错（回复里名称出现两次）；评测价目登记 GLM-4.7-Flash |
 | 2026-11-16 | 评分助手选择卡片（#112 复审） | 无迁移、无新命令、提示词指纹不变（评测报告仍有效）；“按钮已失效”排错补上标准被下线或失去访问权限的情况与核对方法；新增一条排错（候选没有名称时回复被作废重写） |
 | 2026-11-16 | 评分助手选择卡片（提示词 @7） | 无迁移、无新环境变量；提示词升 `assistant-agent@7`（先在候选镜像上评测再合并）；契约版本升为 `2026-11-16.assistant-choice`；评测集 54 条；两条排错 |
@@ -3652,3 +3671,21 @@ python -m backend.app.scripts.estimate_section_summaries <document_snapshot_id>
   - 核对：列表里这条记录的“启用中连接”应当大于 0；`llm_call` 日志里的思考字段应当是开启、强度为登记的最低强度。
 
 维护记录：2026-11-17 · 模型管理页：记录发布顺序、使用方法与一条排错。
+
+### 2026-11-17 导入评分表时自动识别表格结构
+
+- 开关 `IMPORT_STRUCTURE_AUTO_ENABLED`（默认 `false`）：导入评分表（新导入、导入会话里换文件、已建评分标准重新上传）后，确定性解析仍有强信号（E4、E9、E10、E11、数字型未识别列）就自动建一次 `structure_suggestion` 任务。仓库变量设为 `true` 后重新部署即可打开，设回 `false` 即回滚（`scripts/production_env.py` 与两个部署工作流已放行）。关闭时只在整份表解析失败时提供手动识别，与原来一致。
+- 无迁移。状态存在导入会话的 `draft_data.structure_check`；新接口 `POST /api/rubrics/import-sessions/{id}/structure/apply` 与 `…/structure/dismiss`；会话响应多一个 `structure_check`。契约版本升为 `2026-11-17.import-structure-check`；结构识别提示词升为 `rubric-structure@3`（发给模型的内容多了补发行，指纹变化，旧识别结果不复用）。
+- 模型：用户启用的私有连接优先，没有则用平台默认模型；两者都没有时卡片显示“没能自动识别”，导入照常进行。每次识别一次调用，输入不超过约 2.4 万字符；同一用户同一份文件命中内容指纹时复用结果。
+- 打开前核对：用一份已知有问题的表（如 2026-11-17 的开题报告表修复前的写法）在生产导入一次，确认卡片出现、对照正确；真实模型调用需维护者授权。
+- 排错：卡片一直显示“AI 正在识别表格结构”。
+  - 报错指向：导入页，看起来像前端轮询卡住。
+  - 真正原因：识别是 AI 任务，靠 worker 领取执行。worker 没在跑、或队列里排在前面的 AI 任务很多时就一直是 running。先看 `GET /api/ai-tasks/{task_id}`（`task_id` 在会话的 `structure_check` 里）的状态与条目，再看 worker 日志里的 `ai_task_finished`。
+- 排错：卡片显示“识别期间草稿已修改，识别结果不能直接采用”。
+  - 报错指向：采用按钮 409。
+  - 真正原因：识别期间用户改过草稿（改名、改分、删项都会升 `state_version`），按建任务时的版本判断结果已过期，避免覆盖人工修改。重新上传同一份文件会重新识别（命中指纹时直接复用结果，不再调用模型）。
+
+维护记录：2026-11-17 · 导入评分表时自动识别表格结构：新开关、两个接口、契约与提示词版本、两条排错。
+
+维护记录：2026-11-18 · 采用识别结果保留人工新增项：编号冲突的人工项会改用下一个空闲编号，采用后编号变化属预期。
+

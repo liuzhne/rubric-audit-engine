@@ -688,6 +688,8 @@ jobs:
           ASSISTANT_STREAM_ENABLED: ${{ vars.ASSISTANT_STREAM_ENABLED }}
           # 评分助手模型优先识别意图（docs/评分助手意图识别模型优先方案.md）；没设即开启，设为 false 回滚。
           ASSISTANT_INTENT_MODEL_FIRST: ${{ vars.ASSISTANT_INTENT_MODEL_FIRST }}
+          # 导入评分表有强信号时自动识别表格结构（docs/评分表结构自动识别方案.md）；没设即关闭。
+          IMPORT_STRUCTURE_AUTO_ENABLED: ${{ vars.IMPORT_STRUCTURE_AUTO_ENABLED }}
           # 论文评分第二阶段（docs/论文评分第二阶段改造方案.md）；没设即取默认值，QWK 评测后再设。
           SCORING_TOKEN_BUDGET_TARGET: ${{ vars.SCORING_TOKEN_BUDGET_TARGET }}
           SCORING_JUDGE_SCOPE_ENABLED: ${{ vars.SCORING_JUDGE_SCOPE_ENABLED }}

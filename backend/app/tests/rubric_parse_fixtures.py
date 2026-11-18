@@ -153,3 +153,34 @@ def template_docx_with_rule_table():
     buffer = BytesIO()
     document.save(buffer)
     return buffer.getvalue()
+
+
+def two_level_score_xlsx(*, parent_scores=(10, 15), total_label="合计（满分 25 分）"):
+    """两级指标评分表：表头两列都叫“分值”，C 列是一级指标分值（纵向合并），E 列是评分项分值；
+    标题写明满分；合计行带括号说明；规则列表头含“分档”。按 2026-11-17 线上导入的开题报告表结构合成。"""
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "评分表"
+    sheet.append(["开题报告评分表"])  # R1
+    sheet.merge_cells("A1:G1")
+    sheet.append(["适用：软件类 ｜ 满分 25 分"])  # R2
+    sheet.merge_cells("A2:G2")
+    sheet.append(["评审教师", None, "满分", 25])  # R3
+    sheet.append(["序号", "一级指标", "分值", "评分项", "分值", "打分规则（分档 / 扣分）", "得分"])  # R4 表头
+    first, second = parent_scores
+    sheet.append([1, "一、基本信息", first, "封面信息", 4, "六项齐全；每缺1项扣1分，扣完为止。"])  # R5
+    sheet.append([2, None, None, "填写规范", 2, "班级不带“班”字（如：软件21001）；每处不规范扣1分。"])  # R6
+    sheet.append([3, None, None, "论文题目", 4, "与系统题目一致；空泛或有错别字扣1~2分。"])  # R7
+    sheet.merge_cells("B5:B7")
+    sheet.merge_cells("C5:C7")
+    sheet.append([4, "二、选题背景", second, "选题背景", 8, "充分8分，较清晰5~7分，笼统1~4分，未写0分。"])  # R8
+    sheet.append([5, None, None, "研究目的", 7, "明确7分，基本明确3~5分，空泛1~2分。"])  # R9
+    sheet.merge_cells("B8:B9")
+    sheet.merge_cells("C8:C9")
+    sheet.append([total_label])  # R10
+    sheet.merge_cells("A10:F10")
+    sheet.append([])
+    sheet.append(["评分说明：逐项打分，各项扣分不超过该项分值。"])  # R12
+    sheet.merge_cells("A12:G12")
+    return _save(workbook)
