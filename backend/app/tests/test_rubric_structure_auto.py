@@ -4,6 +4,7 @@
 用户采用后才替换草稿，保留只记选择。模型一律用替身，不调用真实模型。
 """
 
+from functools import lru_cache
 from io import BytesIO
 
 import pytest
@@ -17,8 +18,13 @@ from backend.app.tests.test_rubric_structure_api import _drain
 from backend.app.tests.test_rubric_structure_api import use_scorer  # noqa: F401  pytest fixture
 
 
+@lru_cache(maxsize=None)
 def _ambiguous_scores_xlsx():
-    """两列“分值”都每行一个值：C 列逐行重复上级分值，E 列是评分项分值。确定性抽取分不清，取到 C 列。"""
+    """两列“分值”都每行一个值：C 列逐行重复上级分值，E 列是评分项分值。确定性抽取分不清，取到 C 列。
+
+    只生成一次：openpyxl 保存时写入当前时间（精确到秒），两次生成跨秒字节就不同，
+    重新上传的预览指纹与确认指纹对不上，接口偶发 409。
+    """
 
     workbook = Workbook()
     sheet = workbook.active
