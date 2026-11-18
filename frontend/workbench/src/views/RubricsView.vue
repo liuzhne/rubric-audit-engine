@@ -276,8 +276,41 @@ function deleteImportCriterion(index) {
   return updateImportSession({ criteria });
 }
 
+// 导入时的表格结构自动识别（docs/评分表结构自动识别方案.md）：识别中每 3 秒刷新一次会话。
+const STRUCTURE_POLL_MS = 3000;
+let structurePollTimer = null;
+const structureCheckStatus = computed(() => store.activeImportSession?.structure_check?.status || "");
+function stopStructurePoll() {
+  if (structurePollTimer) clearTimeout(structurePollTimer);
+  structurePollTimer = null;
+}
+function scheduleStructurePoll() {
+  stopStructurePoll();
+  if (structureCheckStatus.value !== "running") return;
+  structurePollTimer = setTimeout(async () => {
+    structurePollTimer = null;
+    try { await store.refreshImportStructure(); } catch { /* 下一轮再试 */ }
+    scheduleStructurePoll();
+  }, STRUCTURE_POLL_MS);
+}
+watch(structureCheckStatus, scheduleStructurePoll, { immediate: true });
+onUnmounted(stopStructurePoll);
+
+async function runStructureAction(action, fallback) {
+  if (importBusy.value) return;
+  importBusy.value = true;
+  importError.value = null;
+  try { await action(); } catch (err) {
+    importError.value = err instanceof Error ? err.message : fallback;
+  } finally { importBusy.value = false; }
+}
+const applyImportStructure = () => runStructureAction(() => store.applyImportStructure(), "采用识别结果失败");
+const dismissImportStructure = () => runStructureAction(() => store.dismissImportStructure(), "保存选择失败");
+
 async function confirmImportSession() {
   if (importBusy.value || !store.activeImportSession?.id) return;
+  if (["running", "differs"].includes(structureCheckStatus.value)
+    && !window.confirm("表格结构可能识别有误，AI 对照还没有处理。仍按当前结果继续？")) return;
   importBusy.value = true;
   importError.value = null;
   try {
@@ -1164,7 +1197,8 @@ onUnmounted(() => {
       @delete-criterion="deleteImportCriterion" @confirm="confirmImportSession"
       @preview-source="previewImportSource" @close-source-preview="sourcePreview = null"
       @resolve-conflict="resolveImportConflict" @confirm-reupload="confirmImportReupload"
-      @cancel-reupload="cancelImportReupload" @cancel="cancelImportSession" />
+      @cancel-reupload="cancelImportReupload" @cancel="cancelImportSession"
+      @apply-structure="applyImportStructure" @dismiss-structure="dismissImportStructure" />
     <p v-if="store.activeImportSession && importError" class="notice notice-danger" role="alert">{{ importError }}</p>
     <section v-if="importOpen && !store.activeImportSession" class="import-panel">
       <RubricImportWorkspace :session="initialImport" initial :busy="importBusy"

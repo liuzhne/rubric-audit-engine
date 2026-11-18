@@ -12,7 +12,6 @@ from fastapi import Query
 from fastapi import Response
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
-from sqlalchemy.orm import sessionmaker
 
 from backend.app.api.deps import CurrentPrincipal
 from backend.app.api.deps import current_principal
@@ -34,9 +33,9 @@ from backend.app.services.ai_tasks.state import ACTIVE_TASK_STATUSES
 from backend.app.services.dev_user import ensure_dev_user
 from backend.app.services.rubric_import import parse_state
 from backend.app.services.rubric_import import structure_state
-from backend.app.services.work_queue.sweep import ensure_sweep_chain
 from backend.app.services.work_queue.sweep import sweep_parent_on_read
-from backend.app.services.work_queue.wake import wake_for_capacity
+from backend.app.services.ai_tasks.wake import session_factory
+from backend.app.services.ai_tasks.wake import wake_task
 
 
 router = APIRouter(tags=["ai-tasks"])
@@ -57,24 +56,11 @@ def _problem(exc: AITaskProblem) -> HTTPException:
 
 
 def _session_factory(db):
-    bind = db.get_bind()
-    db.rollback()
-    return sessionmaker(bind=bind, autocommit=False, autoflush=False)
+    return session_factory(db)
 
 
 def _wake(db, task, *, reason):
-    """按空闲名额叫醒（Vercel）；没发出去也不影响任务，巡检会补发。"""
-
-    source_key = next((item.source_key for item in task.items), None)
-    token = "%s-%s" % (task.id, task.state_version)
-    factory = _session_factory(db)
-    try:
-        if source_key:
-            with factory() as session:
-                wake_for_capacity(session, source_key, reason=reason, token=token)
-        ensure_sweep_chain(factory)
-    except Exception:
-        logger.exception("ai_task_wake_failed task_id=%s", task.id)
+    wake_task(db, task, reason=reason)
 
 
 def _task_or_404(db, task_id, principal):

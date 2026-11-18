@@ -641,6 +641,13 @@ def test_lightsail_deploy_job_renders_the_intent_model_first_switch():
         assert "ASSISTANT_INTENT_MODEL_FIRST: ${{ vars.ASSISTANT_INTENT_MODEL_FIRST }}" in workflow
 
 
+def test_deploy_jobs_render_the_import_structure_auto_switch():
+    # 导入评分表时的结构自动识别（docs/评分表结构自动识别方案.md）：经仓库变量进 .env，没设即关闭。
+    for name in ("ci.yml", "production-cutover.yml"):
+        workflow = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        assert "IMPORT_STRUCTURE_AUTO_ENABLED: ${{ vars.IMPORT_STRUCTURE_AUTO_ENABLED }}" in workflow
+
+
 def test_both_caddy_files_keep_the_assistant_stream_out_of_compression():
     # 压缩器会攒够一段才发：SSE 的进度会攒到最后一起到（docs/评分助手过程流式方案.md §6）。
     for path in (ROOT / "deploy" / "production" / "caddy" / "Caddyfile", ROOT / "deploy" / "Caddyfile"):

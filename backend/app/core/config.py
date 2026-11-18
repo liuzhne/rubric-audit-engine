@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     # Word 模板读全内容、识别章节、组评分规范条目（docs/Word评分规范抽取与对应方案.md）。默认关闭：
     # 关闭时新导入和现在完全一样。只决定新导入走不走新流程，已有草稿按自己的数据显示。
     REQUIREMENT_ITEMS_ENABLED: bool = False
+    # 导入评分表时，确定性解析后仍有强信号（满分合计对不上、同名分值列分不清等）就自动请模型
+    # 识别表格结构，把“当前 vs AI”的对照交给用户确认（docs/评分表结构自动识别方案.md）。
+    # 默认关闭：关闭时只在整份表解析失败时提供手动识别，与原来一致。
+    IMPORT_STRUCTURE_AUTO_ENABLED: bool = False
     # 评分助手 Agent 回合（docs/评分助手Agent化方案.md）。默认关闭：关闭时助手的对外行为与一期
     # 完全一致（规则识别 + 固定流程）。A1 的真实模型评测达到上线门槛后，才在生产打开。
     ASSISTANT_AGENT_ENABLED: bool = False

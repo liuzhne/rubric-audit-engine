@@ -82,7 +82,7 @@ def test_preview_task_then_import_with_confirmed_structure(client, use_scorer):
     assert body["target"] == "import"
     assert body["failure_codes"] == ["E1"]
     assert body["override"]["column_mapping"] == {"name": 1, "max_score": 2, "description": 3}
-    assert body["preview"] == [{"name": "选题", "max_score": 10.0, "row_number": 2}]
+    assert body["preview"] == [{"name": "选题", "max_score": 10.0, "row_number": 2, "dimension": None}]
     imported = client.post(
         "/api/rubrics/import-files",
         data={"name": "按结构导入", "version": "v1", "structure_override": json.dumps(body["override"])},

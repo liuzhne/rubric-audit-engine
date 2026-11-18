@@ -7,5 +7,5 @@
  *
  * **必须与 backend/app/core/contract.py 的 API_CONTRACT_VERSION 一致**（后端测试校验）。
  */
-export const API_CONTRACT_VERSION = "2026-11-16.assistant-choice";
+export const API_CONTRACT_VERSION = "2026-11-17.import-structure-check";
 export const API_CONTRACT_HEADER = "X-PGS-Contract";

@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { apiUrl } from "@/api/client";
 import { DOCUMENT_TYPES, documentTypeKey, documentTypeLabel } from "@/lib/document-types.js";
+import ImportStructureCheck from "@/components/ImportStructureCheck.vue";
 
 const props = defineProps({
   session: { type: Object, required: true },
@@ -21,6 +22,7 @@ const emit = defineEmits([
   "pick-rules", "pick-template", "preview-source", "reupload", "update-session",
   "update-criterion", "add-criterion", "delete-criterion", "resolve-conflict", "confirm", "cancel",
   "confirm-reupload", "cancel-reupload", "close-source-preview", "save", "score-check",
+  "apply-structure", "dismiss-structure",
 ]);
 
 const currentType = computed(() => documentTypeKey(props.session.business_profile_key));
@@ -227,6 +229,8 @@ function updateCriterion(index, field, event) {
           <button data-test="confirm-reupload" class="btn btn-primary" type="button" :disabled="busy || readonly" @click="emit('confirm-reupload')">确认替换草稿</button></div>
       </section>
 
+      <ImportStructureCheck v-if="!persisted && !initial && session.structure_check" :check="session.structure_check"
+        :busy="busy" :readonly="readonly" @apply="emit('apply-structure')" @dismiss="emit('dismiss-structure')" />
       <div v-if="recognition && activeTab === 'table'"><slot name="table-analysis" /></div>
       <section v-show="!recognition || activeTab === 'table'" class="card criteria-card">
         <div class="criteria-head"><div><h2 class="card-title">解析出的评分项</h2>
