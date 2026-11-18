@@ -592,6 +592,7 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-18 | 同名分值列评审修正 | 分值列判断排除整行说明、接受“4分”；合计标签取数；按确认结构重新解析也记录声明满分；分组编号不算像分值的列；调用链不变 |
 | 2026-11-17 | 导入评分表时自动识别表格结构 | 新增 `rubric_import/structure_check.py`、`ai_tasks/wake.py`、`ImportStructureCheck.vue`；导入会话有强信号时自动建结构识别任务，对照与采用走代码；状态存 `draft_data.structure_check`，无迁移 |
 | 2026-11-17 | 同名分值列、带说明的合计行与强信号 | `rubric_import/extraction/table_extractor.py` 区分评分项满分与上级分值、识别带说明的合计行与表头声明满分、档位列降级为说明；`triggers.py` 增加 `strong` 与 E10/E11；无迁移，调用链不变 |
 | 2026-11-17 | 评分助手回复不露引用编号 | `agent/reply.validate_reply` 去掉记号之后、注入检测与说法核对之前，把本回合登记过的编号去掉或换成名称（`TurnRefs.label_of`），没有名称可换整体作废；提示词与工具定义不变，调用链与持久化边界不变 |
@@ -845,6 +846,8 @@ XLSX 适配器继续以 `unit_id` 保留合并单元格来源；确定性表格�
 
 维护记录：2026-11-17 · 同名分值列与强信号：核对表头解析、台账登记与触发链路；`raw_parse_output.triggers` 每条多一个 `strong` 字段，其余持久化不变。
 
+维护记录：2026-11-18 · 同名分值列评审修正：判断分值列时排除整行合并的说明行（它跨多行时会让每列都像纵向合并）、“4分”这类文字也算分值；合计行标签里直接写的数（“总分：100”）作为声明满分；`extract_with_override` 同样记录表头声明的满分；E3 的编号判断包括分组后从 1 重新编号。调用链与持久化不变。
+
 ### 2026-11-17 导入评分表时自动识别表格结构
 
 `IMPORT_STRUCTURE_AUTO_ENABLED` 打开后，导入链路多一段（`services/rubric_import/structure_check.py`）：
@@ -857,7 +860,8 @@ POST /import-sessions（或会话 reupload-confirm）
     → create_ai_task(kind=structure_suggestion, rubric_id=None, 目标 import) → ai_tasks.wake.wake_task
 GET /import-sessions/{id} → structure_check.refresh（任务成功后把结果缓存进会话）→ view：按原表行号对齐当前草稿
     与 import_structure_preview（按模型结构从原表取出的评分项），给出逐行差异、合计、列用途变化
-POST …/structure/apply → 用会话原文件带 structure_override 重新 prepare_file_import，apply_reupload 替换草稿
+POST …/structure/apply → 用会话原文件带 structure_override 重新 prepare_file_import，keep_manual_items 保留人工新增项
+    （编号冲突时顺延），apply_reupload 替换草稿
 POST …/structure/dismiss → 只记选择
 ```
 
@@ -868,6 +872,8 @@ POST …/structure/dismiss → 只记选择
 - 前端：`ImportStructureCheck.vue` 放在导入页“解析出的评分项”上方；`RubricsView` 在 `running` 时每 3 秒刷新会话；对照未处理（`running` / `differs`）时点“确认评分项，下一步”先二次确认。
 
 维护记录：2026-11-17 · 导入评分表时自动识别表格结构：核对导入、AI 任务、会话持久化与前端调用链；无迁移，评分链不变。
+
+维护记录：2026-11-18 · 采用识别结果保留人工新增项：此前整份替换会丢掉会话里人工新增的评分项（页面新增项编号同为 `C%02d`）；改为保留并在编号冲突时顺延。
 
 ### 2026-09-21 合并父级评分项层级展示修正
 

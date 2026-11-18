@@ -300,6 +300,9 @@ _TOTAL_NAMES = {"合计", "总分", "总计"}
 # “合计（满分 100 分）”“总分：100”一类带说明的写法也是合计行；“总计划安排”不是。
 _TOTAL_PREFIX = re.compile(r"^(?:合计|总分|总计)(?:$|[\s（(：:])")
 _DECLARED_TOTAL = re.compile(r"满分\s*[:：]?\s*(\d+(?:\.\d+)?)\s*分")
+# 合计行标签里直接写的数：“总分：100”“合计 100 分”。
+_TOTAL_LABEL_VALUE = re.compile(r"^(?:合计|总分|总计)\s*[（(:：]?\s*(\d+(?:\.\d+)?)\s*分?\s*[）)]?$")
+_SCORE_TEXT = re.compile(r"^\s*\d+(?:\.\d+)?\s*分?\s*$")
 _DECLARED_LABELS = {"满分", "总分"}
 DUPLICATE_SCORE_COLUMN = "DUPLICATE_SCORE_COLUMN"
 
@@ -392,6 +395,12 @@ def total_row(row_number: int, values, mapping: dict) -> dict:
         if declared is not None:
             break
     if declared is None:
+        for value in values:
+            match = _TOTAL_LABEL_VALUE.match(_normalize(value)) if value is not None else None
+            if match:
+                declared = float(match.group(1))
+                break
+    if declared is None:
         declared = _parse_score(_value(values, mapping.get("max_score")))
     return {"row_number": row_number, "declared_total": declared}
 
@@ -425,9 +434,21 @@ def _header_declared_total(sheet: SheetView, header_index: int) -> dict | None:
     return {"value": value, "unit_ids": list(dict.fromkeys(unit_ids))}
 
 
+def _row_wide_note(sheet: SheetView, row_index: int) -> bool:
+    """整行只有一个跨多列的合并单元格：表尾说明一类，不是数据行。
+
+    它若同时跨多行，会让每一列都“看起来纵向合并”，判断分值列时必须排除。"""
+
+    units = sheet.row_units(row_index)
+    distinct = {unit for unit in units if unit}
+    return len(distinct) == 1 and sum(1 for unit in units if unit) > 1
+
+
 def _data_column_units(sheet: SheetView, header_index: int, column: int) -> list[tuple[int, str]]:
     units = []
     for row_index in range(header_index + 1, len(sheet.rows)):
+        if _row_wide_note(sheet, row_index):
+            continue
         unit = sheet.unit_at(row_index, column)
         if unit:
             units.append((row_index, unit))
@@ -447,8 +468,18 @@ def _is_vertically_merged(sheet: SheetView, header_index: int, column: int) -> b
 
 def _numeric_column(sheet: SheetView, header_index: int, column: int) -> bool:
     values = [sheet.rows[row][column] for row, _ in _data_column_units(sheet, header_index, column)]
-    numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    numbers = [v for v in values if _is_score_value(v)]
     return bool(values) and len(numbers) / len(values) >= 0.5
+
+
+def _is_score_value(value) -> bool:
+    """数字，或“4分”“4.5 分”这类只写分数的文字（布尔值不算）。"""
+
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    return isinstance(value, str) and bool(_SCORE_TEXT.match(value))
 
 
 def _resolve_score_columns(sheet: SheetView, header_index: int, mapping: dict, header_aliases) -> tuple[dict, list, dict | None]:

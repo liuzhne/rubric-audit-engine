@@ -11,6 +11,7 @@ from backend.app.services.rubric_import.extraction.table_extractor import Extrac
 from backend.app.services.rubric_import.extraction.table_extractor import TableExtraction
 from backend.app.services.rubric_import.extraction.table_extractor import _claim_sheet
 from backend.app.services.rubric_import.extraction.table_extractor import _criterion_from_row
+from backend.app.services.rubric_import.extraction.table_extractor import _header_declared_total
 from backend.app.services.rubric_import.extraction.table_extractor import _is_full_row_note
 from backend.app.services.rubric_import.extraction.table_extractor import _normalize
 from backend.app.services.rubric_import.extraction.table_extractor import _parse_score
@@ -136,6 +137,8 @@ def extract_with_override(sheets: list[SheetView], ledger: SourceLedger, overrid
         result.records.append(ExtractedRow(row_number, tuple(values), units, criterion))
     if not result.records:
         raise StructureOverrideError("NO_CRITERIA", "按确认的结构没有识别到评分项。")
+    # 与自动抽取一致：表头上方声明的满分留给 E4 核对，单元登记为结构性内容。
+    result.declared_total = _header_declared_total(sheet, header_index)
     _claim_sheet(result, sheet, ledger)
     for other in sheets:
         if other.title == sheet.title:

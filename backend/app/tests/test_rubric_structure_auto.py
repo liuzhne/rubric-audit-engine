@@ -221,3 +221,51 @@ def test_reupload_of_existing_rubric_starts_draft_identification(client, use_sco
     assert "max_score" not in scorer.calls[0][1]["known_mapping"]
     suggestion = client.get(f"/api/rubrics/{rubric_id}/parse-coverage").json().get("structure_suggestions")
     assert suggestion is not None
+
+
+def test_keep_manual_items_renumbers_on_code_collision():
+    from backend.app.services.rubric_import.structure_check import keep_manual_items
+
+    parsed = [{"code": f"C{i:02d}", "name": f"项{i}", "max_score": 1, "source_refs": [{"kind": "excel", "row_number": i}],
+               "display_order": i - 1} for i in range(1, 4)]
+    current = [
+        {"code": "C01", "name": "旧解析项", "max_score": 10, "source_refs": [{"kind": "excel", "row_number": 1}]},
+        {"code": "C02", "name": "人工项", "max_score": 3, "source_refs": [], "parse_status": "manual"},
+        {"code": "C09", "name": "人工项二", "max_score": 2, "source_refs": [], "parse_status": "manual"},
+        {"code": "C05", "name": "已删除的人工项", "max_score": 1, "source_refs": [], "deleted": True},
+    ]
+    merged = keep_manual_items(current, parsed)
+    assert [(item["code"], item["name"]) for item in merged] == [
+        ("C01", "项1"), ("C02", "项2"), ("C03", "项3"), ("C04", "人工项"), ("C09", "人工项二")]
+    assert [item["display_order"] for item in merged] == [0, 1, 2, 3, 4]
+    assert merged[3]["max_score"] == 3 and merged[3]["parse_status"] == "manual"
+
+
+def test_apply_keeps_manual_item_added_before_reupload(client, use_scorer, auto_on):
+    use_scorer(MODEL_STRUCTURE, MODEL_STRUCTURE)
+    body = _create(client, _ambiguous_scores_xlsx())
+    criteria = body["criteria"] + [{"code": "C06", "name": "人工补充项", "max_score": 5, "description": "",
+                                    "display_order": 5, "source_refs": [], "parse_status": "manual", "deleted": False}]
+    edited = client.patch(f"/api/rubrics/import-sessions/{body['id']}",
+                          json={"expected_state_version": body["state_version"], "criteria": criteria,
+                                "total_score": 65})
+    assert edited.status_code == 200, edited.text
+    version = edited.json()["state_version"]
+    files = {"rules_file": ("rules.xlsx", _ambiguous_scores_xlsx(), XLSX)}
+    preview = client.post(f"/api/rubrics/import-sessions/{body['id']}/reupload-preview",
+                          data={"expected_state_version": version}, files=files)
+    assert preview.status_code == 200, preview.text
+    replaced = client.post(f"/api/rubrics/import-sessions/{body['id']}/reupload-confirm",
+                           data={"expected_state_version": version, "fingerprint": preview.json()["fingerprint"]},
+                           files={"rules_file": ("rules.xlsx", _ambiguous_scores_xlsx(), XLSX)})
+    assert replaced.status_code == 200, replaced.text
+    _drain(client)
+    current = _session(client, body["id"])
+    assert current["structure_check"]["status"] == "differs"
+    assert current["structure_check"]["comparison"]["proposed_total"] == 30
+    applied = client.post(f"/api/rubrics/import-sessions/{body['id']}/structure/apply",
+                          json={"expected_state_version": current["state_version"]})
+    assert applied.status_code == 200, applied.text
+    names = [(item["code"], item["name"], item["max_score"]) for item in applied.json()["criteria"]]
+    assert names[-1] == ("C06", "人工补充项", 5)
+    assert sum(item[2] for item in names) == 30

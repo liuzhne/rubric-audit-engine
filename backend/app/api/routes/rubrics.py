@@ -366,6 +366,9 @@ def apply_rubric_import_structure(
             structure_override=override,
         ).to_mapping()
         draft, adjustments = import_sessions.draft_from_prepared(prepared)
+        draft["criteria"] = structure_check.keep_manual_items(
+            (row.draft_data or {}).get("criteria") or [], draft["criteria"]
+        )
         check = (row.draft_data or {}).get("structure_check")
         import_sessions.apply_reupload(
             row,

@@ -124,6 +124,37 @@ def start_for_rubric(db: Session, rubric_id: str, principal) -> models.AITask | 
     return task if created and task.status in ACTIVE_TASK_STATUSES else None
 
 
+def _manual_items(criteria) -> list[dict]:
+    """人工新增的评分项：没有任何原文来源（页面“新增评分项”）。重新解析不会产生它们。"""
+
+    return [item for item in criteria if not item.get("deleted") and not item.get("source_refs")]
+
+
+def keep_manual_items(current: list[dict], parsed: list[dict]) -> list[dict]:
+    """采用识别结果时保留人工新增项，排在解析结果之后。
+
+    页面新增项的编号也是 ``C%02d``，可能与重新解析出的编号相同；相同时人工项改用下一个
+    空闲编号，名称、分值、说明不变（docs/评分表结构自动识别方案.md §5）。
+    """
+
+    merged = deepcopy(parsed)
+    used = {str(item["code"]) for item in merged}
+    ordinal = len(merged)
+    for item in _manual_items(current):
+        kept = deepcopy(item)
+        if str(kept["code"]) in used:
+            ordinal = max(ordinal, len(used))
+            code = None
+            while code is None or code in used:
+                ordinal += 1
+                code = "C%02d" % ordinal
+            kept["code"] = code
+        used.add(str(kept["code"]))
+        kept["display_order"] = len(merged)
+        merged.append(kept)
+    return merged
+
+
 def _rows_by_number(criteria) -> dict[int, dict]:
     rows = {}
     for item in criteria:
@@ -184,7 +215,7 @@ def compare(criteria: list[dict], result: dict, current_columns: list[dict] | No
             "proposed_max_score": new["max_score"] if new else None,
             "proposed_dimension": new.get("dimension") if new else None,
         })
-    manual = [item for item in criteria if not item.get("deleted") and not _rows_by_number([item])]
+    manual = _manual_items(criteria)
     current_total = sum(float(item["max_score"]) for item in criteria if not item.get("deleted"))
     proposed_total = sum(float(item["max_score"]) for item in result.get("preview") or []) + sum(
         float(item["max_score"]) for item in manual
@@ -286,6 +317,6 @@ def mark(row: models.RubricImportSession, **values) -> None:
 
 
 __all__ = [
-    "StructureCheckError", "compare", "mark", "override_for_apply", "refresh", "signals_of", "start",
+    "StructureCheckError", "compare", "keep_manual_items", "mark", "override_for_apply", "refresh", "signals_of", "start",
     "start_for_rubric", "view",
 ]

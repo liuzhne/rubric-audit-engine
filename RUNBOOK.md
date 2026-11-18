@@ -1290,7 +1290,7 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 .venv/bin/python -c "import sys;from backend.app.services.rubric_import.sources.units import SourceLedger as L;from backend.app.services.rubric_import.sources.xlsx_adapter import load_xlsx;from backend.app.services.rubric_import.extraction.table_extractor import extract_table;l=L();r=extract_table(load_xlsx(open(sys.argv[1],'rb').read(),l,doc_id='excel',doc_role='rules'),l);print(r.mapping,r.dimension_score_columns,r.total_row,r.declared_total,r.structure_issues);[print(x.row_number,x.criterion.name,x.criterion.max_score,x.criterion.dimension) for x in r.records]" 评分表.xlsx
 ```
 
-修复后：纵向合并的分值列记入 `dimension_score_columns`，各组加总与上级分值不一致时 `structure_issues` 有 `DUPLICATE_SCORE_COLUMN`（触发 E10，强信号）。合计行或表头声明的满分与合计不一致时触发 E4。已经导入的会话不会自动改正，需要重新上传。
+2026-11-18 起，判断哪一列是上下合并的上级分值时，会排除整行合并的表尾说明（它跨多行时会让每一列都像上下合并），“4分”这类文字也算分值。修复后：纵向合并的分值列记入 `dimension_score_columns`，各组加总与上级分值不一致时 `structure_issues` 有 `DUPLICATE_SCORE_COLUMN`（触发 E10，强信号）。合计行或表头声明的满分与合计不一致时触发 E4。已经导入的会话不会自动改正，需要重新上传。
 
 ### 评分标准条款确认与原型还原（2026-09-13，已部署，待登录验收）
 
@@ -1355,6 +1355,7 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-18 | 同名分值列评审修正 | 无迁移、无新命令；排错 11.22 补充整行说明与“4分”写法 |
 | 2026-11-17 | 导入评分表时自动识别表格结构 | 新开关 `IMPORT_STRUCTURE_AUTO_ENABLED`（默认关）；无迁移；新接口 `…/structure/apply`、`…/structure/dismiss`；契约版本 `2026-11-17.import-structure-check`；提示词 `rubric-structure@3`；排错：卡片一直识别中、识别结果过期 |
 | 2026-11-17 | 同名分值列与强信号 | 无迁移、无新命令、无新开关；触发条件多一个 `strong` 字段与 E10/E11；排错 11.22（满分都一样、合计远超满分） |
 | 2026-11-17 | 评分助手回复不露引用编号 | 无迁移、无新命令、提示词指纹不变（评测报告仍有效）；新增一条排错（回复里名称出现两次）；评测价目登记 GLM-4.7-Flash |
@@ -3685,4 +3686,6 @@ python -m backend.app.scripts.estimate_section_summaries <document_snapshot_id>
   - 真正原因：识别期间用户改过草稿（改名、改分、删项都会升 `state_version`），按建任务时的版本判断结果已过期，避免覆盖人工修改。重新上传同一份文件会重新识别（命中指纹时直接复用结果，不再调用模型）。
 
 维护记录：2026-11-17 · 导入评分表时自动识别表格结构：新开关、两个接口、契约与提示词版本、两条排错。
+
+维护记录：2026-11-18 · 采用识别结果保留人工新增项：编号冲突的人工项会改用下一个空闲编号，采用后编号变化属预期。
 
