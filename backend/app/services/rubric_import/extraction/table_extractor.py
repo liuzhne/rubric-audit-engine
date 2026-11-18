@@ -20,6 +20,8 @@ HEADER_ALIASES = {
         "评分项",
         "评分指标",
         "评价内容",
+        # 多级指标表：二级指标是评分项，一级指标是维度（见 dimension）。
+        "二级指标",
         "指标",
         "评价项目",
         "项目",
@@ -36,6 +38,11 @@ HEADER_ALIASES = {
         "标准说明",
         "具体要求",
         "描述",
+        # “打分规则（分档 / 扣分）”一类混写列是规则正文，不能因含“分档”被当成档位列。
+        "打分规则",
+        "评分规则",
+        "评分细则",
+        "评分要求",
         "description",
     ],
     "evidence_hints": ["依据", "证据", "证据提示", "章节依据", "相关章节", "关键词", "evidence_hints"],
@@ -44,7 +51,7 @@ HEADER_ALIASES = {
     "criterion_type": ["类型", "判定类型", "评分类型", "判定方式", "type"],
     "applies_to": ["适用范围", "适用章节", "作用范围", "范围", "applies_to"],
     "rubric_levels": ["分档", "档位", "等级标准", "评分档次", "rubric_levels"],
-    "dimension": ["维度", "评价维度", "评分维度", "所属维度", "dimension"],
+    "dimension": ["维度", "评价维度", "评分维度", "所属维度", "一级指标", "dimension"],
     "sub_checks": ["子检查", "子项", "子检查项", "混合子项", "子项检查", "sub_checks"],
 }
 
@@ -95,7 +102,7 @@ def _find_header(rows, header_aliases=None):
 def _criterion_from_row(row, mapping, order):
     item_label = _value(row, mapping.get("item_label"))
     name = _value(row, mapping.get("name")) or _name_from_item_label(item_label) or item_label
-    if not name or name in {"合计", "总分", "总计"}:
+    if not name or is_total_name(name):
         return None
     max_score = _parse_score(_value(row, mapping.get("max_score")))
     if max_score is None:
@@ -290,6 +297,25 @@ def header_aliases_for(business_profile_key: str | None) -> dict[str, list[str]]
 
 
 _TOTAL_NAMES = {"合计", "总分", "总计"}
+# “合计（满分 100 分）”“总分：100”一类带说明的写法也是合计行；“总计划安排”不是。
+_TOTAL_PREFIX = re.compile(r"^(?:合计|总分|总计)(?:$|[\s（(：:])")
+_DECLARED_TOTAL = re.compile(r"满分\s*[:：]?\s*(\d+(?:\.\d+)?)\s*分")
+# 合计行标签里直接写的数：“总分：100”“合计 100 分”。
+_TOTAL_LABEL_VALUE = re.compile(r"^(?:合计|总分|总计)\s*[（(:：]?\s*(\d+(?:\.\d+)?)\s*分?\s*[）)]?$")
+_SCORE_TEXT = re.compile(r"^\s*\d+(?:\.\d+)?\s*分?\s*$")
+_DECLARED_LABELS = {"满分", "总分"}
+DUPLICATE_SCORE_COLUMN = "DUPLICATE_SCORE_COLUMN"
+
+
+def is_total_name(value) -> bool:
+    if value is None:
+        return False
+    return bool(_TOTAL_PREFIX.match(_normalize(value)))
+
+
+def _declared_from_text(value) -> float | None:
+    match = _DECLARED_TOTAL.search(_normalize(value)) if value is not None else None
+    return float(match.group(1)) if match else None
 IGNORED_SHEET_REASON = "仅解析第一张识别到评分项的工作表"
 NO_HEADER_REASON = "未识别到评分规则表头"
 
@@ -315,6 +341,10 @@ class TableExtraction:
     total_row: dict | None = None
     ignored_sheets: list = field(default_factory=list)
     structure_issues: list = field(default_factory=list)
+    # 表头上方声明的满分（标题里的“满分 100 分”或“满分 | 100”），供 E4 核对。
+    declared_total: dict | None = None
+    # 与评分项满分列同名、按维度纵向合并的上级分值列（0 基）；不是评分项字段。
+    dimension_score_columns: list = field(default_factory=list)
 
 
 def _extract_rows(sheet: SheetView, header_index: int, mapping: dict) -> TableExtraction:
@@ -327,6 +357,10 @@ def _extract_rows(sheet: SheetView, header_index: int, mapping: dict) -> TableEx
     for offset, values in enumerate(sheet.rows[header_index + 1 :], start=header_index + 1):
         row_number = offset + 1
         units = sheet.row_units(offset)
+        if any(units) and any(is_total_name(value) for value in values if value is not None) \
+                and _criterion_from_row(values, mapping, len(result.records) + 1) is None:
+            result.total_row = total_row(row_number, values, mapping)
+            continue
         if _is_full_row_note(units, mapping):
             result.dropped_rows.append(
                 {"row_number": row_number, "unit_ids": [u for u in dict.fromkeys(units) if u], "reason": "整行合并的说明行"}
@@ -339,11 +373,8 @@ def _extract_rows(sheet: SheetView, header_index: int, mapping: dict) -> TableEx
         if not any(units):
             continue
         name = _value(values, mapping.get("name")) or _value(values, mapping.get("item_label"))
-        if name in _TOTAL_NAMES or any(_normalize(value) in _TOTAL_NAMES for value in values if value is not None):
-            result.total_row = {
-                "row_number": row_number,
-                "declared_total": _parse_score(_value(values, mapping.get("max_score"))),
-            }
+        if is_total_name(name) or any(is_total_name(value) for value in values if value is not None):
+            result.total_row = total_row(row_number, values, mapping)
             continue
         result.dropped_rows.append(
             {
@@ -353,6 +384,199 @@ def _extract_rows(sheet: SheetView, header_index: int, mapping: dict) -> TableEx
             }
         )
     return result
+
+
+def total_row(row_number: int, values, mapping: dict) -> dict:
+    """合计行与它声明的满分：优先取文字里的“满分 N 分”，其次取满分列的数字。"""
+
+    declared = None
+    for value in values:
+        declared = _declared_from_text(value)
+        if declared is not None:
+            break
+    if declared is None:
+        for value in values:
+            match = _TOTAL_LABEL_VALUE.match(_normalize(value)) if value is not None else None
+            if match:
+                declared = float(match.group(1))
+                break
+    if declared is None:
+        declared = _parse_score(_value(values, mapping.get("max_score")))
+    return {"row_number": row_number, "declared_total": declared}
+
+
+def _header_declared_total(sheet: SheetView, header_index: int) -> dict | None:
+    """表头上方声明的满分。多处写法一致才采用，互相矛盾时不猜。"""
+
+    found: dict[float, list[str]] = {}
+    for row_index in range(header_index):
+        values = sheet.rows[row_index]
+        units = sheet.row_units(row_index)
+        for column, value in enumerate(values):
+            if value is None:
+                continue
+            declared = _declared_from_text(value)
+            unit_ids = [units[column]] if column < len(units) and units[column] else []
+            if declared is None and _normalize(value) in _DECLARED_LABELS:
+                for offset in range(column + 1, len(values)):
+                    neighbour = values[offset]
+                    if neighbour is None or units[offset] == units[column]:
+                        continue
+                    if isinstance(neighbour, (int, float)) and not isinstance(neighbour, bool):
+                        declared = float(neighbour)
+                        unit_ids.append(units[offset])
+                    break
+            if declared is not None:
+                found.setdefault(declared, []).extend(unit for unit in unit_ids if unit)
+    if len(found) != 1:
+        return None
+    value, unit_ids = next(iter(found.items()))
+    return {"value": value, "unit_ids": list(dict.fromkeys(unit_ids))}
+
+
+def _row_wide_note(sheet: SheetView, row_index: int) -> bool:
+    """整行只有一个跨多列的合并单元格：表尾说明一类，不是数据行。
+
+    它若同时跨多行，会让每一列都“看起来纵向合并”，判断分值列时必须排除。"""
+
+    units = sheet.row_units(row_index)
+    distinct = {unit for unit in units if unit}
+    return len(distinct) == 1 and sum(1 for unit in units if unit) > 1
+
+
+def _data_column_units(sheet: SheetView, header_index: int, column: int) -> list[tuple[int, str]]:
+    units = []
+    for row_index in range(header_index + 1, len(sheet.rows)):
+        if _row_wide_note(sheet, row_index):
+            continue
+        unit = sheet.unit_at(row_index, column)
+        if unit:
+            units.append((row_index, unit))
+    return units
+
+
+def _vertical_groups(sheet: SheetView, header_index: int, column: int) -> dict[str, list[int]]:
+    groups: dict[str, list[int]] = {}
+    for row_index, unit in _data_column_units(sheet, header_index, column):
+        groups.setdefault(unit, []).append(row_index)
+    return groups
+
+
+def _is_vertically_merged(sheet: SheetView, header_index: int, column: int) -> bool:
+    return any(len(rows) > 1 for rows in _vertical_groups(sheet, header_index, column).values())
+
+
+def _numeric_column(sheet: SheetView, header_index: int, column: int) -> bool:
+    values = [sheet.rows[row][column] for row, _ in _data_column_units(sheet, header_index, column)]
+    numbers = [v for v in values if _is_score_value(v)]
+    return bool(values) and len(numbers) / len(values) >= 0.5
+
+
+def _is_score_value(value) -> bool:
+    """数字，或“4分”“4.5 分”这类只写分数的文字（布尔值不算）。"""
+
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    return isinstance(value, str) and bool(_SCORE_TEXT.match(value))
+
+
+def _resolve_score_columns(sheet: SheetView, header_index: int, mapping: dict, header_aliases) -> tuple[dict, list, dict | None]:
+    """表头里有多列都叫“分值”时，分清评分项满分与上级（维度）分值。
+
+    纵向合并、跨多行共用一个单元格的列是上级分值；每行一个值的列才是评分项满分。
+    能用“各项满分之和 = 上级分值”核对通过时静默采用；特征不明确或核对不通过时
+    仍按最可能的列解析，但记一条结构问题（E10），交给模型识别与用户确认。
+    """
+
+    current = mapping.get("max_score")
+    if current is None:
+        return mapping, [], None
+    aliases = [_normalize_header(alias) for alias in (header_aliases or HEADER_ALIASES)["max_score"]]
+    used = {column for name, column in mapping.items() if name != "max_score"}
+    headers = [_normalize_header(cell) for cell in sheet.rows[header_index]]
+    candidates = [
+        column for column, header in enumerate(headers)
+        if column not in used and header and any(header == alias or alias in header for alias in aliases)
+        and _numeric_column(sheet, header_index, column)
+    ]
+    if current not in candidates:
+        candidates.insert(0, current)
+    if len(candidates) < 2:
+        return mapping, [], None
+    per_row = [column for column in candidates if not _is_vertically_merged(sheet, header_index, column)]
+    merged = [column for column in candidates if column not in per_row]
+    issue = {"code": DUPLICATE_SCORE_COLUMN, "columns": [column + 1 for column in candidates],
+             "unit_ids": [unit for unit in sheet.row_units(header_index) if unit]}
+    if len(per_row) != 1 or not merged:
+        return mapping, [], {**issue, "reason": "无法判断哪一列是评分项满分。"}
+    revised = dict(mapping)
+    revised["max_score"] = per_row[0]
+    if not _parent_sums_match(sheet, header_index, per_row[0], merged):
+        return revised, merged, {**issue, "reason": "评分项满分之和与上级分值不一致。"}
+    if "dimension" not in revised:
+        dimension = _parent_text_column(sheet, header_index, merged[0], set(revised.values()) | set(merged))
+        if dimension is not None:
+            revised["dimension"] = dimension
+    return revised, merged, None
+
+
+def _parent_sums_match(sheet: SheetView, header_index: int, item_column: int, parent_columns: list) -> bool:
+    for parent in parent_columns:
+        for unit, rows in _vertical_groups(sheet, header_index, parent).items():
+            if len(rows) < 2:
+                # 单行的上级分值格（或表尾说明、合计行）不构成父子关系，不参与核对。
+                continue
+            parent_value = _parse_score(sheet.rows[rows[0]][parent])
+            item_scores = [_parse_score(sheet.rows[row][item_column]) for row in rows]
+            if parent_value is None or any(score is None for score in item_scores):
+                return False
+            if abs(sum(item_scores) - parent_value) > 1e-6:
+                return False
+    return True
+
+
+def _parent_text_column(sheet: SheetView, header_index: int, parent_column: int, taken: set) -> int | None:
+    """与上级分值列合并范围完全一致的文字列，就是上级（维度）名称。"""
+
+    signature = sorted(tuple(rows) for rows in _vertical_groups(sheet, header_index, parent_column).values())
+    width = len(sheet.rows[header_index])
+    for column in range(width):
+        if column in taken:
+            continue
+        groups = _vertical_groups(sheet, header_index, column)
+        if groups and sorted(tuple(rows) for rows in groups.values()) == signature:
+            return column
+    return None
+
+
+_BAND_EXACT_HEADERS = {"分档", "档位", "等级标准", "评分档次", "rubric_levels"}
+_BAND_LABEL_MAX = 6
+
+
+def _tidy_bands(levels: list, max_score: float) -> bool:
+    if len(levels) < 2:
+        return False
+    for level in levels:
+        label = level.get("label")
+        points = level.get("points")
+        if not label or points is None or points > max_score or len(label) > _BAND_LABEL_MAX or "扣" in label:
+            return False
+    return True
+
+
+def _band_column_is_prose(result: "TableExtraction") -> bool:
+    """按包含关系匹配到的档位列，多数行拆不出整齐的“档名 + 分数”时，它其实是规则正文。"""
+
+    column = result.mapping.get("rubric_levels")
+    if column is None or _normalize_header(result.headers[column]) in _BAND_EXACT_HEADERS:
+        return False
+    rows = [row for row in result.records if row.criterion.rubric_levels]
+    if not rows:
+        return False
+    tidy = sum(1 for row in rows if _tidy_bands(row.criterion.rubric_levels, row.criterion.max_score))
+    return tidy / len(rows) < 0.5
 
 
 def _shared_name_groups(extraction: TableExtraction) -> list[tuple[str, list[ExtractedRow]]]:
@@ -437,10 +661,23 @@ def _extract_sheet(sheet: SheetView, header_aliases):
     header_index, mapping = _find_header(sheet.rows, header_aliases)
     if header_index is None:
         return None
+    mapping, parent_scores, score_issue = _resolve_score_columns(sheet, header_index, mapping, header_aliases)
     result = _extract_rows(sheet, header_index, mapping)
+    if _band_column_is_prose(result):
+        mapping = dict(mapping)
+        column = mapping.pop("rubric_levels")
+        if "description" not in mapping:
+            mapping["description"] = column
+        result = _extract_rows(sheet, header_index, mapping)
+    result.dimension_score_columns = parent_scores
+    if score_issue:
+        result.structure_issues.append(score_issue)
+    result.declared_total = _header_declared_total(sheet, header_index)
     revised_mapping = _hierarchy_mapping(result)
     if revised_mapping != mapping:
+        carried = (result.dimension_score_columns, result.structure_issues, result.declared_total)
         result = _extract_rows(sheet, header_index, revised_mapping)
+        result.dimension_score_columns, result.structure_issues, result.declared_total = carried
         # The merged evaluation content is the semantic title of each scored row.
         # Keep the item label as the stable code rather than the displayed name.
         title_counts = {}
@@ -484,9 +721,16 @@ def _claim_sheet(result: TableExtraction, sheet: SheetView, ledger: SourceLedger
         for unit_id in sheet.row_units(result.total_row["row_number"] - 1):
             if unit_id:
                 ledger.mark(unit_id, "structural", reason="合计行")
+    for column in result.dimension_score_columns:
+        for row in result.records:
+            if column < len(row.unit_ids) and row.unit_ids[column]:
+                ledger.mark(row.unit_ids[column], "structural", reason="维度分值")
+    if result.declared_total:
+        for unit_id in result.declared_total["unit_ids"]:
+            ledger.mark(unit_id, "structural", reason="声明满分")
     data_rows = len(result.records) + len(result.dropped_rows)
     for column, header in enumerate(result.headers):
-        if not header or column in fields_by_column:
+        if not header or column in fields_by_column or column in result.dimension_score_columns:
             continue
         rows = [row.unit_ids for row in result.records] + [
             sheet.row_units(item["row_number"] - 1) for item in result.dropped_rows

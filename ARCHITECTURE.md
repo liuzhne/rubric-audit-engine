@@ -592,6 +592,8 @@ RubricsView 的第 3 步按当前模板状态呈现：draft 显示条款/模板�
 
 | 日期 | 主题 | 架构核对结果 |
 |---|---|---|
+| 2026-11-18 | 同名分值列评审修正 | 分值列判断排除整行说明、接受“4分”；合计标签取数；按确认结构重新解析也记录声明满分；分组编号不算像分值的列；调用链不变 |
+| 2026-11-17 | 同名分值列、带说明的合计行与强信号 | `rubric_import/extraction/table_extractor.py` 区分评分项满分与上级分值、识别带说明的合计行与表头声明满分、档位列降级为说明；`triggers.py` 增加 `strong` 与 E10/E11；无迁移，调用链不变 |
 | 2026-11-17 | 评分助手回复不露引用编号 | `agent/reply.validate_reply` 去掉记号之后、注入检测与说法核对之前，把本回合登记过的编号去掉或换成名称（`TurnRefs.label_of`），没有名称可换整体作废；提示词与工具定义不变，调用链与持久化边界不变 |
 | 2026-11-16 | 评分助手选择卡片（#112 复审） | `agent/reply.validate_reply` 的说法核对移到 choose 校验之后，`claims.problem` 加 `choosing`；`TurnRefs.name_of`；`runner._choose_rubric` 记已选前先查已发布列表；模块边界不变 |
 | 2026-11-16 | 评分助手选择卡片（提示词 @7） | 新模块 `services/assistant/choices.py`；Agent 回复契约加 `choose`（`agent/reply.py`），`runner` 统一选择卡片的点击、打字兜底与选完接着回答；查询图改出 `choice` 卡片；前端 `components/assistant/ChoiceCard.vue`；历史与压缩摘要记下按钮文字与选了哪个；契约版本 `2026-11-16.assistant-choice`；无迁移 |
@@ -829,6 +831,21 @@ XLSX 适配器继续以 `unit_id` 保留合并单元格来源；确定性表格�
 若缺少稳定子项名称或原表已有 `dimension` 列，抽取器不覆盖、不去重、不追加序号，而是在 `structure_issues` 记录 `MERGED_NAME_AMBIGUOUS`，由触发器生成 E9，进入现有“结构 LLM 建议 → 用户确认”路径。独立单元格中的同名项不会触发该逻辑；分类器 LLM、`ai_rule_drafter.py`、评分引擎、数据库模型和 Alembic head `0031_rubric_import_sessions` 均不变。
 
 维护记录：2026-09-21 · 合并父级评分项名称解析修复：核对 XLSX 来源、两遍确定性抽取、E9 结构兜底和台账认领链路；数据库、规则起草和评分边界不变。
+
+### 2026-11-17 同名分值列、带说明的合计行与强信号
+
+方案见 [评分表结构自动识别方案](docs/评分表结构自动识别方案.md)。`extraction/table_extractor.py` 在找到表头后多做三步，仍然只读原文单元：
+
+- `_resolve_score_columns`：表头有多列命中满分别名（如两列“分值”）时，数据区纵向合并的列是上级（维度）分值，每行一个值的列是评分项满分；用“各项之和 = 上级分值”核对，通过则静默采用，并把合并范围一致的文字列设为维度；不通过或分不清时在 `structure_issues` 记 `DUPLICATE_SCORE_COLUMN`。上级分值列记在 `TableExtraction.dimension_score_columns`，单元登记为 `structural`（“维度分值”），不进入未映射列。
+- `is_total_name` / `total_row`：以“合计 / 总分 / 总计”开头、后接括号或冒号的行是合计行（在整行合并说明行之前判断）；声明满分优先取文字里的“满分 N 分”。`structure_override.extract_with_override` 用同一判断。
+- `_header_declared_total`：表头上方的“满分 N 分”或“满分 | N”写法一致时记为 `TableExtraction.declared_total`，单元登记为 `structural`。
+- 档位列按包含关系匹配（如“打分规则（分档 / 扣分）”）且多数行拆不出整齐档位时，改作说明列；说明列别名加入“打分规则 / 评分规则 / 评分细则 / 评分要求”，维度别名加入“一级指标”，名称别名在“指标”前加入“二级指标”。
+
+`extraction/triggers.py` 给每条触发加 `strong`：E4（合计行或表头声明的满分与解析合计不一致）、E9、E10（同名满分列未能确定）、E11（多个评分项共用一个满分单元格）以及“未识别列里数字占多数且不是连续编号”的 E3 为强信号，其余为弱信号。本节只改确定性抽取与触发判定；数据库、接口、提示词与评分链不变，无迁移。
+
+维护记录：2026-11-17 · 同名分值列与强信号：核对表头解析、台账登记与触发链路；`raw_parse_output.triggers` 每条多一个 `strong` 字段，其余持久化不变。
+
+维护记录：2026-11-18 · 同名分值列评审修正：判断分值列时排除整行合并的说明行（它跨多行时会让每列都像纵向合并）、“4分”这类文字也算分值；合计行标签里直接写的数（“总分：100”）作为声明满分；`extract_with_override` 同样记录表头声明的满分；E3 的编号判断包括分组后从 1 重新编号。调用链与持久化不变。
 
 ### 2026-09-21 合并父级评分项层级展示修正
 

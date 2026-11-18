@@ -11,11 +11,14 @@ from backend.app.services.rubric_import.extraction.table_extractor import Extrac
 from backend.app.services.rubric_import.extraction.table_extractor import TableExtraction
 from backend.app.services.rubric_import.extraction.table_extractor import _claim_sheet
 from backend.app.services.rubric_import.extraction.table_extractor import _criterion_from_row
+from backend.app.services.rubric_import.extraction.table_extractor import _header_declared_total
 from backend.app.services.rubric_import.extraction.table_extractor import _is_full_row_note
 from backend.app.services.rubric_import.extraction.table_extractor import _normalize
 from backend.app.services.rubric_import.extraction.table_extractor import _parse_score
 from backend.app.services.rubric_import.extraction.table_extractor import _sheet_units
 from backend.app.services.rubric_import.extraction.table_extractor import _value
+from backend.app.services.rubric_import.extraction.table_extractor import is_total_name
+from backend.app.services.rubric_import.extraction.table_extractor import total_row
 from backend.app.services.rubric_import.sources.units import SourceLedger
 from backend.app.services.rubric_import.sources.xlsx_adapter import SheetView
 
@@ -108,14 +111,16 @@ def extract_with_override(sheets: list[SheetView], ledger: SourceLedger, overrid
         if not present:
             continue
         row_type = row_types.get(row_number)
+        if row_type is None and _criterion_from_row(values, mapping, len(result.records) + 1) is None \
+                and any(is_total_name(value) for value in values if value is not None):
+            row_type = "total"
         if row_type is None:
             if _is_full_row_note(units, mapping):
                 result.dropped_rows.append({"row_number": row_number, "unit_ids": present, "reason": "整行合并的说明行"})
                 continue
             row_type = "criterion"
         if row_type == "total":
-            result.total_row = {"row_number": row_number,
-                                "declared_total": _parse_score(_value(values, mapping.get("max_score")))}
+            result.total_row = total_row(row_number, values, mapping)
             continue
         if row_type in ("dimension", "empty"):
             for unit_id in present:
@@ -132,6 +137,8 @@ def extract_with_override(sheets: list[SheetView], ledger: SourceLedger, overrid
         result.records.append(ExtractedRow(row_number, tuple(values), units, criterion))
     if not result.records:
         raise StructureOverrideError("NO_CRITERIA", "按确认的结构没有识别到评分项。")
+    # 与自动抽取一致：表头上方声明的满分留给 E4 核对，单元登记为结构性内容。
+    result.declared_total = _header_declared_total(sheet, header_index)
     _claim_sheet(result, sheet, ledger)
     for other in sheets:
         if other.title == sheet.title:

@@ -1276,6 +1276,22 @@ PGS_DISABLE_ENV_FILE=1 DATABASE_URL="sqlite+pysqlite:///:memory:" .venv/bin/pyth
 开发模式（`AUTH_ENABLED=false`）恒为 true——本地复现不了这一整套，要用
 `playwright test --project=llm-setup`。
 
+### 11.22 「导入的评分项满分都一样，合计远超满分」
+
+**现象**：导入 Excel 后，同一个一级指标下的评分项满分全相同（10、10、10 / 25×5……），合计比表上写的满分大很多，还多出一项“合计（满分 100 分）”。
+
+**报错指向**：评分项列表与合计；页面没有报错，导入“成功”。
+
+**真正原因**：表头有两列都叫“分值”——一列是一级指标分值（纵向合并），一列是评分项分值。2026-11-17 之前抽取器只取第一列；合计行只认完全等于“合计 / 总分 / 总计”的写法。
+
+**怎么查**：本地用同一份文件跑抽取器，看 `mapping["max_score"]`、`dimension_score_columns`、`total_row` 与 `structure_issues`：
+
+```bash
+.venv/bin/python -c "import sys;from backend.app.services.rubric_import.sources.units import SourceLedger as L;from backend.app.services.rubric_import.sources.xlsx_adapter import load_xlsx;from backend.app.services.rubric_import.extraction.table_extractor import extract_table;l=L();r=extract_table(load_xlsx(open(sys.argv[1],'rb').read(),l,doc_id='excel',doc_role='rules'),l);print(r.mapping,r.dimension_score_columns,r.total_row,r.declared_total,r.structure_issues);[print(x.row_number,x.criterion.name,x.criterion.max_score,x.criterion.dimension) for x in r.records]" 评分表.xlsx
+```
+
+2026-11-18 起，判断哪一列是上下合并的上级分值时，会排除整行合并的表尾说明（它跨多行时会让每一列都像上下合并），“4分”这类文字也算分值。修复后：纵向合并的分值列记入 `dimension_score_columns`，各组加总与上级分值不一致时 `structure_issues` 有 `DUPLICATE_SCORE_COLUMN`（触发 E10，强信号）。合计行或表头声明的满分与合计不一致时触发 E4。已经导入的会话不会自动改正，需要重新上传。
+
 ### 评分标准条款确认与原型还原（2026-09-13，已部署，待登录验收）
 
 症状：导入后有“待确认”但无正文/确认入口；完整度无缺失仍可能有编译阻断。
@@ -1339,6 +1355,8 @@ OpenRouter 起草专用请求显式携带严格 JSON Schema（包括必需的 mu
 
 | 日期 | 主题 | 操作基线变化 |
 |---|---|---|
+| 2026-11-18 | 同名分值列评审修正 | 无迁移、无新命令；排错 11.22 补充整行说明与“4分”写法 |
+| 2026-11-17 | 同名分值列与强信号 | 无迁移、无新命令、无新开关；触发条件多一个 `strong` 字段与 E10/E11；排错 11.22（满分都一样、合计远超满分） |
 | 2026-11-17 | 评分助手回复不露引用编号 | 无迁移、无新命令、提示词指纹不变（评测报告仍有效）；新增一条排错（回复里名称出现两次）；评测价目登记 GLM-4.7-Flash |
 | 2026-11-16 | 评分助手选择卡片（#112 复审） | 无迁移、无新命令、提示词指纹不变（评测报告仍有效）；“按钮已失效”排错补上标准被下线或失去访问权限的情况与核对方法；新增一条排错（候选没有名称时回复被作废重写） |
 | 2026-11-16 | 评分助手选择卡片（提示词 @7） | 无迁移、无新环境变量；提示词升 `assistant-agent@7`（先在候选镜像上评测再合并）；契约版本升为 `2026-11-16.assistant-choice`；评测集 54 条；两条排错 |
